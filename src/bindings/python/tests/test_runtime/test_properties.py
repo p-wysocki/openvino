@@ -101,8 +101,6 @@ def test_properties_enums(ov_enum, expected_values):
 
     for property_obj, property_str, property_int in expected_values:
         assert property_obj == next(enum_entries)[0]
-        print(f"\n\nstr(property_obj): {str(property_obj)}\n\n")
-        print(f"\n\nproperty_str: {property_str}\n\n")
         assert str(property_obj) == property_str
         assert int(property_obj) == property_int
 
