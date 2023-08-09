@@ -4,17 +4,19 @@
 
 import os
 
+from ..conftest import model_path
 from openvino.runtime import Input, RTMap
 from openvino._pyopenvino import DescriptorTensor
 import openvino.runtime.opset12 as ops
 
 from openvino import Core, OVAny, Shape, PartialShape, Type
-from tests.utils.helpers import get_relu_model
+
+test_net_xml, test_net_bin = model_path()
 
 
 def test_input_type(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -23,7 +25,7 @@ def test_input_type(device):
 
 def test_const_output_docs(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -33,7 +35,7 @@ def test_const_output_docs(device):
 
 def test_input_get_index(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -42,7 +44,7 @@ def test_input_get_index(device):
 
 def test_input_element_type(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -51,7 +53,7 @@ def test_input_element_type(device):
 
 def test_input_get_shape(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -60,7 +62,7 @@ def test_input_get_shape(device):
 
 def test_input_get_partial_shape(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -70,7 +72,7 @@ def test_input_get_partial_shape(device):
 
 def test_input_get_source_output(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -80,7 +82,7 @@ def test_input_get_source_output(device):
 
 def test_input_get_tensor(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -90,7 +92,7 @@ def test_input_get_tensor(device):
 
 def test_input_get_rt_info(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -100,7 +102,7 @@ def test_input_get_rt_info(device):
 
 def test_input_rt_info(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
@@ -124,7 +126,7 @@ def test_input_replace_source_output(device):
 
 def test_input_update_rt_info(device):
     core = Core()
-    model = get_relu_model()
+    model = core.read_model(model=test_net_xml, weights=test_net_bin)
     compiled_model = core.compile_model(model, device)
     net_input = compiled_model.output(0)
     input_node = net_input.get_node().inputs()[0]
