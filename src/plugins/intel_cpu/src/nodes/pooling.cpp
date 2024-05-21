@@ -174,7 +174,7 @@ Pooling::Pooling(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr c
         }
     };
 
-    if (auto maxPoolOp_v8 = ov::as_type_ptr<const ov::op::v8::MaxPool>(op)) {
+    if (auto maxPoolOp_v8 = ov::as_type_ptr<const ov::op::v14::MaxPool>(op)) {
         isMaxPool8 = true;
         algorithm = Algorithm::PoolingMax;
         poolingAttrs.exclude_pad = false;
