@@ -146,7 +146,7 @@ dnnl::pooling_forward::primitive_desc createDescriptorHelper(const dnnl::engine&
 
 bool Pooling::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept {
     try {
-        if (ov::is_type<const ov::op::v8::MaxPool>(op)) {
+        if (ov::is_type<const ov::op::v8::MaxPool>(op) || ov::is_type<const ov::op::v8::MaxPool>(op)) {
             if (!op->get_output_target_inputs(1).empty()) {
                 errorMessage = "MaxPool from opset8 is supported only with one output";
                 return false;
@@ -175,6 +175,20 @@ Pooling::Pooling(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr c
     };
 
     if (auto maxPoolOp_v8 = ov::as_type_ptr<const ov::op::v8::MaxPool>(op)) {
+        isMaxPool8 = true;
+        algorithm = Algorithm::PoolingMax;
+        poolingAttrs.exclude_pad = false;
+        poolingAttrs.rounding = maxPoolOp_v8->get_rounding_type();
+        poolingAttrs.pad_type = maxPoolOp_v8->get_auto_pad();
+
+        get_attributes(poolingAttrs.dilation, maxPoolOp_v8->get_dilations());
+        get_attributes(poolingAttrs.stride, maxPoolOp_v8->get_strides());
+        get_attributes(poolingAttrs.kernel, maxPoolOp_v8->get_kernel());
+        get_attributes(poolingAttrs.data_pad_begin, maxPoolOp_v8->get_pads_begin());
+        get_attributes(poolingAttrs.data_pad_end, maxPoolOp_v8->get_pads_end());
+
+        poolingAttrs.auto_pad = (maxPoolOp_v8->get_auto_pad() == ov::op::PadType::SAME_LOWER || maxPoolOp_v8->get_auto_pad() == ov::op::PadType::SAME_UPPER);
+    } else if (auto maxPoolOp_v8 = ov::as_type_ptr<const ov::op::v14::MaxPool>(op)) {
         isMaxPool8 = true;
         algorithm = Algorithm::PoolingMax;
         poolingAttrs.exclude_pad = false;
