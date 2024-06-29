@@ -44,6 +44,15 @@ protected:
     void SetUp() override;
 };
 
+class MaxPoolingV14LayerCPUTest : public testing::WithParamInterface<maxPoolV8LayerCpuTestParamsSet>,
+                                 virtual public SubgraphBaseTest, public CPUTestsBase {
+public:
+    static std::string getTestCaseName(const testing::TestParamInfo<maxPoolV8LayerCpuTestParamsSet>& obj);
+
+protected:
+    void SetUp() override;
+};
+
 namespace Pooling {
 const std::vector<ElementType>& inpOutPrecision();
 const ov::op::RoundingType expectedAvgRoundingType();

@@ -140,6 +140,14 @@ INSTANTIATE_TEST_SUITE_P(smoke_MaxPoolV8_CPU_5D, MaxPoolingV8LayerCPUTest,
                                  ::testing::ValuesIn(vecCpuConfigs)),
                          MaxPoolingV8LayerCPUTest::getTestCaseName);
 
+INSTANTIATE_TEST_SUITE_P(smoke_MaxPoolV14_CPU_5D, MaxPoolingV14LayerCPUTest,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(paramsMaxV85D()),
+                                 ::testing::ValuesIn(inputShapes5D()),
+                                 ::testing::ValuesIn((inpOutPrecision())),
+                                 ::testing::Values(CPUSpecificParams{{}, {}, {}, "ref"})),
+                         MaxPoolingV14LayerCPUTest::getTestCaseName);
+
 INSTANTIATE_TEST_SUITE_P(smoke_MaxPoolV8_CPU_5D_ref, MaxPoolingV8LayerCPUTest,
                          ::testing::Combine(
                                  ::testing::ValuesIn(paramsMaxV85D_ref),
