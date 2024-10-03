@@ -73,3 +73,8 @@ endif()
 if(ENABLE_TESTS)
     add_subdirectory(tests)
 endif()
+target_include_directories(${TARGET_NAME}_obj
+    PRIVATE
+        $<TARGET_PROPERTY:openvino::runtime::dev,INTERFACE_INCLUDE_DIRECTORIES>
+)
+
