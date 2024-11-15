@@ -24,12 +24,12 @@ endif()
 # define version (syncronize with src/bindings/python/wheel/CMakeLists.txt)
 
 if(DEFINED ENV{CI_BUILD_DEV_TAG} AND NOT "$ENV{CI_BUILD_DEV_TAG}" STREQUAL "")
-    set(WHEEL_VERSION "${OpenVINO_VERSION}.$ENV{CI_BUILD_DEV_TAG}")
+    set(WHEEL_VERSION "${OpenVINO_VERSION}.$ENV{CI_BUILD_DEV_TAG}" CACHE STRING "Version of this release" FORCE)
     set(wheel_pre_release ON)
 else()
-    set(WHEEL_VERSION ${OpenVINO_VERSION})
+    set(WHEEL_VERSION ${OpenVINO_VERSION} CACHE STRING "Version of this release" FORCE)
 endif()
-set(WHEEL_VERSION "${WHEEL_VERSION}+${OpenVINO_VERSION_BUILD}" CACHE STRING "Version of this release" FORCE)
+set(WHEEL_BUILD "${OpenVINO_VERSION_BUILD}" CACHE STRING "Build number of this release" FORCE)
 
 # check __init__.py files alignment
 
@@ -65,7 +65,7 @@ endif()
 
 set(SETUP_PY "${CMAKE_CURRENT_SOURCE_DIR}/setup.py")
 
-set(openvino_wheel_name "openvino_dev-${WHEEL_VERSION}-py3-none-any.whl")
+set(openvino_wheel_name "openvino_dev-${WHEEL_VERSION}-${WHEEL_BUILD}-py3-none-any.whl")
 set(openvino_wheels_output_dir "${CMAKE_BINARY_DIR}/wheels")
 set(openvino_wheel_path "${openvino_wheels_output_dir}/${openvino_wheel_name}")
 
