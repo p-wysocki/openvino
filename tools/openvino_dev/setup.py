@@ -16,6 +16,7 @@ import re
 import logging as log
 from setuptools import Command
 from setuptools.command.build import build
+from setuptools.command.bdist_wheel import bdist_wheel
 from pathlib import Path
 from fnmatch import fnmatchcase
 import pkg_resources
@@ -151,6 +152,28 @@ class CustomInstall(install):
     def run(self):
         self.run_command('build')
         install.run(self)
+
+
+class CustomBdistWheel(bdist_wheel):
+    """Custom bdist_wheel command."""
+    def initialize_options(self):
+        """Set default values for all the options that this command supports."""
+        super().initialize_options()
+
+    def finalize_options(self):
+        """Set final values for all the options that this command supports."""
+        super().finalize_options()
+        
+        platform_tag = os.getenv("PLATFORM_TAG")
+        if platform_tag:
+            self.plat_name = platform_tag
+            
+        build_number = os.getenv("WHEEL_BUILD")
+        if build_number:
+            self.build_number = build_number
+    
+    def run(self):
+        super().run()
 
 
 class CustomClean(Command):
@@ -298,6 +321,7 @@ setup(
     ],
     cmdclass={
         'build': CustomBuild,
+        "bdist_wheel": CustomBdistWheel,
         'install': CustomInstall,
         'clean': CustomClean,
     },
