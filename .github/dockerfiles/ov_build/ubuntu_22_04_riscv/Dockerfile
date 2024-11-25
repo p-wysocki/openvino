@@ -69,3 +69,5 @@ ENV PIP_VERSION="24.0"
 RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     python3 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
     rm -f get-pip.py
+
+ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
