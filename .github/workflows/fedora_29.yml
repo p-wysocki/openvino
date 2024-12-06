@@ -94,6 +94,13 @@ jobs:
             -DCPACK_GENERATOR=TGZ \
             -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
             -DCMAKE_BUILD_TYPE=Release
+      steps:
+        - name: Set up Python 3.9
+          run: |
+            dnf install -y python3.9
+            ln -sf /usr/bin/python3.9 /usr/bin/python
+            /usr/bin/python -m pip install --upgrade pip
+            /usr/bin/python -m pip install -r ./src/bindings/python/wheel/requirements-dev.txt
 
   RPM_Packages:
     name: RPM packages
