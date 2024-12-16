@@ -20,9 +20,7 @@ RUN yum update -y && yum install -y \
     gcc-c++ \
     # parallel gzip
     pigz \
-    xz \
-    # rpmlint dependency
-    rpm-python
+    xz
 
 # Install build dependencies
 ADD install_build_dependencies.sh /install_build_dependencies.sh
