@@ -21,7 +21,8 @@ RUN yum update -y && yum install -y \
     # parallel gzip
     pigz \
     xz \
-    rpm-devel
+    # rpmlint dependency
+    rpm-python
 
 # Install build dependencies
 ADD install_build_dependencies.sh /install_build_dependencies.sh
