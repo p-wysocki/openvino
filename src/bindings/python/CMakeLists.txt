@@ -340,6 +340,12 @@ if(ENABLE_PYTHON_PACKAGING)
                 SETUPTOOLS_INSTALL_LIB=${ov_install_lib}
                 SETUPTOOLS_INSTALL_SCRIPTS=${ov_python_package_prefix}/bin
                 "${Python3_EXECUTABLE}" -m pip --python=/usr/bin/python3 install --verbose --ignore-requires-python --no-deps --no-compile --break-system-packages --prefix "${ov_python_package_prefix}" "${CMAKE_CURRENT_SOURCE_DIR}" 
+        # Rename python version specific directory to python3
+        file(GLOB python_version_dirs "${ov_python_package_prefix}/lib/python3.*")
+        if(python_version_dirs)
+            get_filename_component(python_version_dirs ${python_version_dirs} NAME)
+            file(RENAME "${python_version_dir}" "${ov_python_package_prefix}/lib/python3")
+        endif()
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         DEPENDS ${ov_setup_py_deps}
         COMMENT "Create python package with ${openvino_meta_info_subdir} folder")
