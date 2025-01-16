@@ -6,7 +6,10 @@ on:
 
 jobs:
   issue_assigned:
-    permissions: write-all
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     if: github.event.action == 'assigned'
     runs-on: ubuntu-latest
     steps:
@@ -17,7 +20,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
   
   issue_unassigned:
-    permissions: write-all
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     if: github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
