@@ -57,7 +57,15 @@ jobs:
                   ... on ProjectV2 {
                     fields(first: 100) {
                       nodes {
-                        ... on ProjectV2FieldConfiguration {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          id
+                          name
+                        }
+                        ... on ProjectV2Field {
                           id
                           name
                         }
@@ -155,7 +163,15 @@ jobs:
                   ... on ProjectV2 {
                     fields(first: 100) {
                       nodes {
-                        ... on ProjectV2FieldConfiguration {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          id
+                          name
+                        }
+                        ... on ProjectV2Field {
                           id
                           name
                         }
