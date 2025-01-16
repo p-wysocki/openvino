@@ -45,6 +45,7 @@ jobs:
             const project = result.repository.projectsV2.nodes.find(p => p.title === projectName);
 
             if (!project) {
+              console.log(`Available projects: ${result.repository.projectsV2.nodes.map(p => p.title).join(', ')}`);
               throw new Error(`Project "${projectName}" not found`);
             }
 
@@ -71,6 +72,7 @@ jobs:
             const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
 
             if (!column) {
+              console.log(`Available columns: ${columnResult.node.fields.nodes.map(f => f.name).join(', ')}`);
               throw new Error(`Column "${columnName}" not found`);
             }
 
@@ -141,6 +143,7 @@ jobs:
             const project = result.repository.projectsV2.nodes.find(p => p.title === projectName);
 
             if (!project) {
+              console.log(`Available projects: ${result.repository.projectsV2.nodes.map(p => p.title).join(', ')}`);
               throw new Error(`Project "${projectName}" not found`);
             }
 
@@ -167,6 +170,7 @@ jobs:
             const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
 
             if (!column) {
+              console.log(`Available columns: ${columnResult.node.fields.nodes.map(f => f.name).join(', ')}`);
               throw new Error(`Column "${columnName}" not found`);
             }
 
