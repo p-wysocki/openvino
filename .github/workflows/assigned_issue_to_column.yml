@@ -19,7 +19,7 @@ jobs:
         with:
           project: Good first issues
           column: Assigned
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.PAT }}
   
   issue_unassigned:
     permissions:
@@ -35,4 +35,4 @@ jobs:
         with:
           project: Good first issues
           column: Contributors needed
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.PAT }}
