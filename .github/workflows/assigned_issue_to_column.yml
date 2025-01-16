@@ -55,7 +55,7 @@ jobs:
               query($projectId: ID!) {
                 node(id: $projectId) {
                   ... on ProjectV2 {
-                    items(first: 100) {
+                    views(first: 100) {
                       nodes {
                         id
                         name
@@ -67,10 +67,10 @@ jobs:
             `;
 
             const columnResult = await github.graphql(columnQuery, { projectId });
-            const column = columnResult.node.items.nodes.find(f => f.name === columnName);
+            const column = columnResult.node.views.nodes.find(f => f.name === columnName);
 
             if (!column) {
-              console.log(`Available columns: ${columnResult.node.items.nodes.map(f => f.name).join(', ')}`);
+              console.log(`Available columns: ${columnResult.node.views.nodes.map(f => f.name).join(', ')}`);
               throw new Error(`Column "${columnName}" not found`);
             }
 
@@ -151,7 +151,7 @@ jobs:
               query($projectId: ID!) {
                 node(id: $projectId) {
                   ... on ProjectV2 {
-                    items(first: 100) {
+                    views(first: 100) {
                       nodes {
                         id
                         name
@@ -163,10 +163,10 @@ jobs:
             `;
 
             const columnResult = await github.graphql(columnQuery, { projectId });
-            const column = columnResult.node.items.nodes.find(f => f.name === columnName);
+            const column = columnResult.node.views.nodes.find(f => f.name === columnName);
 
             if (!column) {
-              console.log(`Available columns: ${columnResult.node.items.nodes.map(f => f.name).join(', ')}`);
+              console.log(`Available columns: ${columnResult.node.views.nodes.map(f => f.name).join(', ')}`);
               throw new Error(`Column "${columnName}" not found`);
             }
 
