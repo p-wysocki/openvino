@@ -15,11 +15,92 @@ jobs:
     if: github.event.action == 'assigned'
     runs-on: ubuntu-latest
     steps:
-      - uses: alex-page/github-project-automation-plus@v0.9.0
+      - name: Move issue to Assigned column
+        uses: actions/github-script@v4
         with:
-          project: Good first issues
-          column: Assigned
-          repo-token: ${{ secrets.PAT }}
+          script: |
+            const projectName = "Good first issues";
+            const columnName = "Assigned";
+            const issueId = context.payload.issue.node_id;
+
+            const query = `
+              query($owner: String!, $repo: String!, $projectName: String!) {
+                repository(owner: $owner, name: $repo) {
+                  projectsV2(first: 100) {
+                    nodes {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
+            `;
+
+            const variables = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              projectName: projectName
+            };
+
+            const result = await github.graphql(query, variables);
+            const project = result.repository.projectsV2.nodes.find(p => p.title === projectName);
+
+            if (!project) {
+              throw new Error(`Project "${projectName}" not found`);
+            }
+
+            const projectId = project.id;
+
+            const columnQuery = `
+              query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2Field {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const columnResult = await github.graphql(columnQuery, { projectId });
+            const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
+
+            if (!column) {
+              throw new Error(`Column "${columnName}" not found`);
+            }
+
+            const columnId = column.id;
+
+            const mutation = `
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: $value
+                }) {
+                  projectV2Item {
+                    id
+                  }
+                }
+              }
+            `;
+
+            const mutationVariables = {
+              projectId: projectId,
+              itemId: issueId,
+              fieldId: columnId,
+              value: columnName
+            };
+
+            await github.graphql(mutation, mutationVariables);
+          github-token: ${{ secrets.PAT }}
   
   issue_unassigned:
     permissions:
@@ -31,8 +112,89 @@ jobs:
     if: github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
-      - uses: alex-page/github-project-automation-plus@v0.9.0
+      - name: Move issue to Contributors needed column
+        uses: actions/github-script@v4
         with:
-          project: Good first issues
-          column: Contributors needed
-          repo-token: ${{ secrets.PAT }}
+          script: |
+            const projectName = "Good first issues";
+            const columnName = "Contributors needed";
+            const issueId = context.payload.issue.node_id;
+
+            const query = `
+              query($owner: String!, $repo: String!, $projectName: String!) {
+                repository(owner: $owner, name: $repo) {
+                  projectsV2(first: 100) {
+                    nodes {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
+            `;
+
+            const variables = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              projectName: projectName
+            };
+
+            const result = await github.graphql(query, variables);
+            const project = result.repository.projectsV2.nodes.find(p => p.title === projectName);
+
+            if (!project) {
+              throw new Error(`Project "${projectName}" not found`);
+            }
+
+            const projectId = project.id;
+
+            const columnQuery = `
+              query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2Field {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const columnResult = await github.graphql(columnQuery, { projectId });
+            const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
+
+            if (!column) {
+              throw new Error(`Column "${columnName}" not found`);
+            }
+
+            const columnId = column.id;
+
+            const mutation = `
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: $value
+                }) {
+                  projectV2Item {
+                    id
+                  }
+                }
+              }
+            `;
+
+            const mutationVariables = {
+              projectId: projectId,
+              itemId: issueId,
+              fieldId: columnId,
+              value: columnName
+            };
+
+            await github.graphql(mutation, mutationVariables);
+          github-token: ${{ secrets.PAT }}
