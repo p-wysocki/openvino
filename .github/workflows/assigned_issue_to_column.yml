@@ -134,7 +134,7 @@ jobs:
             };
 
             await github.graphql(mutation, mutationVariables);
-          github-token: ${{ secrets.PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   issue_unassigned:
     if: github.event.action == 'unassigned'
@@ -265,4 +265,4 @@ jobs:
             };
 
             await github.graphql(mutation, mutationVariables);
-          github-token: ${{ secrets.PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
