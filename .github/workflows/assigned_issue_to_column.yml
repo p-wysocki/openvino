@@ -24,7 +24,7 @@ jobs:
             const issueId = context.payload.issue.node_id;
 
             const query = `
-              query($owner: String!, $repo: String!, $projectName: String!) {
+              query($owner: String!, $repo: String!) {
                 repository(owner: $owner, name: $repo) {
                   projectsV2(first: 100) {
                     nodes {
@@ -38,8 +38,7 @@ jobs:
 
             const variables = {
               owner: context.repo.owner,
-              repo: context.repo.repo,
-              projectName: projectName
+              repo: context.repo.repo
             };
 
             const result = await github.graphql(query, variables);
@@ -121,7 +120,7 @@ jobs:
             const issueId = context.payload.issue.node_id;
 
             const query = `
-              query($owner: String!, $repo: String!, $projectName: String!) {
+              query($owner: String!, $repo: String!) {
                 repository(owner: $owner, name: $repo) {
                   projectsV2(first: 100) {
                     nodes {
@@ -135,8 +134,7 @@ jobs:
 
             const variables = {
               owner: context.repo.owner,
-              repo: context.repo.repo,
-              projectName: projectName
+              repo: context.repo.repo
             };
 
             const result = await github.graphql(query, variables);
