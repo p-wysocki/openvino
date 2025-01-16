@@ -10,6 +10,8 @@ jobs:
       contents: read
       actions: read
       checks: write
+      issues: write
+      repository-projects: write
     if: github.event.action == 'assigned'
     runs-on: ubuntu-latest
     steps:
@@ -24,6 +26,8 @@ jobs:
       contents: read
       actions: read
       checks: write
+      issues: write
+      repository-projects: write
     if: github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
