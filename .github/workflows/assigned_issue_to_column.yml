@@ -6,12 +6,6 @@ on:
 
 jobs:
   issue_assigned:
-    permissions:
-      contents: read
-      actions: read
-      checks: write
-      issues: write
-      repository-projects: write
     if: github.event.action == 'assigned'
     runs-on: ubuntu-latest
     steps:
@@ -143,12 +137,6 @@ jobs:
           github-token: ${{ secrets.PAT }}
 
   issue_unassigned:
-    permissions:
-      contents: read
-      actions: read
-      checks: write
-      issues: write
-      repository-projects: write
     if: github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
