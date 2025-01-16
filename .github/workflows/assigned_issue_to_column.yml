@@ -51,7 +51,7 @@ jobs:
 
             const projectId = project.id;
 
-            const columnQuery = `
+            const fieldQuery = `
               query($projectId: ID!) {
                 node(id: $projectId) {
                   ... on ProjectV2 {
@@ -60,14 +60,10 @@ jobs:
                         ... on ProjectV2SingleSelectField {
                           id
                           name
-                        }
-                        ... on ProjectV2IterationField {
-                          id
-                          name
-                        }
-                        ... on ProjectV2Field {
-                          id
-                          name
+                          options {
+                            id
+                            name
+                          }
                         }
                       }
                     }
@@ -76,15 +72,22 @@ jobs:
               }
             `;
 
-            const columnResult = await github.graphql(columnQuery, { projectId });
-            const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
+            const fieldResult = await github.graphql(fieldQuery, { projectId });
+            const statusField = fieldResult.node.fields.nodes.find(f => f.name === "Status");
 
-            if (!column) {
-              console.log(`Available columns: ${columnResult.node.fields.nodes.map(f => f.name).join(', ')}`);
-              throw new Error(`Column "${columnName}" not found`);
+            if (!statusField) {
+              console.log(`Available fields: ${fieldResult.node.fields.nodes.map(f => f.name).join(', ')}`);
+              throw new Error(`Field "Status" not found`);
             }
 
-            const columnId = column.id;
+            const statusOption = statusField.options.find(o => o.name === columnName);
+
+            if (!statusOption) {
+              console.log(`Available options: ${statusField.options.map(o => o.name).join(', ')}`);
+              throw new Error(`Option "${columnName}" not found in field "Status"`);
+            }
+
+            const statusOptionId = statusOption.id;
 
             const mutation = `
               mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
@@ -104,8 +107,8 @@ jobs:
             const mutationVariables = {
               projectId: projectId,
               itemId: issueId,
-              fieldId: columnId,
-              value: columnName
+              fieldId: statusField.id,
+              value: statusOptionId
             };
 
             await github.graphql(mutation, mutationVariables);
@@ -157,7 +160,7 @@ jobs:
 
             const projectId = project.id;
 
-            const columnQuery = `
+            const fieldQuery = `
               query($projectId: ID!) {
                 node(id: $projectId) {
                   ... on ProjectV2 {
@@ -166,14 +169,10 @@ jobs:
                         ... on ProjectV2SingleSelectField {
                           id
                           name
-                        }
-                        ... on ProjectV2IterationField {
-                          id
-                          name
-                        }
-                        ... on ProjectV2Field {
-                          id
-                          name
+                          options {
+                            id
+                            name
+                          }
                         }
                       }
                     }
@@ -182,15 +181,22 @@ jobs:
               }
             `;
 
-            const columnResult = await github.graphql(columnQuery, { projectId });
-            const column = columnResult.node.fields.nodes.find(f => f.name === columnName);
+            const fieldResult = await github.graphql(fieldQuery, { projectId });
+            const statusField = fieldResult.node.fields.nodes.find(f => f.name === "Status");
 
-            if (!column) {
-              console.log(`Available columns: ${columnResult.node.fields.nodes.map(f => f.name).join(', ')}`);
-              throw new Error(`Column "${columnName}" not found`);
+            if (!statusField) {
+              console.log(`Available fields: ${fieldResult.node.fields.nodes.map(f => f.name).join(', ')}`);
+              throw new Error(`Field "Status" not found`);
             }
 
-            const columnId = column.id;
+            const statusOption = statusField.options.find(o => o.name === columnName);
+
+            if (!statusOption) {
+              console.log(`Available options: ${statusField.options.map(o => o.name).join(', ')}`);
+              throw new Error(`Option "${columnName}" not found in field "Status"`);
+            }
+
+            const statusOptionId = statusOption.id;
 
             const mutation = `
               mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
@@ -210,8 +216,8 @@ jobs:
             const mutationVariables = {
               projectId: projectId,
               itemId: issueId,
-              fieldId: columnId,
-              value: columnName
+              fieldId: statusField.id,
+              value: statusOptionId
             };
 
             await github.graphql(mutation, mutationVariables);
