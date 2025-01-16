@@ -15,7 +15,7 @@ jobs:
           column: Assigned
           repo-token: ${{ secrets.GITHUB_TOKEN }}
   
-  issue_assigned:
+  issue_unassigned:
     if: github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
