@@ -90,7 +90,7 @@ jobs:
             const statusOptionId = statusOption.id;
 
             const mutation = `
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $projectId
                   itemId: $itemId
@@ -108,7 +108,7 @@ jobs:
               projectId: projectId,
               itemId: issueId,
               fieldId: statusField.id,
-              value: statusOptionId
+              value: { singleSelectOptionId: statusOptionId }
             };
 
             await github.graphql(mutation, mutationVariables);
@@ -199,7 +199,7 @@ jobs:
             const statusOptionId = statusOption.id;
 
             const mutation = `
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $projectId
                   itemId: $itemId
@@ -217,7 +217,7 @@ jobs:
               projectId: projectId,
               itemId: issueId,
               fieldId: statusField.id,
-              value: statusOptionId
+              value: { singleSelectOptionId: statusOptionId }
             };
 
             await github.graphql(mutation, mutationVariables);
