@@ -57,8 +57,10 @@ jobs:
                   ... on ProjectV2 {
                     fields(first: 100) {
                       nodes {
-                        id
-                        name
+                        ... on ProjectV2FieldConfiguration {
+                          id
+                          name
+                        }
                       }
                     }
                   }
@@ -153,8 +155,10 @@ jobs:
                   ... on ProjectV2 {
                     fields(first: 100) {
                       nodes {
-                        id
-                        name
+                        ... on ProjectV2FieldConfiguration {
+                          id
+                          name
+                        }
                       }
                     }
                   }
