@@ -3,12 +3,10 @@ from __future__ import annotations
 from builtins import module as ModuleType
 from functools import wraps
 from pathlib import Path
-from typing import Any
 import importlib as importlib
 import os as os
 import sys as sys
-import typing
-__all__ = ['Any', 'LazyLoader', 'ModuleType', 'Path', 'classproperty', 'deprecated', 'deprecatedclassproperty', 'get_cmake_path', 'importlib', 'os', 'sys', 'wraps']
+__all__ = ['LazyLoader', 'ModuleType', 'Path', 'classproperty', 'deprecated', 'deprecatedclassproperty', 'get_cmake_path', 'importlib', 'os', 'sys', 'wraps']
 class LazyLoader:
     """
     A class to lazily load a module, importing it only when an attribute is accessed.
