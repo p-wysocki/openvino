@@ -556,6 +556,30 @@ std::shared_ptr<ov::Model> generate(const std::shared_ptr<ov::op::v16::SparseFil
     return std::make_shared<ov::Model>(results, ov::ParameterVector{values, indices, default_value}, "SparseFillEmptyRowsGraph");
 }
 
+std::shared_ptr<ov::Model> generate(const std::shared_ptr<ov::op::v16::SparseFillEmptyRowsUnpackedString> &node) {
+    const auto begins = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{6});
+    const auto ends = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{6});
+    const auto symbols = std::make_shared<ov::op::v0::Parameter>(ov::element::u8, ov::PartialShape{35});
+    const auto indices = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{6, 2});
+    const auto dense_shape = ov::op::v0::Constant::create<int32_t>(ov::element::i32, {2}, {5, 2});
+    const auto default_value = std::make_shared<ov::op::v0::Parameter>(ov::element::u8, ov::PartialShape{5});
+
+    const auto sparseFillEmptyRowsUnpackedStringNode = std::make_shared<ov::op::v16::SparseFillEmptyRowsUnpackedString>(
+        begins, ends, symbols, indices, dense_shape, default_value);
+
+    ov::ResultVector results{
+        std::make_shared<ov::op::v0::Result>(sparseFillEmptyRowsUnpackedStringNode->output(0)), // output_begins
+        std::make_shared<ov::op::v0::Result>(sparseFillEmptyRowsUnpackedStringNode->output(1)), // output_ends
+        std::make_shared<ov::op::v0::Result>(sparseFillEmptyRowsUnpackedStringNode->output(2)), // output_symbols
+        std::make_shared<ov::op::v0::Result>(sparseFillEmptyRowsUnpackedStringNode->output(3)), // output_indices
+        std::make_shared<ov::op::v0::Result>(sparseFillEmptyRowsUnpackedStringNode->output(4))  // empty_row_indicator
+    };
+    return std::make_shared<ov::Model>(
+        results,
+        ov::ParameterVector{begins, ends, symbols, indices, default_value},
+        "SparseFillEmptyRowsUnpackedStringGraph");
+}
+
 std::shared_ptr<ov::Model> generate(const std::shared_ptr<ov::op::v4::Interpolate> &node) {
     using InterpolateAttrs = op::v4::Interpolate::InterpolateAttrs;
     using InterpolateMode = op::v4::Interpolate::InterpolateMode;

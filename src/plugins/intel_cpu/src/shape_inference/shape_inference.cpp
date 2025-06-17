@@ -582,7 +582,7 @@ const IStaticShapeInferFactory::TRegistry IStaticShapeInferFactory::registry{
     OV_OP_SHAPE_INFER_MASK_REG(op::v16::ISTFT, ShapeInferTA, util::bit::mask(2, 3, 4)),
     OV_OP_SHAPE_INFER_MASK_REG(op::v16::SegmentMax, ShapeInferTA, util::bit::mask(1, 2)),
     OV_OP_SHAPE_INFER_MASK_REG(op::v16::SparseFillEmptyRows, ShapeInferTA, util::bit::mask(1, 2)),
-    OV_OP_SHAPE_INFER_MASK_REG(op::v16::SparseFillEmptyRowsUnpackedString, ShapeInferTA, util::bit::mask(0, 1, 3)),
+    OV_OP_SHAPE_INFER_MASK_REG(op::v16::SparseFillEmptyRowsUnpackedString, ShapeInferTA, util::bit::mask(3, 4)),
     // opset15
     OV_OP_SHAPE_INFER_MASK_REG(op::v15::Squeeze, ShapeInferTA, util::bit::mask(1)),
     OV_OP_SHAPE_INFER_MASK_REG(op::v15::SearchSorted, ShapeInferTA, util::bit::mask()),

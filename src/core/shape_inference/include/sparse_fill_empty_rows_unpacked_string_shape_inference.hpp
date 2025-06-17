@@ -75,8 +75,8 @@ std::vector<TRShape> shape_infer(const SparseFillEmptyRowsUnpackedString* op,
     auto output_shapes = std::vector<TRShape>(5);
     auto& output_begins_shape = output_shapes[0];
     auto& output_ends_shape = output_shapes[1];
-    auto& output_indices_shape = output_shapes[2];
-    auto& output_symbols_shape = output_shapes[3];
+    auto& output_symbols_shape = output_shapes[2];
+    auto& output_indices_shape = output_shapes[3];
     auto& empty_row_indicator_shape = output_shapes[4];
 
     output_begins_shape = begins_shape;
@@ -85,10 +85,11 @@ std::vector<TRShape> shape_infer(const SparseFillEmptyRowsUnpackedString* op,
     output_symbols_shape = symbols_shape;
     empty_row_indicator_shape.resize(1);
 
-    const auto& dense_shape_value = get_input_const_data_as<TRShape, int64_t>(op, 4, tensor_accessor);
+    // Use get_input_const_data_as_shape to support both i32 and i64 shape tensors
+    const auto& dense_shape_value = get_input_const_data_as_shape<TRShape>(op, 4, tensor_accessor);
     if (dense_shape_value) {
         const auto& dense_shape_data = *dense_shape_value;
-        const size_t num_rows = dense_shape_data[0];
+        const size_t num_rows = dense_shape_data[0].get_length();
         empty_row_indicator_shape[0] = num_rows;
 
         const auto& indices_value = get_input_const_data_as<TRShape, int64_t>(op, 3, tensor_accessor);

@@ -26,6 +26,7 @@ void SparseFillEmptyRowsUnpackedString::validate_and_infer_types() {
 
     const auto& begins_element_type = get_input_element_type(0);
     const auto& ends_element_type = get_input_element_type(1);
+    const auto& symbols_element_type = get_input_element_type(2);
     const auto& indices_element_type = get_input_element_type(3);
     const auto& dense_shape_element_type = get_input_element_type(4);
     element::Type merged_type;
@@ -56,12 +57,17 @@ void SparseFillEmptyRowsUnpackedString::validate_and_infer_types() {
                           "The element type of the index inputs must be i32 or i64. Got: ",
                           merged_type);
 
+    NODE_VALIDATION_CHECK(this,
+                          symbols_element_type == element::u8 || symbols_element_type.is_dynamic(),
+                          "The element type of the symbols input must be u8. Got: ",
+                          symbols_element_type);
+
     const auto output_shapes = shape_infer(this, ov::util::get_node_input_partial_shapes(*this));
 
     set_output_type(0, begins_element_type, output_shapes[0]);        // output_begins
     set_output_type(1, ends_element_type, output_shapes[1]);          // output_ends
-    set_output_type(2, indices_element_type, output_shapes[2]);       // output_indices
-    set_output_type(3, get_input_element_type(2), output_shapes[3]);  // output_symbols
+    set_output_type(2, symbols_element_type, output_shapes[2]);       // output_symbols
+    set_output_type(3, indices_element_type, output_shapes[3]);       // output_indices
     set_output_type(4, element::boolean, output_shapes[4]);           // empty_row_indicator
 }
 
