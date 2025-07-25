@@ -9,6 +9,7 @@ from . import preprocess
 from . import properties
 from . import util
 from __future__ import annotations
+import collections.abc
 import datetime
 import numpy
 import typing
@@ -20,14 +21,14 @@ class AsyncInferQueue:
     """
     openvino.AsyncInferQueue represents a helper that creates a pool of asynchronousInferRequests and provides synchronization functions to control flow of a simple pipeline.
     """
-    def __getitem__(self, arg0: int) -> InferRequest:
+    def __getitem__(self, arg0: typing.SupportsInt) -> InferRequest:
         """
                 :param i: InferRequest id
                 :type i: int
                 :return: InferRequests from the pool with given id.
                 :rtype: openvino.InferRequest
         """
-    def __init__(self, model: CompiledModel, jobs: int = 0) -> None:
+    def __init__(self, model: CompiledModel, jobs: typing.SupportsInt = 0) -> None:
         """
                         Creates AsyncInferQueue.
         
@@ -38,7 +39,7 @@ class AsyncInferQueue:
                         :type jobs: int
                         :rtype: openvino.AsyncInferQueue
         """
-    def __iter__(self) -> typing.Iterator[InferRequest]:
+    def __iter__(self) -> collections.abc.Iterator[InferRequest]:
         ...
     def __len__(self) -> int:
         """
@@ -67,7 +68,7 @@ class AsyncInferQueue:
                     :return: If there is at least one free InferRequest in a pool, returns True.
                     :rtype: bool
         """
-    def set_callback(self, arg0: typing.Callable) -> None:
+    def set_callback(self, arg0: collections.abc.Callable) -> None:
         """
                     Sets unified callback on all InferRequests from queue's pool.
                     Signature of such function should have two arguments, where
@@ -139,15 +140,15 @@ class AxisSet:
     openvino.AxisSet wraps ov::AxisSet
     """
     @typing.overload
-    def __init__(self, axes: set[int]) -> None:
+    def __init__(self, axes: collections.abc.Set[typing.SupportsInt]) -> None:
         ...
     @typing.overload
-    def __init__(self, axes: list[int]) -> None:
+    def __init__(self, axes: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, axes: AxisSet) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
@@ -157,21 +158,21 @@ class AxisVector:
     """
     openvino.AxisVector wraps ov::AxisVector
     """
-    def __getitem__(self, arg0: int) -> int:
+    def __getitem__(self, arg0: typing.SupportsInt) -> int:
         ...
     @typing.overload
-    def __init__(self, axes: list[int]) -> None:
+    def __init__(self, axes: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, axes: AxisVector) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
 class CompiledModel:
     """
@@ -269,7 +270,7 @@ class CompiledModel:
                         :rtype: openvino.ConstOutput
         """
     @typing.overload
-    def input(self, index: int) -> ConstOutput:
+    def input(self, index: typing.SupportsInt) -> ConstOutput:
         """
                         Gets input of a compiled model identified by an index.
                         If the input with given index is not found, this method throws an exception.
@@ -300,7 +301,7 @@ class CompiledModel:
                         :rtype: openvino.ConstOutput
         """
     @typing.overload
-    def output(self, index: int) -> ConstOutput:
+    def output(self, index: typing.SupportsInt) -> ConstOutput:
         """
                         Gets output of a compiled model identified by an index.
                         If the output with given index is not found, this method throws an exception.
@@ -329,7 +330,7 @@ class CompiledModel:
                         e.g. caches, tensors, temporal buffers etc., when possible
         """
     @typing.overload
-    def set_property(self, properties: dict[str, typing.Any]) -> None:
+    def set_property(self, properties: collections.abc.Mapping[str, typing.Any]) -> None:
         """
                     Sets properties for current compiled model.
         
@@ -491,10 +492,10 @@ class ConstOutput:
         ...
 class ConversionExtension(_ConversionExtension):
     @typing.overload
-    def __init__(self, arg0: str, arg1: typing.Callable[[NodeContext], list[Output]]) -> None:
+    def __init__(self, arg0: str, arg1: collections.abc.Callable[[NodeContext], list[Output]]) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: str, arg1: typing.Callable[[NodeContext], dict[str, list[Output]]]) -> None:
+    def __init__(self, arg0: str, arg1: collections.abc.Callable[[NodeContext], dict[str, list[Output]]]) -> None:
         ...
 class ConversionExtensionBase(Extension):
     pass
@@ -502,44 +503,44 @@ class Coordinate:
     """
     openvino.Coordinate wraps ov::Coordinate
     """
-    def __getitem__(self, arg0: int) -> int:
+    def __getitem__(self, arg0: typing.SupportsInt) -> int:
         ...
     @typing.overload
     def __init__(self, arg0: Shape) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: list[int]) -> None:
+    def __init__(self, arg0: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, arg0: Coordinate) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
 class CoordinateDiff:
     """
     openvino.CoordinateDiff wraps ov::CoordinateDiff
     """
-    def __getitem__(self, arg0: int) -> int:
+    def __getitem__(self, arg0: typing.SupportsInt) -> int:
         ...
     @typing.overload
-    def __init__(self, arg0: list[int]) -> None:
+    def __init__(self, arg0: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, arg0: CoordinateDiff) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -568,7 +569,7 @@ class Core:
                         :type extension: openvino.Extension
         """
     @typing.overload
-    def add_extension(self, extensions: list[Extension]) -> None:
+    def add_extension(self, extensions: collections.abc.Sequence[Extension]) -> None:
         """
                     Registers extensions to a Core object.
         
@@ -584,7 +585,7 @@ class Core:
                     :type custom_op: typing.Type[openvino.Op]
         """
     @typing.overload
-    def compile_model(self, model: Model, device_name: str, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model: Model, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Creates a compiled model from a source model object.
                     Users can create as many compiled models as they need, and use them simultaneously
@@ -602,7 +603,7 @@ class Core:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def compile_model(self, model: Model, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model: Model, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Creates and loads a compiled model from a source model to the default OpenVINO device
                     selected by AUTO plugin. Users can create as many compiled models as they need, and use
@@ -618,7 +619,7 @@ class Core:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def compile_model(self, model_path: typing.Any, device_name: str, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model_path: typing.Any, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Reads model and creates a compiled model from IR / ONNX / PDPD / TF and TFLite file.
                     This can be more efficient than using read_model + compile_model(model_in_memory_object) flow,
@@ -636,7 +637,7 @@ class Core:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def compile_model(self, model_buffer: typing.Any, weight_buffer: typing.Any, device_name: str, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model_buffer: typing.Any, weight_buffer: typing.Any, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Create a compiled model from IR model buffer and weight buffer in memory.
                     This can be more efficient than using read_model + compile_model(model_in_memory_object) flow,
@@ -656,7 +657,7 @@ class Core:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def compile_model(self, model_path: typing.Any, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model_path: typing.Any, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Reads model and creates a compiled model from IR / ONNX / PDPD / TF and TFLite file with device selected by AUTO plugin.
                     This can be more efficient than using read_model + compile_model(model_in_memory_object) flow,
@@ -672,7 +673,7 @@ class Core:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def compile_model(self, model: Model, context: RemoteContext, properties: dict[str, typing.Any]) -> CompiledModel:
+    def compile_model(self, model: Model, context: RemoteContext, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Creates a compiled model from a source model within a specified remote context.
         
@@ -687,7 +688,7 @@ class Core:
                     :return: A compiled model.
                     :rtype: openvino.CompiledModel
         """
-    def create_context(self, device_name: str, properties: dict[str, typing.Any]) -> RemoteContext:
+    def create_context(self, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> RemoteContext:
         """
                     Creates a new remote shared context object on the specified accelerator device
                     using specified plugin-specific low-level device API parameters.
@@ -721,7 +722,7 @@ class Core:
                     :rtype: openvino.RemoteContext
         """
     @typing.overload
-    def get_property(self, device_name: str, name: str, arguments: dict[str, typing.Any]) -> typing.Any:
+    def get_property(self, device_name: str, name: str, arguments: collections.abc.Mapping[str, typing.Any]) -> typing.Any:
         """
                     Gets properties dedicated to device behaviour.
         
@@ -765,7 +766,7 @@ class Core:
                         :return: Plugin version information.
                         :rtype: typing.Dict[str, openvino.Version]
         """
-    def import_model(self, model_stream: typing.Any, device_name: str, properties: dict[str, typing.Any]) -> CompiledModel:
+    def import_model(self, model_stream: typing.Any, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> CompiledModel:
         """
                     Imports a compiled model from a previously exported one.
         
@@ -798,7 +799,7 @@ class Core:
         
                         new_compiled = core.import_model(user_stream, "CPU")
         """
-    def query_model(self, model: Model, device_name: str, properties: dict[str, typing.Any] = {}) -> dict[str, str]:
+    def query_model(self, model: Model, device_name: str, properties: collections.abc.Mapping[str, typing.Any] = {}) -> dict[str, str]:
         """
                     Query device if it supports specified model with specified properties.
         
@@ -828,7 +829,7 @@ class Core:
                     :rtype: openvino.Model
         """
     @typing.overload
-    def read_model(self, model: str, weights: str = '', config: dict[str, typing.Any] = {}) -> Model:
+    def read_model(self, model: str, weights: str = '', config: collections.abc.Mapping[str, typing.Any] = {}) -> Model:
         """
                     Reads models from IR / ONNX / PDPD / TF and TFLite formats.
         
@@ -865,7 +866,7 @@ class Core:
                     :rtype: openvino.Model
         """
     @typing.overload
-    def read_model(self, model: typing.Any, weights: typing.Any = None, config: dict[str, typing.Any] = {}) -> Model:
+    def read_model(self, model: typing.Any, weights: typing.Any = None, config: collections.abc.Mapping[str, typing.Any] = {}) -> Model:
         """
                     Reads models from IR / ONNX / PDPD / TF and TFLite formats.
         
@@ -900,7 +901,7 @@ class Core:
                         :type device_name: str
         """
     @typing.overload
-    def register_plugin(self, plugin_name: str, device_name: str, config: dict[str, typing.Any]) -> None:
+    def register_plugin(self, plugin_name: str, device_name: str, config: collections.abc.Mapping[str, typing.Any]) -> None:
         """
                         Register a new device and plugin which enable this device inside OpenVINO Runtime.
         
@@ -923,7 +924,7 @@ class Core:
                         :type xml_config_file: str
         """
     @typing.overload
-    def set_property(self, properties: dict[str, typing.Any]) -> None:
+    def set_property(self, properties: collections.abc.Mapping[str, typing.Any]) -> None:
         """
                     Sets properties.
         
@@ -939,7 +940,7 @@ class Core:
                     :type property: typing.Tuple[str, typing.Any]
         """
     @typing.overload
-    def set_property(self, device_name: str, properties: dict[str, typing.Any]) -> None:
+    def set_property(self, device_name: str, properties: collections.abc.Mapping[str, typing.Any]) -> None:
         """
                     Sets properties for the device.
         
@@ -986,10 +987,9 @@ class DescriptorTensor:
     """
     openvino.descriptor.Tensor wraps ov::descriptor::Tensor
     """
-    names: set[str]
     def __repr__(self) -> str:
         ...
-    def add_names(self, names: set[str]) -> None:
+    def add_names(self, names: collections.abc.Set[str]) -> None:
         """
                         Adds names for tensor.
         
@@ -1066,7 +1066,7 @@ class DescriptorTensor:
                         :param lower_bound: The lower bound value.
                         :type lower_bound: openvino.Tensor
         """
-    def set_names(self, names: set[str]) -> None:
+    def set_names(self, names: collections.abc.Set[str]) -> None:
         """
                         Set names for tensor.
         
@@ -1080,7 +1080,7 @@ class DescriptorTensor:
                         :param upper_bound: Sets the upper bound value.
                         :type upper_bound: openvino.Tensor
         """
-    def set_value_symbol(self, value_symbol: list[Symbol]) -> None:
+    def set_value_symbol(self, value_symbol: collections.abc.Sequence[Symbol]) -> None:
         """
                         Sets the value symbol of the tensor.
         
@@ -1092,6 +1092,12 @@ class DescriptorTensor:
         ...
     @property
     def element_type(self) -> Type:
+        ...
+    @property
+    def names(self) -> set[str]:
+        ...
+    @names.setter
+    def names(self, arg1: collections.abc.Set[str]) -> None:
         ...
     @property
     def partial_shape(self) -> PartialShape:
@@ -1117,13 +1123,13 @@ class Dimension:
     def __eq__(self, arg0: Dimension) -> bool:
         ...
     @typing.overload
-    def __eq__(self, arg0: int) -> bool:
+    def __eq__(self, arg0: typing.SupportsInt) -> bool:
         ...
     @typing.overload
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, dimension: int) -> None:
+    def __init__(self, dimension: typing.SupportsInt) -> None:
         """
                         Construct a static dimension.
         
@@ -1131,7 +1137,7 @@ class Dimension:
                         :type dimension: int
         """
     @typing.overload
-    def __init__(self, min_dimension: int, max_dimension: int) -> None:
+    def __init__(self, min_dimension: typing.SupportsInt, max_dimension: typing.SupportsInt) -> None:
         """
                         Construct a dynamic dimension with bounded range.
         
@@ -1338,7 +1344,7 @@ class FrontEnd:
                         :type extension: Extension
         """
     @typing.overload
-    def add_extension(self, arg0: list[Extension]) -> None:
+    def add_extension(self, arg0: collections.abc.Sequence[Extension]) -> None:
         """
                         Add extensions defined by objects inheriting from Extension
                         used in order to extend capabilities of Frontend.
@@ -1505,7 +1511,7 @@ class InferRequest:
                     :rtype: openvino.CompiledModel
         """
     @typing.overload
-    def get_input_tensor(self, index: int) -> Tensor:
+    def get_input_tensor(self, index: typing.SupportsInt) -> Tensor:
         """
                     Gets input tensor of InferRequest.
         
@@ -1526,7 +1532,7 @@ class InferRequest:
                     :rtype: openvino.Tensor
         """
     @typing.overload
-    def get_output_tensor(self, index: int) -> Tensor:
+    def get_output_tensor(self, index: typing.SupportsInt) -> Tensor:
         """
                     Gets output tensor of InferRequest.
         
@@ -1628,7 +1634,7 @@ class InferRequest:
                     Resets all internal variable states for relevant infer request to
                     a value specified as default for the corresponding `ReadValue` node
         """
-    def set_callback(self, callback: typing.Callable, userdata: typing.Any) -> None:
+    def set_callback(self, callback: collections.abc.Callable, userdata: typing.Any) -> None:
         """
                     Sets a callback function that will be called on success or failure of asynchronous InferRequest.
         
@@ -1638,7 +1644,7 @@ class InferRequest:
                     :type userdata: Any
         """
     @typing.overload
-    def set_input_tensor(self, index: int, tensor: Tensor) -> None:
+    def set_input_tensor(self, index: typing.SupportsInt, tensor: Tensor) -> None:
         """
                     Sets input tensor of InferRequest.
         
@@ -1668,7 +1674,7 @@ class InferRequest:
                     :type inputs: Dict[int, openvino.Tensor]
         """
     @typing.overload
-    def set_input_tensors(self, tensors: list[Tensor]) -> None:
+    def set_input_tensors(self, tensors: collections.abc.Sequence[Tensor]) -> None:
         """
                     Sets batch of tensors for single input data.
                     Model input needs to have batch dimension and the number of `tensors`
@@ -1680,7 +1686,7 @@ class InferRequest:
                     :type tensors: List[openvino.Tensor]
         """
     @typing.overload
-    def set_input_tensors(self, idx: int, tensors: list[Tensor]) -> None:
+    def set_input_tensors(self, idx: typing.SupportsInt, tensors: collections.abc.Sequence[Tensor]) -> None:
         """
                     Sets batch of tensors for single input data to infer by index.
                     Model input needs to have batch dimension and the number of `tensors`
@@ -1693,7 +1699,7 @@ class InferRequest:
                                     Total size of tensors needs to match with input's size.
         """
     @typing.overload
-    def set_output_tensor(self, index: int, tensor: Tensor) -> None:
+    def set_output_tensor(self, index: typing.SupportsInt, tensor: Tensor) -> None:
         """
                     Sets output tensor of InferRequest.
         
@@ -1773,7 +1779,7 @@ class InferRequest:
                     :type inputs: Dict[Union[int, str, openvino.ConstOutput], openvino.Tensor]
         """
     @typing.overload
-    def set_tensors(self, tensor_name: str, tensors: list[Tensor]) -> None:
+    def set_tensors(self, tensor_name: str, tensors: collections.abc.Sequence[Tensor]) -> None:
         """
                     Sets batch of tensors for input data to infer by tensor name.
                     Model input needs to have batch dimension and the number of tensors needs to be
@@ -1789,7 +1795,7 @@ class InferRequest:
                     :type tensors: List[openvino.Tensor]
         """
     @typing.overload
-    def set_tensors(self, port: ConstOutput, tensors: list[Tensor]) -> None:
+    def set_tensors(self, port: ConstOutput, tensors: collections.abc.Sequence[Tensor]) -> None:
         """
                     Sets batch of tensors for input data to infer by tensor name.
                     Model input needs to have batch dimension and the number of tensors needs to be
@@ -1845,7 +1851,7 @@ class InferRequest:
         
                     GIL is released while running this function.
         """
-    def wait_for(self, timeout: int) -> bool:
+    def wait_for(self, timeout: typing.SupportsInt) -> bool:
         """
                     Waits for the result to become available.
                     Blocks until specified timeout has elapsed or
@@ -2035,7 +2041,7 @@ class InputModel:
                         :param new_name: Optional new name assigned to this output place.
                         :type new_name: str
         """
-    def extract_subgraph(self, inputs: list[Place], outputs: list[Place]) -> None:
+    def extract_subgraph(self, inputs: collections.abc.Sequence[Place], outputs: collections.abc.Sequence[Place]) -> None:
         """
                         Leaves only subgraph that are defined by new inputs and new outputs.
         
@@ -2090,7 +2096,7 @@ class InputModel:
                         :return: Partial shape for this place.
                         :rtype: openvino.PartialShape
         """
-    def get_place_by_input_index(self, input_idx: int) -> Place:
+    def get_place_by_input_index(self, input_idx: typing.SupportsInt) -> Place:
         """
                         Returns a tensor place by an input index.
         
@@ -2109,7 +2115,7 @@ class InputModel:
                         :return: Place representing operation.
                         :rtype: openvino.frontend.Place
         """
-    def get_place_by_operation_name_and_input_port(self, operation_name: str, input_port_index: int) -> Place:
+    def get_place_by_operation_name_and_input_port(self, operation_name: str, input_port_index: typing.SupportsInt) -> Place:
         """
                         Returns an input port place by operation name and appropriate port index.
         
@@ -2120,7 +2126,7 @@ class InputModel:
                         :return: Place representing input port of operation.
                         :rtype: openvino.frontend.Place
         """
-    def get_place_by_operation_name_and_output_port(self, operation_name: str, output_port_index: int) -> Place:
+    def get_place_by_operation_name_and_output_port(self, operation_name: str, output_port_index: typing.SupportsInt) -> Place:
         """
                         Returns an output port place by operation name and appropriate port index.
         
@@ -2141,7 +2147,7 @@ class InputModel:
                         :return: Tensor place corresponding to specified tensor name.
                         :rtype: openvino.frontend.Place
         """
-    def override_all_inputs(self, inputs: list[Place]) -> None:
+    def override_all_inputs(self, inputs: collections.abc.Sequence[Place]) -> None:
         """
                         Modifies the graph to use new inputs instead of existing ones. New inputs
                         should completely satisfy all existing outputs.
@@ -2149,7 +2155,7 @@ class InputModel:
                         :param inputs: Array of new input places.
                         :type inputs: List[openvino.frontend.Place]
         """
-    def override_all_outputs(self, outputs: list[Place]) -> None:
+    def override_all_outputs(self, outputs: collections.abc.Sequence[Place]) -> None:
         """
                         Replaces all existing outputs with new ones removing all data flow that
                         is not required for new outputs.
@@ -2174,7 +2180,7 @@ class InputModel:
                         :param type: New element type.
                         :type type: openvino.Type
         """
-    def set_name_for_dimension(self, place: Place, dim_index: int, dim_name: str) -> None:
+    def set_name_for_dimension(self, place: Place, dim_index: typing.SupportsInt, dim_name: str) -> None:
         """
                         Set name for a particular dimension of a place (e.g. batch dimension).
         
@@ -2277,7 +2283,7 @@ class Model:
     def __init__(self, other: Model) -> None:
         ...
     @typing.overload
-    def __init__(self, results: list[op.Result], sinks: list[Node], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], sinks: collections.abc.Sequence[Node], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                             Create user-defined Model which is a representation of a model.
         
@@ -2291,7 +2297,7 @@ class Model:
                             :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[op.Result], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                             Create user-defined Model which is a representation of a model.
         
@@ -2303,7 +2309,7 @@ class Model:
                             :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Node], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Node], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model.
         
@@ -2315,7 +2321,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, result: Node, parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, result: Node, parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                             Create user-defined Model which is a representation of a model.
         
@@ -2327,7 +2333,7 @@ class Model:
                             :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2339,7 +2345,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], sinks: list[Node], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], sinks: collections.abc.Sequence[Node], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2353,7 +2359,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], sinks: list[Output], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], sinks: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2367,7 +2373,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], sinks: list[Output], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], sinks: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2383,7 +2389,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[op.Result], sinks: list[Output], parameters: list[op.Parameter], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], sinks: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], name: str = '') -> None:
         """
                 Create user-defined Model which is a representation of a model
         
@@ -2397,7 +2403,7 @@ class Model:
                 :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[op.Result], sinks: list[Output], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], sinks: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                 Create user-defined Model which is a representation of a model
         
@@ -2413,7 +2419,7 @@ class Model:
                 :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[op.Result], sinks: list[Node], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], sinks: collections.abc.Sequence[Node], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2429,7 +2435,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], sinks: list[Node], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], sinks: collections.abc.Sequence[Node], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2443,7 +2449,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[op.Result], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[op.Result], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2457,7 +2463,7 @@ class Model:
                     :type name: str
         """
     @typing.overload
-    def __init__(self, results: list[Output], parameters: list[op.Parameter], variables: list[op.util.Variable], name: str = '') -> None:
+    def __init__(self, results: collections.abc.Sequence[Output], parameters: collections.abc.Sequence[op.Parameter], variables: collections.abc.Sequence[op.util.Variable], name: str = '') -> None:
         """
                     Create user-defined Model which is a representation of a model
         
@@ -2481,7 +2487,7 @@ class Model:
         """
     def add_outputs(self, outputs: typing.Any) -> list[Output]:
         ...
-    def add_parameters(self, parameters: list[op.Parameter]) -> None:
+    def add_parameters(self, parameters: collections.abc.Sequence[op.Parameter]) -> None:
         """
                             Add new Parameter nodes to the list.
         
@@ -2495,7 +2501,7 @@ class Model:
                             :param parameter: new Parameter nodes.
                             :type parameter: List[op.Parameter]
         """
-    def add_results(self, results: list[op.Result]) -> None:
+    def add_results(self, results: collections.abc.Sequence[op.Result]) -> None:
         """
                             Add new Result nodes to the list.
                             
@@ -2513,7 +2519,7 @@ class Model:
                     :param sinks: new sink nodes.
                     :type sinks: List[openvino.Node]
         """
-    def add_variables(self, variables: list[op.util.Variable]) -> None:
+    def add_variables(self, variables: collections.abc.Sequence[op.util.Variable]) -> None:
         """
                             Add new variables to the list. 
                             
@@ -2528,7 +2534,7 @@ class Model:
                     :return: A copy of self.
                     :rtype: openvino.Model
         """
-    def evaluate(self, output_tensors: list[Tensor], input_tensors: list[Tensor], evaluation_context: RTMap = ...) -> bool:
+    def evaluate(self, output_tensors: collections.abc.Sequence[Tensor], input_tensors: collections.abc.Sequence[Tensor], evaluation_context: RTMap = ...) -> bool:
         """
                     Evaluate the model on inputs, putting results in outputs
         
@@ -2572,7 +2578,7 @@ class Model:
                             :return: List of sorted Nodes representing ops used in model.
                             :rtype: List[openvino.Node]
         """
-    def get_output_element_type(self, index: int) -> Type:
+    def get_output_element_type(self, index: typing.SupportsInt) -> Type:
         """
                             Return the element type of output i
         
@@ -2581,7 +2587,7 @@ class Model:
                             :return: Type object of output i
                             :rtype: openvino.Type
         """
-    def get_output_op(self, index: int) -> Node:
+    def get_output_op(self, index: typing.SupportsInt) -> Node:
         """
                             Return the op that generates output i
         
@@ -2590,7 +2596,7 @@ class Model:
                             :return: Node object that generates output i
                             :rtype: openvino.Node
         """
-    def get_output_partial_shape(self, index: int) -> PartialShape:
+    def get_output_partial_shape(self, index: typing.SupportsInt) -> PartialShape:
         """
                             Return the partial shape of element i
         
@@ -2599,7 +2605,7 @@ class Model:
                             :return: PartialShape object of element i
                             :rtype: openvino.PartialShape
         """
-    def get_output_shape(self, index: int) -> Shape:
+    def get_output_shape(self, index: typing.SupportsInt) -> Shape:
         """
                             Return the shape of element i
         
@@ -2798,7 +2804,7 @@ class Model:
     def input(self) -> Output:
         ...
     @typing.overload
-    def input(self, index: int) -> Output:
+    def input(self, index: typing.SupportsInt) -> Output:
         ...
     @typing.overload
     def input(self, tensor_name: str) -> Output:
@@ -2807,7 +2813,7 @@ class Model:
     def input(self) -> ConstOutput:
         ...
     @typing.overload
-    def input(self, index: int) -> ConstOutput:
+    def input(self, index: typing.SupportsInt) -> ConstOutput:
         ...
     @typing.overload
     def input(self, tensor_name: str) -> ConstOutput:
@@ -2823,7 +2829,7 @@ class Model:
     def output(self) -> Output:
         ...
     @typing.overload
-    def output(self, index: int) -> Output:
+    def output(self, index: typing.SupportsInt) -> Output:
         ...
     @typing.overload
     def output(self, tensor_name: str) -> Output:
@@ -2832,7 +2838,7 @@ class Model:
     def output(self) -> ConstOutput:
         ...
     @typing.overload
-    def output(self, index: int) -> ConstOutput:
+    def output(self, index: typing.SupportsInt) -> ConstOutput:
         ...
     @typing.overload
     def output(self, tensor_name: str) -> ConstOutput:
@@ -2875,7 +2881,7 @@ class Model:
                             :param variable:  Variable to delete.
                             :type variable: op.util.Variable
         """
-    def replace_parameter(self, parameter_index: int, parameter: op.Parameter) -> None:
+    def replace_parameter(self, parameter_index: typing.SupportsInt, parameter: op.Parameter) -> None:
         """
                             Replace the `parameter_index` parameter of the model with `parameter`
         
@@ -3177,7 +3183,7 @@ class Node:
     openvino.Node wraps ov::Node
     """
     friendly_name: str
-    def __add__(self, right: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __add__(self, right: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         """
                     Return node which applies f(A,B) = A+B to the input nodes element-wise.
         
@@ -3188,9 +3194,9 @@ class Node:
         """
     def __array_ufunc__(self, arg0: typing.Any, arg1: str, *args, **kwargs) -> typing.Any:
         ...
-    def __getattr__(self, arg0: str) -> typing.Callable:
+    def __getattr__(self, arg0: str) -> collections.abc.Callable:
         ...
-    def __mul__(self, right: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __mul__(self, right: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         """
                     Return node which applies f(A,B) = A*B to the input nodes element-wise.
         
@@ -3199,17 +3205,17 @@ class Node:
                     :return: The node performing element-wise multiplication.
                     :rtype: openvino.Node
         """
-    def __radd__(self, arg0: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __radd__(self, arg0: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         ...
     def __repr__(self) -> str:
         ...
-    def __rmul__(self, arg0: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __rmul__(self, arg0: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         ...
-    def __rsub__(self, arg0: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __rsub__(self, arg0: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         ...
-    def __rtruediv__(self, arg0: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __rtruediv__(self, arg0: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         ...
-    def __sub__(self, right: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __sub__(self, right: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         """
                     Return node which applies f(A,B) = A-B to the input nodes element-wise.
         
@@ -3218,7 +3224,7 @@ class Node:
                     :return: The node performing element-wise subtraction.
                     :rtype: openvino.Node
         """
-    def __truediv__(self, right: Node | int | float | numpy.ndarray[typing.Any, numpy.dtype[typing.Any]]) -> Node:
+    def __truediv__(self, right: openvino._pyopenvino.Node | typing.SupportsInt | typing.SupportsFloat | numpy.ndarray) -> Node:
         """
                     Return node which applies f(A,B) = A/B to the input nodes element-wise.
         
@@ -3230,7 +3236,7 @@ class Node:
     def constructor_validate_and_infer_types(self) -> None:
         ...
     @typing.overload
-    def evaluate(self, output_values: list[Tensor], input_values: list[Tensor], evaluationContext: RTMap) -> bool:
+    def evaluate(self, output_values: collections.abc.Sequence[Tensor], input_values: collections.abc.Sequence[Tensor], evaluationContext: RTMap) -> bool:
         """
                         Evaluate the node on inputs, putting results in outputs
                         
@@ -3244,7 +3250,7 @@ class Node:
                         :rtype: bool
         """
     @typing.overload
-    def evaluate(self, output_values: list[Tensor], input_values: list[Tensor]) -> bool:
+    def evaluate(self, output_values: collections.abc.Sequence[Tensor], input_values: collections.abc.Sequence[Tensor]) -> bool:
         """
                         Evaluate the function on inputs, putting results in outputs
         
@@ -3272,7 +3278,7 @@ class Node:
                         :return: Friendly name of the node.
                         :rtype: str
         """
-    def get_input_element_type(self, index: int) -> Type:
+    def get_input_element_type(self, index: typing.SupportsInt) -> Type:
         """
                         Returns the element type for input index
         
@@ -3281,7 +3287,7 @@ class Node:
                         :return: Type of the input index
                         :rtype: openvino.Type
         """
-    def get_input_partial_shape(self, index: int) -> PartialShape:
+    def get_input_partial_shape(self, index: typing.SupportsInt) -> PartialShape:
         """
                         Returns the partial shape for input index
         
@@ -3290,7 +3296,7 @@ class Node:
                         :return: PartialShape of the input index
                         :rtype: openvino.PartialShape
         """
-    def get_input_shape(self, index: int) -> Shape:
+    def get_input_shape(self, index: typing.SupportsInt) -> Shape:
         """
                         Returns the shape for input index
         
@@ -3306,7 +3312,7 @@ class Node:
                         :return: Number of inputs.
                         :rtype: int
         """
-    def get_input_tensor(self, index: int) -> DescriptorTensor:
+    def get_input_tensor(self, index: typing.SupportsInt) -> DescriptorTensor:
         """
                         Returns the tensor for the node's input with index i
         
@@ -3330,7 +3336,7 @@ class Node:
                         :return: Unique name of the node.
                         :rtype: str
         """
-    def get_output_element_type(self, index: int) -> Type:
+    def get_output_element_type(self, index: typing.SupportsInt) -> Type:
         """
                         Returns the element type for output index
         
@@ -3339,7 +3345,7 @@ class Node:
                         :return: Type of the output index
                         :rtype: openvino.Type
         """
-    def get_output_partial_shape(self, index: int) -> PartialShape:
+    def get_output_partial_shape(self, index: typing.SupportsInt) -> PartialShape:
         """
                         Returns the partial shape for output index
         
@@ -3348,7 +3354,7 @@ class Node:
                         :return: PartialShape of the output index
                         :rtype: openvino.PartialShape
         """
-    def get_output_shape(self, index: int) -> Shape:
+    def get_output_shape(self, index: typing.SupportsInt) -> Shape:
         """
                         Returns the shape for output index
         
@@ -3364,7 +3370,7 @@ class Node:
                         :return: Number of outputs.
                         :rtype: int
         """
-    def get_output_tensor(self, index: int) -> DescriptorTensor:
+    def get_output_tensor(self, index: typing.SupportsInt) -> DescriptorTensor:
         """
                         Returns the tensor for output index
         
@@ -3389,7 +3395,7 @@ class Node:
                         :return: String representing Type's name.
                         :rtype: str
         """
-    def input(self, input_index: int) -> Input:
+    def input(self, input_index: typing.SupportsInt) -> Input:
         """
                         A handle to the input_index input of this node.
         
@@ -3398,7 +3404,7 @@ class Node:
                         :return: Input of this node.
                         :rtype: openvino.Input
         """
-    def input_value(self, index: int) -> Output:
+    def input_value(self, index: typing.SupportsInt) -> Output:
         """
                         Returns input of the node with index i
         
@@ -3421,7 +3427,7 @@ class Node:
                         :return: List of node's inputs.
                         :rtype: List[openvino.Input]
         """
-    def output(self, output_index: int) -> Output:
+    def output(self, output_index: typing.SupportsInt) -> Output:
         """
                         A handle to the output_index output of this node.
         
@@ -3437,13 +3443,13 @@ class Node:
                         :return: List of node's outputs.
                         :rtype: List[openvino.Output]
         """
-    def set_argument(self, arg0: int, arg1: Output) -> None:
+    def set_argument(self, arg0: typing.SupportsInt, arg1: Output) -> None:
         ...
     @typing.overload
-    def set_arguments(self, arg0: list[Node]) -> None:
+    def set_arguments(self, arg0: collections.abc.Sequence[Node]) -> None:
         ...
     @typing.overload
-    def set_arguments(self, arg0: list[Output]) -> None:
+    def set_arguments(self, arg0: collections.abc.Sequence[Output]) -> None:
         ...
     def set_attribute(self, arg0: str, arg1: typing.Any) -> None:
         ...
@@ -3456,14 +3462,14 @@ class Node:
                         :param name: Friendly name to set.
                         :type name: str
         """
-    def set_output_size(self, size: int) -> None:
+    def set_output_size(self, size: typing.SupportsInt) -> None:
         """
                         Sets the number of outputs
         
                         :param size: number of outputs.
                         :type size: int
         """
-    def set_output_type(self, index: int, element_type: Type, shape: PartialShape) -> None:
+    def set_output_type(self, index: typing.SupportsInt, element_type: Type, shape: PartialShape) -> None:
         """
                         Sets output's element type and shape.
         
@@ -3499,13 +3505,13 @@ class NodeContext:
     def get_attribute(self, name: str, default_value: typing.Any = None, dtype: typing.Any = None) -> typing.Any:
         ...
     @typing.overload
-    def get_input(self, arg0: int) -> Output:
+    def get_input(self, arg0: typing.SupportsInt) -> Output:
         ...
     @typing.overload
     def get_input(self, arg0: str) -> Output:
         ...
     @typing.overload
-    def get_input(self, arg0: str, arg1: int) -> Output:
+    def get_input(self, arg0: str, arg1: typing.SupportsInt) -> Output:
         ...
     @typing.overload
     def get_input_size(self) -> int:
@@ -3515,7 +3521,7 @@ class NodeContext:
         ...
     def get_op_type(self, arg0: str) -> str:
         ...
-    def get_values_from_const_input(self, idx: int, default_value: typing.Any = None, dtype: typing.Any = None) -> typing.Any:
+    def get_values_from_const_input(self, idx: typing.SupportsInt, default_value: typing.Any = None, dtype: typing.Any = None) -> typing.Any:
         ...
     def has_attribute(self, arg0: str) -> bool:
         ...
@@ -3535,7 +3541,7 @@ class NodeFactory:
     def add_extension(self, arg0: Extension) -> None:
         ...
     @typing.overload
-    def add_extension(self, arg0: list[Extension]) -> None:
+    def add_extension(self, arg0: collections.abc.Sequence[Extension]) -> None:
         ...
     @typing.overload
     def add_extension(self, arg0: typing.Any) -> None:
@@ -3544,7 +3550,7 @@ class NodeFactory:
     def create(self, arg0: str) -> Node:
         ...
     @typing.overload
-    def create(self, arg0: str, arg1: list[Output], arg2: dict) -> Node:
+    def create(self, arg0: str, arg1: collections.abc.Sequence[Output], arg2: dict) -> Node:
         ...
 class NotImplementedFailure(Exception):
     pass
@@ -3576,7 +3582,7 @@ class OVAny:
     def __setitem__(self, arg0: typing.Any, arg1: str) -> None:
         ...
     @typing.overload
-    def __setitem__(self, arg0: typing.Any, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.Any, arg1: typing.SupportsInt) -> None:
         ...
     def aslist(self, dtype: typing.Any = None) -> typing.Any:
         """
@@ -3657,7 +3663,7 @@ class Output:
         ...
     def _from_node(self: typing.Any) -> Output:
         ...
-    def add_names(self, names: set[str]) -> None:
+    def add_names(self, names: collections.abc.Set[str]) -> None:
         """
                     Add tensor names associated with this output.
         
@@ -3750,7 +3756,7 @@ class Output:
                         :param replacement: The node that is a replacement.
                         :type replacement: openvino.Output
         """
-    def set_names(self, names: set[str]) -> None:
+    def set_names(self, names: collections.abc.Set[str]) -> None:
         """
                     Set tensor names associated with this output.
         
@@ -3804,7 +3810,7 @@ class PartialShape:
         """
     @staticmethod
     @typing.overload
-    def dynamic(rank: int) -> PartialShape:
+    def dynamic(rank: typing.SupportsInt) -> PartialShape:
         """
                     Construct a PartialShape with the given rank and all dimensions are dynamic.
         
@@ -3831,7 +3837,7 @@ class PartialShape:
     def __eq__(self, arg0: list) -> bool:
         ...
     @typing.overload
-    def __getitem__(self, arg0: int) -> Dimension:
+    def __getitem__(self, arg0: typing.SupportsInt) -> Dimension:
         ...
     @typing.overload
     def __getitem__(self, arg0: slice) -> PartialShape:
@@ -3851,17 +3857,17 @@ class PartialShape:
     @typing.overload
     def __init__(self, shape: str) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[Dimension]:
+    def __iter__(self) -> collections.abc.Iterator[Dimension]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
     @typing.overload
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
     @typing.overload
-    def __setitem__(self, arg0: int, arg1: Dimension) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: Dimension) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -3875,7 +3881,7 @@ class PartialShape:
                         :return: True if this shape is compatible with s, else False.
                         :rtype: bool
         """
-    def get_dimension(self, index: int) -> Dimension:
+    def get_dimension(self, index: typing.SupportsInt) -> Dimension:
         """
                     Get the dimension at specified index of a partial shape.
         
@@ -4116,7 +4122,7 @@ class ProfilingInfo:
             ...
         def __index__(self) -> int:
             ...
-        def __init__(self, value: int) -> None:
+        def __init__(self, value: typing.SupportsInt) -> None:
             ...
         def __int__(self) -> int:
             ...
@@ -4124,7 +4130,7 @@ class ProfilingInfo:
             ...
         def __repr__(self) -> str:
             ...
-        def __setstate__(self, state: int) -> None:
+        def __setstate__(self, state: typing.SupportsInt) -> None:
             ...
         def __str__(self) -> str:
             ...
@@ -4155,15 +4161,15 @@ class ProgressReporterExtension(Extension):
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: typing.Callable) -> None:
+    def __init__(self, arg0: collections.abc.Callable) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: typing.Callable[[float, int, int], None]) -> None:
+    def __init__(self, arg0: collections.abc.Callable[[typing.SupportsFloat, typing.SupportsInt, typing.SupportsInt], None]) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: typing.Callable[[float, int, int], None]) -> None:
+    def __init__(self, arg0: collections.abc.Callable[[typing.SupportsFloat, typing.SupportsInt, typing.SupportsInt], None]) -> None:
         ...
-    def report_progress(self, arg0: float, arg1: int, arg2: int) -> None:
+    def report_progress(self, arg0: typing.SupportsFloat, arg1: typing.SupportsInt, arg2: typing.SupportsInt) -> None:
         ...
 class RTMap:
     """
@@ -4179,7 +4185,7 @@ class RTMap:
         ...
     def __getitem__(self, arg0: str) -> typing.Any:
         ...
-    def __iter__(self) -> typing.Iterator[str]:
+    def __iter__(self) -> collections.abc.Iterator[str]:
         ...
     def __len__(self) -> int:
         ...
@@ -4189,11 +4195,11 @@ class RTMap:
     def __setitem__(self, arg0: str, arg1: str) -> None:
         ...
     @typing.overload
-    def __setitem__(self, arg0: str, arg1: int) -> None:
+    def __setitem__(self, arg0: str, arg1: typing.SupportsInt) -> None:
         ...
     def items(self) -> typing.Iterator:
         ...
-    def keys(self) -> typing.Iterator[str]:
+    def keys(self) -> collections.abc.Iterator[str]:
         ...
     def values(self) -> typing.Iterator:
         ...
@@ -4214,7 +4220,7 @@ class RemoteContext:
                     :return: A tensor instance with device friendly memory.
                     :rtype: openvino.Tensor
         """
-    def create_tensor(self, type: Type, shape: Shape, properties: dict[str, typing.Any]) -> RemoteTensor:
+    def create_tensor(self, type: Type, shape: Shape, properties: collections.abc.Mapping[str, typing.Any]) -> RemoteTensor:
         """
                     Allocates memory tensor in device memory or wraps user-supplied memory handle
                     using the specified tensor description and low-level device-specific parameters.
@@ -4365,7 +4371,7 @@ class Shape:
     def __eq__(self, arg0: list) -> bool:
         ...
     @typing.overload
-    def __getitem__(self, arg0: int) -> int:
+    def __getitem__(self, arg0: typing.SupportsInt) -> int:
         ...
     @typing.overload
     def __getitem__(self, arg0: slice) -> Shape:
@@ -4374,7 +4380,7 @@ class Shape:
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, axis_lengths: list[int]) -> None:
+    def __init__(self, axis_lengths: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, axis_lengths: Shape) -> None:
@@ -4382,17 +4388,17 @@ class Shape:
     @typing.overload
     def __init__(self, shape: str) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
     @typing.overload
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
     @typing.overload
-    def __setitem__(self, arg0: int, arg1: Dimension) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: Dimension) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -4412,21 +4418,21 @@ class Strides:
     @typing.overload
     def __eq__(self, arg0: list) -> bool:
         ...
-    def __getitem__(self, arg0: int) -> int:
+    def __getitem__(self, arg0: typing.SupportsInt) -> int:
         ...
     @typing.overload
-    def __init__(self, axis_strides: list[int]) -> None:
+    def __init__(self, axis_strides: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, axis_strides: Strides) -> None:
         ...
-    def __iter__(self) -> typing.Iterator[int]:
+    def __iter__(self) -> collections.abc.Iterator[int]:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
-    def __setitem__(self, arg0: int, arg1: int) -> None:
+    def __setitem__(self, arg0: typing.SupportsInt, arg1: typing.SupportsInt) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -4446,14 +4452,14 @@ class Symbol:
         ...
 class TelemetryExtension(Extension):
     @typing.overload
-    def __init__(self, arg0: str, arg1: typing.Callable, arg2: typing.Callable, arg3: typing.Callable) -> None:
+    def __init__(self, arg0: str, arg1: collections.abc.Callable, arg2: collections.abc.Callable, arg3: collections.abc.Callable) -> None:
         ...
     @typing.overload
-    def __init__(self, arg0: str, arg1: typing.Callable[[str, str, str, int], None], arg2: typing.Callable[[str, str], None], arg3: typing.Callable[[str, str], None]) -> None:
+    def __init__(self, arg0: str, arg1: collections.abc.Callable[[str, str, str, typing.SupportsInt], None], arg2: collections.abc.Callable[[str, str], None], arg3: collections.abc.Callable[[str, str], None]) -> None:
         ...
     def send_error(self, arg0: str) -> None:
         ...
-    def send_event(self, arg0: str, arg1: str, arg2: int) -> None:
+    def send_event(self, arg0: str, arg1: str, arg2: typing.SupportsInt) -> None:
         ...
     def send_stack_trace(self, arg0: str) -> None:
         ...
@@ -4508,7 +4514,7 @@ class Tensor:
                             t = ov.Tensor(arr, ov.Shape([100, 8]), ov.Type.u1)
         """
     @typing.overload
-    def __init__(self, array: numpy.ndarray[typing.Any, numpy.dtype[typing.Any]], shape: list[int], type: Type = ...) -> None:
+    def __init__(self, array: numpy.ndarray[typing.Any, numpy.dtype[typing.Any]], shape: collections.abc.Sequence[typing.SupportsInt], type: Type = ...) -> None:
         """
                          Another Tensor's special constructor.
         
@@ -4550,13 +4556,13 @@ class Tensor:
     def __init__(self, type: Type, shape: Shape) -> None:
         ...
     @typing.overload
-    def __init__(self, type: Type, shape: list[int]) -> None:
+    def __init__(self, type: Type, shape: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
-    def __init__(self, type: numpy.dtype[typing.Any], shape: list[int]) -> None:
+    def __init__(self, type: numpy.dtype[typing.Any], shape: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
-    def __init__(self, type: typing.Any, shape: list[int]) -> None:
+    def __init__(self, type: typing.Any, shape: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, type: numpy.dtype[typing.Any], shape: Shape) -> None:
@@ -4612,7 +4618,7 @@ class Tensor:
     def __init__(self, other: Tensor, begin: Coordinate, end: Coordinate) -> None:
         ...
     @typing.overload
-    def __init__(self, other: Tensor, begin: list[int], end: list[int]) -> None:
+    def __init__(self, other: Tensor, begin: collections.abc.Sequence[typing.SupportsInt], end: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @typing.overload
     def __init__(self, image: typing.Any) -> None:
@@ -4720,7 +4726,7 @@ class Tensor:
                     Sets Tensor's shape.
         """
     @typing.overload
-    def set_shape(self, arg0: list[int]) -> None:
+    def set_shape(self, arg0: collections.abc.Sequence[typing.SupportsInt]) -> None:
         """
                     Sets Tensor's shape.
         """
@@ -4777,7 +4783,7 @@ class Tensor:
                     Tensor's shape get/set.
         """
     @shape.setter
-    def shape(self, arg1: list[int]) -> None:
+    def shape(self, arg1: collections.abc.Sequence[typing.SupportsInt]) -> None:
         ...
     @property
     def size(self) -> int:
@@ -4926,7 +4932,7 @@ class Type:
     def type_name(self) -> str:
         ...
 class VAContext(RemoteContext):
-    def __init__(self, core: Core, display: capsule, target_tile_id: int = -1) -> None:
+    def __init__(self, core: Core, display: typing_extensions.CapsuleType, target_tile_id: typing.SupportsInt = -1) -> None:
         """
                     Constructs remote context object from valid VA display handle.
         
@@ -4940,7 +4946,7 @@ class VAContext(RemoteContext):
                     :return: A context instance.
                     :rtype: openvino.VAContext
         """
-    def create_tensor(self, type: Type, shape: Shape, surface: int, plane: int = 0) -> VASurfaceTensorWrapper:
+    def create_tensor(self, type: Type, shape: Shape, surface: typing.SupportsInt, plane: typing.SupportsInt = 0) -> VASurfaceTensorWrapper:
         """
                     Create remote tensor from VA surface handle.
         
@@ -4957,7 +4963,7 @@ class VAContext(RemoteContext):
                     :return: A remote tensor instance wrapping `VASurfaceID`.
                     :rtype: openvino.VASurfaceTensor
         """
-    def create_tensor_nv12(self, height: int, width: int, nv12_surface: int) -> tuple:
+    def create_tensor_nv12(self, height: typing.SupportsInt, width: typing.SupportsInt, nv12_surface: typing.SupportsInt) -> tuple:
         """
                     This function is used to obtain a NV12 tensor from NV12 VA decoder output.
                     The result contains two remote tensors for Y and UV planes of the surface.
@@ -5146,7 +5152,7 @@ def serialize(model: typing.Any, xml_path: typing.Any, bin_path: typing.Any = ''
 def set_batch(model: typing.Any, dimension: Dimension) -> None:
     ...
 @typing.overload
-def set_batch(model: typing.Any, batch_size: int = -1) -> None:
+def set_batch(model: typing.Any, batch_size: typing.SupportsInt = -1) -> None:
     ...
 def shutdown() -> None:
     """
