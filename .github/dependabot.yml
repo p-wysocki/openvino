@@ -7,7 +7,8 @@ updates:
   #
 
   #
-  # Root Python dependencies (pyproject.toml)
+  # Root Python dependencies (pyproject.toml only - dependency-groups)
+  # Note: Uses allow list to prevent conflicts with docs/requirements.txt and tests/constraints.txt
   #
   - package-ecosystem: pip
     directory: "/"
@@ -16,6 +17,25 @@ updates:
       time: "12:50"
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 50
+    assignees:
+      - "p-wysocki"
+    allow:
+      - dependency-name: "numpy"
+      - dependency-name: "openvino-telemetry"
+      - dependency-name: "pytest"
+      - dependency-name: "pytest-cov"
+      - dependency-name: "black"
+      - dependency-name: "ruff"
+    versioning-strategy: increase-if-necessary
+
+  # Docs dependencies
+  - package-ecosystem: pip
+    directory: "/docs"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Europe/Warsaw"
+    open-pull-requests-limit: 3
     assignees:
       - "p-wysocki"
     versioning-strategy: increase-if-necessary
