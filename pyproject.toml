@@ -29,7 +29,7 @@ test = [
 dev = [
     { include-group = "test" },
     "black==23.1.0",
-    "ruff==0.0.280",
+    "ruff==0.14.10",
 ]
 
 [build-system]
