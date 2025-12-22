@@ -26,7 +26,7 @@ updates:
       - dependency-name: "pytest-cov"
       - dependency-name: "black"
       - dependency-name: "ruff"
-    versioning-strategy: increase-if-necessary
+    versioning-strategy: widen
 
   # Docs dependencies
   - package-ecosystem: pip
