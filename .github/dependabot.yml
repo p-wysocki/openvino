@@ -13,14 +13,11 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-      time: "12:30"
+      time: "12:50"
       timezone: "Europe/Warsaw"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 50
     assignees:
       - "p-wysocki"
-      - "akuporos"
-      - "rkazants"
-      - "mryzhov"
     versioning-strategy: increase-if-necessary
 
   # Python API, Frontends
