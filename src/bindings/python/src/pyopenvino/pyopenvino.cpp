@@ -27,6 +27,7 @@
 #include "pyopenvino/core/async_infer_queue.hpp"
 #include "pyopenvino/core/compiled_model.hpp"
 #include "pyopenvino/core/core.hpp"
+#include "pyopenvino/core/data_dispatcher.hpp"
 #include "pyopenvino/core/extension.hpp"
 #include "pyopenvino/core/infer_request.hpp"
 #include "pyopenvino/core/offline_transformations.hpp"
@@ -299,6 +300,9 @@ PYBIND11_MODULE(_pyopenvino, m) {
 
     // Properties and hints
     regmodule_properties(m);
+
+    // Data dispatcher - fast C++ implementation
+    Common::data_dispatch::regmodule_data_dispatch(m);
 
     // frontend
     regclass_frontend_Place(m);
