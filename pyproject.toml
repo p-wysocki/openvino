@@ -30,8 +30,7 @@ test-basic-updates = [
 # Test if dependabot updates when newer versions dropped Python 3.10 support
 test-python-compat = [
     "black==22.0.0",
-    "numpy>=1.16.6,<2.1.0; python_version<'3.11'",
-    "numpy>=1.16.6,<2.1.0; python_version>='3.11'",
+    "numpy>=1.16.6,<2.1.0
 ]
 
 [build-system]
