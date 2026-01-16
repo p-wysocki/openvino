@@ -17,8 +17,20 @@ classifiers = [
 requires-python = ">=3.10"
 
 dependencies = [
-    "numpy>=1.16.6,<2.5.0",
     "openvino-telemetry>=2023.2.1",
+]
+
+[dependency-groups]
+# Test case 1: Normal dependency updates - these should be updated freely
+test-basic-updates = [
+    "requests==2.28.0",
+]
+
+# Test case 2: Python version compatibility edge case
+# Test if dependabot updates when newer versions dropped Python 3.10 support
+test-python-compat = [
+    "black==22.0.0",
+    "numpy>=1.16.6,<2.1.0",
 ]
 
 [build-system]
