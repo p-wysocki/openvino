@@ -66,7 +66,7 @@ bool ov::pass::SDPAToPagedAttention::run_on_model(const std::shared_ptr<ov::Mode
     ParameterVector model_wide_params{
         named_parameter(std::make_shared<v0::Parameter>(element::i32, PartialShape{-1}), "past_lens"),
         named_parameter(std::make_shared<v0::Parameter>(element::i32, PartialShape{-1}), "subsequence_begins"),
-        named_parameter(std::make_shared<v0::Parameter>(element::i32, PartialShape{-1}), "token_type_ids");
+        named_parameter(std::make_shared<v0::Parameter>(element::i32, PartialShape{-1}), "token_type_ids"),
         named_parameter(std::make_shared<v0::Parameter>(element::i32, PartialShape{-1}), "block_indices_begins"),
     };
     if (!m_use_per_layer_block_indices_inputs) {
