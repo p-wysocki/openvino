@@ -26,10 +26,11 @@ For this POC, we want to create a single mega kernel for the decode step of Qwen
 The kernel will be integrated with the GPU plugin and, as such, can be used with frameworks such as GenAI and Optimum to run the Qwen3 0.6B model.
 
 Assumptions:
-Model: Qwen3 0.6B
-HW: B60 GPU
-Batch size = 1 only
-Decode step only
+
+- Model: Qwen3 0.6B
+- HW: B60 GPU
+- Batch size = 1 only
+- Decode step only
 
 **3. Expected speedup**
 
