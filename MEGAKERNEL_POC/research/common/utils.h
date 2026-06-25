@@ -18,5 +18,4 @@ inline std::vector<float> createRandomBuffer(size_t elementCount,
   return buffer;
 }
 
-
-}  // namespace test
+}  // namespace utils
