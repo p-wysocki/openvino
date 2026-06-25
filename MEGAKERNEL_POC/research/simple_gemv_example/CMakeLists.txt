@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(preloading_test LANGUAGES CXX)
+set(APPLICATION_NAME "simple_gemv_example")
+
+project(${APPLICATION_NAME} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,15 +21,15 @@ add_subdirectory("${OPENVINO_SOURCE_DIR}/thirdparty/gtest/gtest" "${CMAKE_CURREN
 file(GLOB_RECURSE PRELOADING_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/src/*.cpp")
 file(GLOB_RECURSE COMMON_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/../common/*.cpp")
 
-add_executable(preloading_test ${PRELOADING_TEST_SOURCES} ${COMMON_SOURCES})
-target_compile_definitions(preloading_test PRIVATE
+add_executable(${APPLICATION_NAME} ${PRELOADING_TEST_SOURCES} ${COMMON_SOURCES})
+target_compile_definitions(${APPLICATION_NAME} PRIVATE
     CL_TARGET_OPENCL_VERSION=120
     OPENCL_KERNEL_SOURCE_PATH="${CMAKE_CURRENT_LIST_DIR}/src/ocl/gemv.cl")
-target_link_libraries(preloading_test PRIVATE OpenCL::OpenCL gtest_main)
+target_link_libraries(${APPLICATION_NAME} PRIVATE OpenCL::OpenCL gtest_main)
 
 enable_testing()
-add_test(NAME preloading_test COMMAND preloading_test)
+add_test(NAME ${APPLICATION_NAME} COMMAND ${APPLICATION_NAME})
 
 if(UNIX AND NOT APPLE)
-    set_target_properties(preloading_test PROPERTIES BUILD_RPATH "$ORIGIN")
+    set_target_properties(${APPLICATION_NAME} PROPERTIES BUILD_RPATH "$ORIGIN")
 endif()
