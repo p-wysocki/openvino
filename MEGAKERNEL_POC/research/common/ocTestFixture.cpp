@@ -211,7 +211,8 @@ void OclTestFixture::SetUp() {
   oclContext = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  commandQueue = clCreateCommandQueue(oclContext, device, 0, &status);
+  commandQueue = clCreateCommandQueue(oclContext, device,
+                                      CL_QUEUE_PROFILING_ENABLE, &status);
   ASSERT_OCL_SUCCESS(status);
 }
 
