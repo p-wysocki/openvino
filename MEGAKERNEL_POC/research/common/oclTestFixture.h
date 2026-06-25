@@ -82,6 +82,9 @@ class OclTestFixture : public testing::Test {
   // Returns the OpenCL command queue.
   cl_command_queue queue() const { return commandQueue; }
 
+  // Returns the selected OpenCL device.
+  cl_device_id deviceId() const { return device; }
+
  private:
   cl_device_id device = nullptr;
   cl_context oclContext = nullptr;
