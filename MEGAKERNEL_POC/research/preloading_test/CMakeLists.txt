@@ -16,7 +16,10 @@ set(INSTALL_GTEST OFF CACHE BOOL "Disable GoogleTest install rules")
 add_subdirectory("${OPENVINO_SOURCE_DIR}/thirdparty/ocl/icd_loader" "${CMAKE_CURRENT_BINARY_DIR}/opencl_icd_loader")
 add_subdirectory("${OPENVINO_SOURCE_DIR}/thirdparty/gtest/gtest" "${CMAKE_CURRENT_BINARY_DIR}/gtest" EXCLUDE_FROM_ALL)
 
-add_executable(preloading_test src/main.cpp)
+file(GLOB_RECURSE PRELOADING_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/src/*.cpp")
+file(GLOB_RECURSE COMMON_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/../common/*.cpp")
+
+add_executable(preloading_test ${PRELOADING_TEST_SOURCES} ${COMMON_SOURCES})
 target_compile_definitions(preloading_test PRIVATE
     CL_TARGET_OPENCL_VERSION=120
     OPENCL_KERNEL_SOURCE_PATH="${CMAKE_CURRENT_LIST_DIR}/src/ocl/gemv.cl")

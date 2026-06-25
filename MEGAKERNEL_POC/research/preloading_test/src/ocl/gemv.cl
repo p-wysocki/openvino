@@ -1,17 +1,18 @@
+
 __kernel void gemv(__global const float* matrix,
                    __global const float* vector,
                    __global float* result,
-                   const uint row_count,
-                   const uint column_count) {
+                   const uint rowCount,
+                   const uint columnCount) {
     const uint row = get_global_id(0);
-    if (row >= row_count) {
+    if (row >= rowCount) {
         return;
     }
 
     float accumulator = 0.0f;
-    const uint row_offset = row * column_count;
-    for (uint column = 0; column < column_count; ++column) {
-        accumulator += matrix[row_offset + column] * vector[column];
+    const uint rowOffset = row * columnCount;
+    for (uint column = 0; column < columnCount; ++column) {
+        accumulator += matrix[rowOffset + column] * vector[column];
     }
 
     result[row] = accumulator;
