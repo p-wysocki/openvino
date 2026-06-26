@@ -1,0 +1,165 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#include "megakernel_decode.hpp"
+
+#include "../common_utils/dispatch_utils.hpp"
+#include "../common_utils/jitter.hpp"
+#include "intel_gpu/primitives/megakernel_decode.hpp"
+#include "megakernel_decode_inst.h"
+#include "../primitive_ocl_base.hpp"
+#include "../utils/kernel_generator.hpp"
+#include "ocl_v2/utils/jitter.hpp"
+#include "intel_gpu/runtime/memory.hpp"
+#include "intel_gpu/graph/network.hpp"
+
+namespace ov::intel_gpu::ocl {
+namespace {
+
+// ---------------------------------------------------------------------------
+// KernelGenerator
+// ---------------------------------------------------------------------------
+// Kernel "megakernel_decode_zero" is dispatched 2D:
+//   global[0] = hidden_states_out element count   (output 0)
+//   global[1] = present_key       element count   (output 1 == output 2)
+//
+// The kernel simply stores 0.0f at each gid — it is a placeholder for the
+// real fused-layer kernel to be written later.
+// ---------------------------------------------------------------------------
+class MegaKernelDecodeZeroGenerator : public KernelGenerator {
+public:
+    MegaKernelDecodeZeroGenerator() : KernelGenerator("megakernel_decode", "zero") {}
+
+protected:
+    // Inputs are listed here even though the zero-fill placeholder kernel
+    // doesn't read them — they must be wired so the real kernel can access
+    // every weight and cache buffer without interface changes.
+    [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {
+        Arguments args;
+        if (params.is_dynamic()) {
+            args.push_back({ArgumentDescriptor::Types::SHAPE_INFO, 0});
+        }
+        // All 17 inputs (hidden_states … rope_inv_freq)
+        for (uint32_t i = 0; i < 17; i++) {
+            args.push_back({ArgumentDescriptor::Types::INPUT, i});
+        }
+        // 3 outputs (hidden_states_out, present_key, present_val)
+        args.push_back({ArgumentDescriptor::Types::OUTPUT, 0});
+        args.push_back({ArgumentDescriptor::Types::OUTPUT, 1});
+        args.push_back({ArgumentDescriptor::Types::OUTPUT, 2});
+        return args;
+    }
+
+    // Generate complete JIT tensor constants for ALL inputs and outputs so the real
+    // kernel implementation can use INPUT0..INPUT16 and OUTPUT0..OUTPUT2 macros with
+    // their shape/pitch/format descriptors.  We iterate inputs explicitly (following
+    // the SDPA pattern) rather than delegating to the base make_tensors_jit_constants,
+    // which gives us clear per-input control and robust error reporting.
+    [[nodiscard]] JitConstants get_jit_constants(const RuntimeParams& params) const override {
+        // Base defines: KERNEL(), IS_DYNAMIC, OPTIONAL_SHAPE_INFO_ARG, etc.
+        auto jit = KernelGenerator::make_base_jit_constants(params);
+
+        const auto& in_offsets_map  = params.in_port_to_shape_info_offset;
+        const auto& out_offsets_map = params.out_port_to_shape_info_offset;
+
+        // INPUT0..INPUT16 — all 17 inputs (hidden_states … rope_inv_freq)
+        for (size_t i = 0; i < params.input_layouts.size(); i++) {
+            jit.add(make_layout_jit_constants("INPUT" + to_code_string(i),
+                                              params.input_layouts[i],
+                                              in_offsets_map.at(i)));
+        }
+
+        // OUTPUT / OUTPUT1 / OUTPUT2 — hidden_states_out, present_key, present_val
+        jit.add(make_layout_jit_constants("OUTPUT",
+                                          params.output_layouts[0],
+                                          out_offsets_map.at(0)));
+        for (size_t i = 1; i < params.output_layouts.size(); i++) {
+            jit.add(make_layout_jit_constants("OUTPUT" + to_code_string(i),
+                                              params.output_layouts[i],
+                                              out_offsets_map.at(i)));
+        }
+
+        // MegaKernel-specific compile-time constants available in the kernel.
+        const auto& desc = params.typed_desc<cldnn::megakernel_decode>();
+        jit.make("MEGAKERNEL_NUM_LAYERS",    desc->num_layers);
+        jit.make("MEGAKERNEL_HIDDEN_SIZE",   desc->hidden_size);
+        jit.make("MEGAKERNEL_NUM_KV_HEADS",  desc->num_kv_heads);
+        jit.make("MEGAKERNEL_HEAD_DIM",      desc->head_dim);
+
+        return jit;
+    }
+
+    [[nodiscard]] DispatchDataFunc get_dispatch_data_func() const override {
+        return DispatchDataFunc{[](const RuntimeParams& params, KernelData& kd, ImplRuntimeParams*) {
+            auto& wgs = kd.params.workGroups;
+
+            const auto& out0 = params.get_output_layout(0);
+            const auto& out1 = params.get_output_layout(1);
+
+            const size_t n0 = out0.is_dynamic() ? 1 : out0.count();
+            const size_t n1 = out1.is_dynamic() ? 1 : out1.count();
+
+            wgs.global = {n0, n1, 1};
+            wgs.local  = ov::intel_gpu::get_optimal_lws(wgs.global, params.get_device_info());
+        }};
+    }
+};
+
+// ---------------------------------------------------------------------------
+// PrimitiveImplOCL wrapper
+// ---------------------------------------------------------------------------
+class MegaKernelDecodeZeroImpl : public PrimitiveImplOCL {
+public:
+    DECLARE_OBJECT_TYPE_SERIALIZATION(ov::intel_gpu::ocl::MegaKernelDecodeZeroImpl)
+
+    Stage::Ptr zero_stage = make_stage<MegaKernelDecodeZeroGenerator>();
+
+    MegaKernelDecodeZeroImpl() : PrimitiveImplOCL(MegaKernelDecodeImpl::get_type_info_static()) {}
+
+    explicit MegaKernelDecodeZeroImpl(const program_node& node, const RuntimeParams& params)
+        : MegaKernelDecodeZeroImpl() {
+        std::cerr << "[MegaKernelDecodeZeroImpl] ctor: add_stage start\n";
+        add_stage(zero_stage, params);
+        std::cerr << "[MegaKernelDecodeZeroImpl] ctor: add_stage done\n";
+    }
+
+    [[nodiscard]] std::unique_ptr<primitive_impl> clone() const override {
+        return make_deep_copy<MegaKernelDecodeZeroImpl>(this);
+    }
+
+    // Override get_arguments to handle null past_key/past_val inputs (inputs 3 and 4).
+    // During prefill the KV-cache variable buffers have zero sequence length and the
+    // ReadValue node may not have allocated memory.  We substitute the corresponding
+    // OUTPUT buffer (present_key / present_val) so the kernel argument slot is never
+    // null.  The placeholder zero-fill kernel does not read past KV data anyway.
+    [[nodiscard]] cldnn::kernel_arguments_data get_arguments(const cldnn::primitive_inst& instance) const override {
+        cldnn::kernel_arguments_data args = PrimitiveImplOCL::get_arguments(instance);
+
+        // Input 3 = past_key, Input 4 = past_val — substitute output 1/2 if null.
+        if (args.inputs.size() > 4) {
+            if (!args.inputs[3] && args.outputs.size() > 1 && args.outputs[1])
+                args.inputs[3] = args.outputs[1];
+            if (!args.inputs[4] && args.outputs.size() > 2 && args.outputs[2])
+                args.inputs[4] = args.outputs[2];
+        }
+
+        return args;
+    }
+};
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Factory entry point
+// ---------------------------------------------------------------------------
+std::unique_ptr<primitive_impl> MegaKernelDecodeImpl::create_impl(const program_node& node,
+                                                                    const RuntimeParams& params) const {
+    OPENVINO_ASSERT(node.is_type<megakernel_decode>());
+    return std::make_unique<MegaKernelDecodeZeroImpl>(node, params);
+}
+
+}  // namespace ov::intel_gpu::ocl
+
+BIND_BINARY_BUFFER_WITH_TYPE(cldnn::megakernel_decode)
+BIND_BINARY_BUFFER_WITH_TYPE(ov::intel_gpu::ocl::MegaKernelDecodeZeroImpl)
