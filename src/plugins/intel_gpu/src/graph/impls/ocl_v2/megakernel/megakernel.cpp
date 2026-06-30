@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "megakernel_decode.hpp"
+#include "megakernel.hpp"
 
 #include "../common_utils/dispatch_utils.hpp"
 #include "../common_utils/jitter.hpp"
-#include "intel_gpu/primitives/megakernel_decode.hpp"
-#include "megakernel_decode_inst.h"
+#include "intel_gpu/primitives/megakernel.hpp"
+#include "megakernel_inst.h"
 #include "../primitive_ocl_base.hpp"
 #include "../utils/kernel_generator.hpp"
 #include "ocl_v2/utils/jitter.hpp"
@@ -20,16 +20,16 @@ namespace {
 // ---------------------------------------------------------------------------
 // KernelGenerator
 // ---------------------------------------------------------------------------
-// Kernel "megakernel_decode_zero" is dispatched 2D:
+// Kernel "megakernel_zero" is dispatched 2D:
 //   global[0] = hidden_states_out element count   (output 0)
 //   global[1] = present_key       element count   (output 1 == output 2)
 //
 // The kernel simply stores 0.0f at each gid — it is a placeholder for the
 // real fused-layer kernel to be written later.
 // ---------------------------------------------------------------------------
-class MegaKernelDecodeZeroGenerator : public KernelGenerator {
+class MegaKernelZeroGenerator : public KernelGenerator {
 public:
-    MegaKernelDecodeZeroGenerator() : KernelGenerator("megakernel_decode", "zero") {}
+    MegaKernelZeroGenerator() : KernelGenerator("megakernel", "zero") {}
 
 protected:
     // Inputs are listed here even though the zero-fill placeholder kernel
@@ -81,27 +81,26 @@ protected:
         }
 
         // MegaKernel-specific compile-time constants available in the kernel.
-        const auto& desc = params.typed_desc<cldnn::megakernel_decode>();
+        const auto& desc = params.typed_desc<cldnn::megakernel>();
         jit.make("MEGAKERNEL_NUM_LAYERS",    desc->num_layers);
         jit.make("MEGAKERNEL_HIDDEN_SIZE",   desc->hidden_size);
         jit.make("MEGAKERNEL_NUM_KV_HEADS",  desc->num_kv_heads);
         jit.make("MEGAKERNEL_HEAD_DIM",      desc->head_dim);
+        jit.make("MEGAKERNEL_NUM_HEADS",     desc->num_heads);
+        jit.make("MEGAKERNEL_INTERMEDIATE_SIZE", desc->intermediate_size);
+        jit.make("MEGAKERNEL_RMS_EPS",       desc->rms_norm_eps);
 
         return jit;
     }
 
     [[nodiscard]] DispatchDataFunc get_dispatch_data_func() const override {
         return DispatchDataFunc{[](const RuntimeParams& params, KernelData& kd, ImplRuntimeParams*) {
+            // The fused kernel runs as a SINGLE work-group; all 256 work-items
+            // cooperate over the one decode token via __local memory + barriers.
             auto& wgs = kd.params.workGroups;
-
-            const auto& out0 = params.get_output_layout(0);
-            const auto& out1 = params.get_output_layout(1);
-
-            const size_t n0 = out0.is_dynamic() ? 1 : out0.count();
-            const size_t n1 = out1.is_dynamic() ? 1 : out1.count();
-
-            wgs.global = {n0, n1, 1};
-            wgs.local  = ov::intel_gpu::get_optimal_lws(wgs.global, params.get_device_info());
+            constexpr size_t LWS = 256;
+            wgs.global = {LWS, 1, 1};
+            wgs.local  = {LWS, 1, 1};
         }};
     }
 };
@@ -109,23 +108,21 @@ protected:
 // ---------------------------------------------------------------------------
 // PrimitiveImplOCL wrapper
 // ---------------------------------------------------------------------------
-class MegaKernelDecodeZeroImpl : public PrimitiveImplOCL {
+class MegaKernelZeroImpl : public PrimitiveImplOCL {
 public:
-    DECLARE_OBJECT_TYPE_SERIALIZATION(ov::intel_gpu::ocl::MegaKernelDecodeZeroImpl)
+    DECLARE_OBJECT_TYPE_SERIALIZATION(ov::intel_gpu::ocl::MegaKernelZeroImpl)
 
-    Stage::Ptr zero_stage = make_stage<MegaKernelDecodeZeroGenerator>();
+    Stage::Ptr zero_stage = make_stage<MegaKernelZeroGenerator>();
 
-    MegaKernelDecodeZeroImpl() : PrimitiveImplOCL(MegaKernelDecodeImpl::get_type_info_static()) {}
+    MegaKernelZeroImpl() : PrimitiveImplOCL(MegaKernelImpl::get_type_info_static()) {}
 
-    explicit MegaKernelDecodeZeroImpl(const program_node& node, const RuntimeParams& params)
-        : MegaKernelDecodeZeroImpl() {
-        std::cerr << "[MegaKernelDecodeZeroImpl] ctor: add_stage start\n";
+    explicit MegaKernelZeroImpl(const program_node& node, const RuntimeParams& params)
+        : MegaKernelZeroImpl() {
         add_stage(zero_stage, params);
-        std::cerr << "[MegaKernelDecodeZeroImpl] ctor: add_stage done\n";
     }
 
     [[nodiscard]] std::unique_ptr<primitive_impl> clone() const override {
-        return make_deep_copy<MegaKernelDecodeZeroImpl>(this);
+        return make_deep_copy<MegaKernelZeroImpl>(this);
     }
 
     // Override get_arguments to handle null past_key/past_val inputs (inputs 3 and 4).
@@ -153,13 +150,13 @@ public:
 // ---------------------------------------------------------------------------
 // Factory entry point
 // ---------------------------------------------------------------------------
-std::unique_ptr<primitive_impl> MegaKernelDecodeImpl::create_impl(const program_node& node,
+std::unique_ptr<primitive_impl> MegaKernelImpl::create_impl(const program_node& node,
                                                                     const RuntimeParams& params) const {
-    OPENVINO_ASSERT(node.is_type<megakernel_decode>());
-    return std::make_unique<MegaKernelDecodeZeroImpl>(node, params);
+    OPENVINO_ASSERT(node.is_type<megakernel>());
+    return std::make_unique<MegaKernelZeroImpl>(node, params);
 }
 
 }  // namespace ov::intel_gpu::ocl
 
-BIND_BINARY_BUFFER_WITH_TYPE(cldnn::megakernel_decode)
-BIND_BINARY_BUFFER_WITH_TYPE(ov::intel_gpu::ocl::MegaKernelDecodeZeroImpl)
+BIND_BINARY_BUFFER_WITH_TYPE(cldnn::megakernel)
+BIND_BINARY_BUFFER_WITH_TYPE(ov::intel_gpu::ocl::MegaKernelZeroImpl)

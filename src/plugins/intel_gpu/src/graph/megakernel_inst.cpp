@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "megakernel_decode_inst.h"
+#include "megakernel_inst.h"
 
-#include "intel_gpu/op/megakernel_decode.hpp"
+#include "intel_gpu/op/megakernel.hpp"
 #include "json_object.h"
 #include "primitive_type_base.h"
 
@@ -12,7 +12,7 @@
 
 namespace cldnn {
 
-GPU_DEFINE_PRIMITIVE_TYPE_ID(megakernel_decode)
+GPU_DEFINE_PRIMITIVE_TYPE_ID(megakernel)
 
 // ---------------------------------------------------------------------------
 // Shape inference
@@ -23,9 +23,9 @@ GPU_DEFINE_PRIMITIVE_TYPE_ID(megakernel_decode)
 //   [2]  present_val        [num_layers, B, num_kv_heads, S_past + S, head_dim]
 
 template <typename ShapeType>
-std::vector<layout> megakernel_decode_inst::calc_output_layouts(megakernel_decode_node const& /*node*/,
+std::vector<layout> megakernel_inst::calc_output_layouts(megakernel_node const& /*node*/,
                                                                  const kernel_impl_params& impl_param) {
-    auto desc = impl_param.typed_desc<megakernel_decode>();
+    auto desc = impl_param.typed_desc<megakernel>();
 
     const auto& hs_layout   = impl_param.get_input_layout(0);  // hidden_states
     const auto& past_layout = impl_param.get_input_layout(3);  // past_key [L,B,Kh,S_past,Hd]
@@ -58,19 +58,19 @@ std::vector<layout> megakernel_decode_inst::calc_output_layouts(megakernel_decod
     return {out0, out1, out2};
 }
 
-layout megakernel_decode_inst::calc_output_layout(megakernel_decode_node const& node,
+layout megakernel_inst::calc_output_layout(megakernel_node const& node,
                                                    kernel_impl_params const& impl_param) {
     return calc_output_layouts<ov::PartialShape>(node, impl_param)[0];
 }
 
-template std::vector<layout> megakernel_decode_inst::calc_output_layouts<ov::PartialShape>(
-    megakernel_decode_node const& node,
+template std::vector<layout> megakernel_inst::calc_output_layouts<ov::PartialShape>(
+    megakernel_node const& node,
     const kernel_impl_params& impl_param);
 
 // ---------------------------------------------------------------------------
 // to_string / constructor
 // ---------------------------------------------------------------------------
-std::string megakernel_decode_inst::to_string(megakernel_decode_node const& node) {
+std::string megakernel_inst::to_string(megakernel_node const& node) {
     auto desc = node.get_primitive();
     auto node_info = node.desc_to_json();
     std::stringstream ss;
@@ -79,12 +79,12 @@ std::string megakernel_decode_inst::to_string(megakernel_decode_node const& node
     info.add("hidden_size",  desc->hidden_size);
     info.add("num_kv_heads", desc->num_kv_heads);
     info.add("head_dim",     desc->head_dim);
-    node_info->add("megakernel_decode_info", info);
+    node_info->add("megakernel_info", info);
     node_info->dump(ss);
     return ss.str();
 }
 
-megakernel_decode_inst::typed_primitive_inst(network& network, megakernel_decode_node const& node)
+megakernel_inst::typed_primitive_inst(network& network, megakernel_node const& node)
     : parent(network, node) {}
 
 }  // namespace cldnn

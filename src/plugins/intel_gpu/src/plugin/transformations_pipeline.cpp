@@ -103,7 +103,7 @@
 #include "plugin/transformations/keep_xattention_threshold_precision.hpp"
 #include "plugin/transformations/kv_cache_compression.hpp"
 #include "plugin/transformations/kv_cache_fusion.hpp"
-#include "plugin/transformations/insert_megakernel_decode.hpp"
+#include "plugin/transformations/insert_megakernel.hpp"
 #include "plugin/transformations/lora_horizontal_fusion.hpp"
 #include "plugin/transformations/lora_subgraph_horizontal_fusion.hpp"
 #include "plugin/transformations/move_fc_reshape_to_weights.hpp"
@@ -1576,12 +1576,12 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
             const auto& rank = node->input(0).get_partial_shape().rank().get_length();
             return rank != 4;
         });
-        // InsertMegaKernelDecode must run BEFORE KVCacheFusion: after KVCacheFusion
+        // InsertMegaKernel must run BEFORE KVCacheFusion: after KVCacheFusion
         // the ov::op::v6::ReadValue nodes are replaced with ov::intel_gpu::op::ReadValue
         // (a different class hierarchy), which breaks our guard cast.
-        // After InsertMegaKernelDecode removes the 28 SDPA sub-graphs, KVCacheFusion
+        // After InsertMegaKernel removes the 28 SDPA sub-graphs, KVCacheFusion
         // simply finds no matching patterns and is a no-op for this model.
-        manager.register_pass<ov::intel_gpu::InsertMegaKernelDecode>();
+        manager.register_pass<ov::intel_gpu::InsertMegaKernel>();
         manager.register_pass<ov::intel_gpu::KVCacheFusion>();
         manager.register_pass<ov::intel_gpu::FullyConnectedConvertFusion>();
         manager.register_pass<ov::intel_gpu::TransposeFusion>(device_info.supports_immad);

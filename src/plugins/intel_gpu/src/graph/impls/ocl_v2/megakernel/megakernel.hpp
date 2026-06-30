@@ -11,9 +11,9 @@ using namespace cldnn;  // TODO: Remove once namespaces are aligned
 
 namespace ov::intel_gpu::ocl {
 
-struct MegaKernelDecodeImpl : public ImplementationManager {
-    OV_GPU_PRIMITIVE_IMPL("ocl::megakernel_decode")
-    explicit MegaKernelDecodeImpl(shape_types shape_type, ValidateFunc vf = nullptr)
+struct MegaKernelImpl : public ImplementationManager {
+    OV_GPU_PRIMITIVE_IMPL("ocl::megakernel")
+    explicit MegaKernelImpl(shape_types shape_type, ValidateFunc vf = nullptr)
         : ImplementationManager(impl_types::ocl, shape_type, std::move(vf)) {}
 
     [[nodiscard]] std::unique_ptr<primitive_impl> create_impl(const program_node& node,

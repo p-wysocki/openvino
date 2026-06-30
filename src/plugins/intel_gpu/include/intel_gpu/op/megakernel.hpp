@@ -8,7 +8,7 @@
 
 namespace ov::intel_gpu::op {
 
-struct MegaKernelDecodeAttrs {
+struct MegaKernelAttrs {
     int64_t num_layers           = 28;
     int64_t hidden_size          = 1024;
     int64_t num_attention_heads  = 16;
@@ -18,22 +18,22 @@ struct MegaKernelDecodeAttrs {
     float   rms_norm_eps         = 1e-6f;
 };
 
-class MegaKernelDecode : public ov::op::Op {
+class MegaKernel : public ov::op::Op {
 public:
-    OPENVINO_OP("MegaKernelDecode", "gpu_opset");
+    OPENVINO_OP("MegaKernel", "gpu_opset");
 
-    MegaKernelDecode() = default;
+    MegaKernel() = default;
 
-    MegaKernelDecode(const ov::OutputVector& inputs, const MegaKernelDecodeAttrs& attrs);
+    MegaKernel(const ov::OutputVector& inputs, const MegaKernelAttrs& attrs);
 
     bool visit_attributes(ov::AttributeVisitor& visitor) override;
     void validate_and_infer_types() override;
     std::shared_ptr<Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
 
-    const MegaKernelDecodeAttrs& get_attrs() const { return m_attrs; }
+    const MegaKernelAttrs& get_attrs() const { return m_attrs; }
 
 private:
-    MegaKernelDecodeAttrs m_attrs;
+    MegaKernelAttrs m_attrs;
 };
 
 }  // namespace ov::intel_gpu::op

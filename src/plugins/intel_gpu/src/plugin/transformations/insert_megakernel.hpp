@@ -9,13 +9,13 @@
 namespace ov::intel_gpu {
 
 /// Replaces all 28 transformer-decoder layers of Qwen3-0.6B with a single
-/// MegaKernelDecode op.  The pass is a PoC and is deliberately hardcoded for
+/// MegaKernel op.  The pass is a PoC and is deliberately hardcoded for
 /// this model.  It fires only when the model contains exactly 28
 /// ReadValue/Assign pairs whose variable-id contains "past_key_values".
-class InsertMegaKernelDecode : public ov::pass::ModelPass {
+class InsertMegaKernel : public ov::pass::ModelPass {
 public:
-    OPENVINO_MODEL_PASS_RTTI("InsertMegaKernelDecode");
-    InsertMegaKernelDecode() = default;
+    OPENVINO_MODEL_PASS_RTTI("InsertMegaKernel");
+    InsertMegaKernel() = default;
     bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
 };
 

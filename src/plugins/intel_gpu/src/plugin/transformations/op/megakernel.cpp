@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "intel_gpu/op/megakernel_decode.hpp"
+#include "intel_gpu/op/megakernel.hpp"
 
 namespace ov::intel_gpu::op {
 
-MegaKernelDecode::MegaKernelDecode(const ov::OutputVector& inputs, const MegaKernelDecodeAttrs& attrs)
+MegaKernel::MegaKernel(const ov::OutputVector& inputs, const MegaKernelAttrs& attrs)
     : Op(inputs),
       m_attrs(attrs) {
     validate_and_infer_types();
 }
 
-bool MegaKernelDecode::visit_attributes(ov::AttributeVisitor& visitor) {
+bool MegaKernel::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("num_layers",          m_attrs.num_layers);
     visitor.on_attribute("hidden_size",         m_attrs.hidden_size);
     visitor.on_attribute("num_attention_heads", m_attrs.num_attention_heads);
@@ -23,7 +23,7 @@ bool MegaKernelDecode::visit_attributes(ov::AttributeVisitor& visitor) {
     return true;
 }
 
-void MegaKernelDecode::validate_and_infer_types() {
+void MegaKernel::validate_and_infer_types() {
     // Port 0: hidden_states [B, S, hidden_size]
     // Port 3: past_key      [L, B, num_kv_heads, S_past, head_dim]
     const auto& hs_ps   = get_input_partial_shape(0);
@@ -54,9 +54,9 @@ void MegaKernelDecode::validate_and_infer_types() {
     set_output_type(2, ov::element::f16, ov::PartialShape{L, B, Kh, S_kv + S, Hd});
 }
 
-std::shared_ptr<ov::Node> MegaKernelDecode::clone_with_new_inputs(const ov::OutputVector& new_args) const {
+std::shared_ptr<ov::Node> MegaKernel::clone_with_new_inputs(const ov::OutputVector& new_args) const {
     check_new_args_count(this, new_args);
-    return std::make_shared<MegaKernelDecode>(new_args, m_attrs);
+    return std::make_shared<MegaKernel>(new_args, m_attrs);
 }
 
 }  // namespace ov::intel_gpu::op

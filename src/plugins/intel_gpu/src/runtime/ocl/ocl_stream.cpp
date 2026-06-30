@@ -301,6 +301,13 @@ event::ptr ocl_stream::enqueue_kernel(kernel& kernel,
 
     bool set_output_event = m_sync_method == SyncMethods::events || is_output;
 
+    GPU_DEBUG_TRACE << "[enqueue] " << args_desc.layerID
+                    << " GWS=(" << args_desc.workGroups.global[0]
+                    << "," << args_desc.workGroups.global[1]
+                    << "," << args_desc.workGroups.global[2]
+                    << ") LWS=(" << args_desc.workGroups.local[0]
+                    << "," << args_desc.workGroups.local[1]
+                    << "," << args_desc.workGroups.local[2] << ")\n";
     try {
         _command_queue.enqueueNDRangeKernel(kern, cl::NullRange, global, local, dep_events_ptr, set_output_event ? &ret_ev : nullptr);
     } catch (cl::Error const& err) {
