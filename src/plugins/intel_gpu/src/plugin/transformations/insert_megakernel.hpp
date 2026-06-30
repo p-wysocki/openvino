@@ -8,10 +8,7 @@
 
 namespace ov::intel_gpu {
 
-/// Replaces all 28 transformer-decoder layers of Qwen3-0.6B with a single
-/// MegaKernel op.  The pass is a PoC and is deliberately hardcoded for
-/// this model.  It fires only when the model contains exactly 28
-/// ReadValue/Assign pairs whose variable-id contains "past_key_values".
+/// Replaces all 28 transformer-decoder layers of Qwen3-0.6B
 class InsertMegaKernel : public ov::pass::ModelPass {
 public:
     OPENVINO_MODEL_PASS_RTTI("InsertMegaKernel");

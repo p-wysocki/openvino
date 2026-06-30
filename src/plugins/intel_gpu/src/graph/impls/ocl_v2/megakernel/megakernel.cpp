@@ -23,18 +23,12 @@ namespace {
 // Kernel "megakernel_zero" is dispatched 2D:
 //   global[0] = hidden_states_out element count   (output 0)
 //   global[1] = present_key       element count   (output 1 == output 2)
-//
-// The kernel simply stores 0.0f at each gid — it is a placeholder for the
-// real fused-layer kernel to be written later.
 // ---------------------------------------------------------------------------
 class MegaKernelZeroGenerator : public KernelGenerator {
 public:
     MegaKernelZeroGenerator() : KernelGenerator("megakernel", "zero") {}
 
 protected:
-    // Inputs are listed here even though the zero-fill placeholder kernel
-    // doesn't read them — they must be wired so the real kernel can access
-    // every weight and cache buffer without interface changes.
     [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {
         Arguments args;
         if (params.is_dynamic()) {
@@ -51,11 +45,6 @@ protected:
         return args;
     }
 
-    // Generate complete JIT tensor constants for ALL inputs and outputs so the real
-    // kernel implementation can use INPUT0..INPUT16 and OUTPUT0..OUTPUT2 macros with
-    // their shape/pitch/format descriptors.  We iterate inputs explicitly (following
-    // the SDPA pattern) rather than delegating to the base make_tensors_jit_constants,
-    // which gives us clear per-input control and robust error reporting.
     [[nodiscard]] JitConstants get_jit_constants(const RuntimeParams& params) const override {
         // Base defines: KERNEL(), IS_DYNAMIC, OPTIONAL_SHAPE_INFO_ARG, etc.
         auto jit = KernelGenerator::make_base_jit_constants(params);

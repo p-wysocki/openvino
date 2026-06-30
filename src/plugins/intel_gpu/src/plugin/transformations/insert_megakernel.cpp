@@ -1,7 +1,7 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// The pass (MegaKernel-only — handles BOTH prefill and decode):
+// The pass (MegaKernel-only - handles BOTH prefill and decode):
 //  1. Detects the model by counting 56 ReadValue/Assign "past_key_values" pairs.
 //  2. Collects per-layer weight Constants (q/k/v/o proj, gate/up/down proj,
 //     input_ln, post_attn_ln, q_norm, k_norm) and stacks them along a new dim-0.
@@ -12,11 +12,6 @@
 //     (a single Convert to f16 to match the downstream precision).
 //  6. Splits present_key / present_val (outputs 1/2) back to 28 slices and wires
 //     each directly to the matching Assign.
-//
-// The original 28-layer SDPA sub-graph is left with no consumers and therefore
-// becomes unreachable from Results/Sinks — it is never compiled, so there is no
-// duplicate weight memory and no runtime branching (Select) overhead.  The
-// MegaKernel itself decides prefill vs decode at runtime from the token count.
 
 #include "insert_megakernel.hpp"
 
@@ -67,7 +62,6 @@ static std::shared_ptr<ov::Node> find_node(const ov::NodeVector& ops, const std:
 // as a flat float16 (f16) buffer re-packaged into a new Constant of the given
 // shape.  If the node is already a Constant of dtype f16 it is returned as-is.
 static std::shared_ptr<ov::op::v0::Constant> get_f16_constant(std::shared_ptr<ov::Node> node) {
-    // Strip Convert wrappers (decompressor pattern) to reach the underlying Constant.
     for (int depth = 0; depth < 10; ++depth) {
         if (ov::is_type<ov::op::v0::Constant>(node))
             break;
@@ -88,7 +82,6 @@ static std::shared_ptr<ov::op::v0::Constant> get_f16_constant(std::shared_ptr<ov
 }
 
 // Stack a vector of per-layer Constants along a new leading dimension.
-// Each constant must have the same shape.  Returns new stacked Constant.
 static std::shared_ptr<ov::op::v0::Constant> stack_constants(
         const std::vector<std::shared_ptr<ov::op::v0::Constant>>& per_layer,
         const std::string& debug_name) {
@@ -119,7 +112,7 @@ static std::shared_ptr<ov::op::v0::Constant> stack_constants(
     return stacked;
 }
 
-// Squeeze all size-1 leading dims from a constant (e.g. [1,1,1024]->[1024]).
+// Squeeze all size-1 leading dims from a constant
 static std::shared_ptr<ov::op::v0::Constant> squeeze_leading_ones(
         std::shared_ptr<ov::op::v0::Constant> c) {
     ov::Shape s = c->get_shape();
@@ -264,15 +257,13 @@ static ov::Output<ov::Node> build_stacked_kv(
 // Pass entry point
 // ---------------------------------------------------------------------------
 bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
-    // --- Runtime toggle: skip the fusion when OV_MEGAKERNEL_DISABLE=1 ----------
-    // Lets the same plugin binary run the stock baseline (pass off) or the fused
-    // megakernel (pass on) without rebuilding, so both can be benchmarked fairly.
+    // Skip the fusion when OV_MEGAKERNEL_DISABLE=1 ----------
     if (const char* off = std::getenv("OV_MEGAKERNEL_DISABLE"); off && off[0] == '1')
         return false;
 
     const ov::NodeVector ops = m->get_ordered_ops();
 
-    // --- Guard: only apply to Qwen3-0.6B (56 kv-cache ReadValue ops) ----------
+    // only apply to Qwen3-0.6B (56 kv-cache ReadValue ops) ----------
     int rv_kv_count = 0;
     for (auto& op : ops) {
         auto rv = ov::as_type_ptr<ov::op::v6::ReadValue>(op);
@@ -301,10 +292,6 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
 
     // --- 2. Stacked projection weights ------------------------------------------
     // Stack per-layer weights into [28, ...] constants used as MegaKernel inputs.
-    // We do NOT redirect the original SDPA path's weight consumers: once the SDPA
-    // path is disconnected (steps 7/8) it becomes unreachable and is never
-    // compiled, so its weight constants are dropped automatically → no duplicate
-    // device memory.
     static const std::vector<std::pair<std::string, std::string>> PROJ_WEIGHTS = {
         {"q_proj",    "self_attn.q_proj.weight"},
         {"k_proj",    "self_attn.k_proj.weight"},
@@ -325,7 +312,6 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     }
 
     // --- 3. Stacked norm weights -------------------------------------------------
-    // Norm weights are tiny (~7MB total) so no need to eliminate originals.
     static const std::vector<std::pair<std::string, std::string>> NORM_WEIGHTS = {
         {"input_ln",      "input_layernorm"},
         {"post_attn_ln",  "post_attention_layernorm"},
@@ -409,8 +395,7 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     // --- 7. Rewire model.norm ← MegaKernel hidden-state output -------------------
     // The downstream model.norm path is lowered to f16 by the GPU precision passes.
     // MegaKernel output 0 is declared f32; insert a single Convert to f16 so the
-    // type matches, then redirect every consumer of last_add to it.  This makes the
-    // entire 28-layer SDPA path unreachable (and thus never compiled).
+    // type matches, then redirect every consumer of last_add to it.
     auto mk_hidden_f16 = std::make_shared<ov::op::v0::Convert>(mk_node->output(0), ov::element::f16);
     mk_hidden_f16->set_friendly_name("mk_hidden_f16");
     auto last_add_consumers = last_add->output(0).get_target_inputs();
@@ -420,7 +405,7 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     // --- 8. Rewire Assign ops ← MegaKernel KV outputs ---------------------------
     // Split MegaKernel KV outputs (f16) into 28 per-layer slices, squeeze the
     // leading layer dim, convert to the Assign's element type if needed, and wire
-    // directly to each Assign (no runtime branching).
+    // directly to each Assign
     auto axis_const_split = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
     auto axis_const_sq    = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {0});
 
