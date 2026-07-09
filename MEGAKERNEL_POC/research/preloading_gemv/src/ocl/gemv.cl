@@ -6,11 +6,11 @@
 //   global = (ceil(rowCount / ROWS_PER_GROUP) * WG_SIZE)
 //   local  = (WG_SIZE) -- must be divisible by ROWS_PER_GROUP
 //   arg 5  = __local float[WG_SIZE] -- scratch reduction buffer
-#define ROWS_PER_GROUP 4u
+#define ROWS_PER_GROUP 8u
 
-__kernel void gemv(__global const float* matrix,
-                   __global const float* vector,
-                   __global float* result,
+__kernel void gemv(__global const float* restrict matrix,
+                   __global const float* restrict vector,
+                   __global float* restrict result,
                    const uint rowCount,
                    const uint columnCount,
                    __local float* localSums) {
@@ -27,8 +27,17 @@ __kernel void gemv(__global const float* matrix,
     float acc = 0.0f;
     if (rowIsValid) {
         const uint rowOffset = row * columnCount;
-        for (uint col = laneLid; col < columnCount; col += laneSize) {
-            acc += matrix[rowOffset + col] * vector[col];
+        const uint vecLimit = columnCount & ~3u;
+        uint col = laneLid << 2;
+
+        for (; col < vecLimit; col += laneSize << 2) {
+            const float4 m = vload4(0, matrix + rowOffset + col);
+            const float4 v = vload4(0, vector + col);
+            acc += dot(m, v);
+        }
+
+        for (uint tail = vecLimit + laneLid; tail < columnCount; tail += laneSize) {
+            acc += matrix[rowOffset + tail] * vector[tail];
         }
     }
     localSums[lid] = acc;

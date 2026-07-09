@@ -16,7 +16,7 @@ static constexpr size_t benchmarkIterations = 1000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr size_t WG_SIZE = 256;
-static constexpr size_t ROWS_PER_GROUP = 4;
+static constexpr size_t ROWS_PER_GROUP = 8;
 
 static_assert(WG_SIZE % ROWS_PER_GROUP == 0,
               "WG_SIZE must be divisible by ROWS_PER_GROUP");
