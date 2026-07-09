@@ -10,102 +10,82 @@
 
 namespace {
 
-const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
+static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
+static constexpr size_t warmupIterations = 10;
+static constexpr size_t benchmarkIterations = 100;
+static constexpr size_t rowCount = 2048;
+static constexpr size_t columnCount = 1024;
+static constexpr size_t WG_SIZE = 256;
 
-struct LatencyStats {
+struct BenchmarkResult {
   double averageUs = 0.0;
   double minUs = 0.0;
   double maxUs = 0.0;
   size_t iterations = 0;
+  std::vector<float> result;
+
+  void print(const std::string& label) const {
+    std::cout << label << " latency over " << iterations
+              << " iterations: avg=" << averageUs << " us, min=" << minUs
+              << " us, max=" << maxUs << " us\n";
+  }
 };
 
-LatencyStats calculateLatencyStats(const std::vector<double>& latenciesUs) {
-    const auto minMax =
-            std::minmax_element(latenciesUs.begin(), latenciesUs.end());
-    LatencyStats stats;
-    stats.averageUs =
-            std::accumulate(latenciesUs.begin(), latenciesUs.end(), 0.0) /
-            static_cast<double>(latenciesUs.size());
-    stats.minUs = *minMax.first;
-    stats.maxUs = *minMax.second;
-    stats.iterations = latenciesUs.size();
-    return stats;
+BenchmarkResult calculateLatencyStats(const std::vector<double>& latenciesUs,
+                                      const std::vector<float>& result) {
+  const auto minMax =
+      std::minmax_element(latenciesUs.begin(), latenciesUs.end());
+  BenchmarkResult stats;
+  stats.averageUs =
+      std::accumulate(latenciesUs.begin(), latenciesUs.end(), 0.0) /
+      static_cast<double>(latenciesUs.size());
+  stats.minUs = *minMax.first;
+  stats.maxUs = *minMax.second;
+  stats.iterations = latenciesUs.size();
+  stats.result = result;
+  return stats;
 }
 
-std::vector<float> computeGemvReference(const std::vector<float>& matrix,
-                                        const std::vector<float>& vector,
-                                        size_t rowCount, size_t columnCount,
-                                        cl_device_id device, cl_context context,
-                                        cl_command_queue queue) {
-  std::vector<float> reference(rowCount, 0.0f);
-
-  dnnl::engine engine = dnnl::ocl_interop::make_engine(device, context);
-  dnnl::stream stream = dnnl::ocl_interop::make_stream(engine, queue);
-
-  const dnnl::memory::dims matrixDims = {
-      static_cast<dnnl::memory::dim>(rowCount),
-      static_cast<dnnl::memory::dim>(columnCount)};
-  const dnnl::memory::dims vectorDims = {
-      static_cast<dnnl::memory::dim>(columnCount), 1};
-  const dnnl::memory::dims resultDims = {
-      static_cast<dnnl::memory::dim>(rowCount), 1};
-
-  const auto matrixDesc = dnnl::memory::desc(
-      matrixDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
-  const auto vectorDesc = dnnl::memory::desc(
-      vectorDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
-  const auto resultDesc = dnnl::memory::desc(
-      resultDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+BenchmarkResult benchmarkGemvKernelLatency(
+    cl_kernel kernel, const std::vector<float>& matrix,
+    const std::vector<float>& vector, size_t rowCount, size_t columnCount,
+    cl_device_id device, cl_context context, cl_command_queue queue,
+    size_t warmupIterations, size_t benchmarkIterations) {
+  std::vector<float> result(rowCount, 0.0f);
 
   cl_int status = CL_SUCCESS;
-  cl_mem matrixBuffer =
-      clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                     matrix.size() * sizeof(float),
-                     const_cast<float*>(matrix.data()), &status);
+  cl_mem matrixBuffer = clCreateBuffer(
+      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+      matrix.size() * sizeof(float), (void*)matrix.data(), &status);
   ASSERT_OCL_SUCCESS(status);
-  cl_mem vectorBuffer =
-      clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                     vector.size() * sizeof(float),
-                     const_cast<float*>(vector.data()), &status);
+  cl_mem vectorBuffer = clCreateBuffer(
+      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+      vector.size() * sizeof(float), (void*)vector.data(), &status);
   ASSERT_OCL_SUCCESS(status);
-  cl_mem referenceBuffer =
-      clCreateBuffer(context, CL_MEM_WRITE_ONLY,
-                     reference.size() * sizeof(float), nullptr, &status);
+  cl_mem resultBuffer =
+      clCreateBuffer(context, CL_MEM_WRITE_ONLY, result.size() * sizeof(float),
+                     nullptr, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  auto matrixMemory =
-      dnnl::ocl_interop::make_memory(matrixDesc, engine, matrixBuffer);
-  auto vectorMemory =
-      dnnl::ocl_interop::make_memory(vectorDesc, engine, vectorBuffer);
-  auto resultMemory =
-      dnnl::ocl_interop::make_memory(resultDesc, engine, referenceBuffer);
+  const cl_uint clRowCount = static_cast<cl_uint>(rowCount);
+  const cl_uint clColumnCount = static_cast<cl_uint>(columnCount);
+  ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 0, sizeof(cl_mem), &matrixBuffer));
+  ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 1, sizeof(cl_mem), &vectorBuffer));
+  ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 2, sizeof(cl_mem), &resultBuffer));
+  ASSERT_OCL_SUCCESS(
+      clSetKernelArg(kernel, 3, sizeof(clRowCount), &clRowCount));
+  ASSERT_OCL_SUCCESS(
+      clSetKernelArg(kernel, 4, sizeof(clColumnCount), &clColumnCount));
+  // Arg 5: local reduction scratch buffer – one float per work-item.
+  ASSERT_OCL_SUCCESS(
+      clSetKernelArg(kernel, 5, WG_SIZE * sizeof(float), nullptr));
 
-  const auto gemv = dnnl::matmul(
-      dnnl::matmul::primitive_desc(engine, matrixDesc, vectorDesc, resultDesc));
-  gemv.execute(stream, {{DNNL_ARG_SRC, matrixMemory},
-                        {DNNL_ARG_WEIGHTS, vectorMemory},
-                        {DNNL_ARG_DST, resultMemory}});
-  stream.wait();
-
-  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(
-      queue, referenceBuffer, CL_TRUE, 0, reference.size() * sizeof(float),
-      reference.data(), 0, nullptr, nullptr));
-
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(referenceBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
-
-  return reference;
-}
-
-LatencyStats benchmarkGemvKernelLatency(cl_command_queue queue,
-                                        cl_kernel kernel, size_t globalWorkSize,
-                                        size_t warmupIterations,
-                                        size_t benchmarkIterations) {
+  const size_t localWorkSize = WG_SIZE;
+  const size_t globalWorkSize = rowCount * WG_SIZE;
   for (size_t iteration = 0; iteration < warmupIterations; ++iteration) {
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
-                                              &globalWorkSize, nullptr, 0,
-                                              nullptr, nullptr));
+                                              &globalWorkSize, &localWorkSize,
+                                              0, nullptr, nullptr));
   }
   ASSERT_OCL_SUCCESS(clFinish(queue));
 
@@ -115,8 +95,8 @@ LatencyStats benchmarkGemvKernelLatency(cl_command_queue queue,
   for (size_t iteration = 0; iteration < benchmarkIterations; ++iteration) {
     cl_event event = nullptr;
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
-                                              &globalWorkSize, nullptr, 0,
-                                              nullptr, &event));
+                                              &globalWorkSize, &localWorkSize,
+                                              0, nullptr, &event));
     ASSERT_OCL_SUCCESS(clWaitForEvents(1, &event));
 
     cl_ulong startNs = 0;
@@ -130,67 +110,74 @@ LatencyStats benchmarkGemvKernelLatency(cl_command_queue queue,
     latenciesUs.push_back(static_cast<double>(endNs - startNs) / 1000.0);
   }
 
-  return calculateLatencyStats(latenciesUs);
+  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue, resultBuffer, CL_TRUE, 0,
+                                         result.size() * sizeof(float),
+                                         result.data(), 0, nullptr, nullptr));
+
+  ASSERT_OCL_SUCCESS(clReleaseMemObject(resultBuffer));
+  ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
+  ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
+
+  return calculateLatencyStats(latenciesUs, result);
 }
 
-LatencyStats benchmarkDnnlGemvLatency(const std::vector<float>& matrix,
-                                      const std::vector<float>& vector,
-                                      size_t rowCount, size_t columnCount,
-                                      cl_device_id device, cl_context context,
-                                      cl_command_queue queue,
-                                      size_t warmupIterations,
-                                      size_t benchmarkIterations) {
+BenchmarkResult benchmarkDnnlGemvLatency(
+    const std::vector<float>& matrix, const std::vector<float>& vector,
+    size_t rowCount, size_t columnCount, cl_device_id device,
+    cl_context context, cl_command_queue queue, size_t warmupIterations,
+    size_t benchmarkIterations) {
   dnnl::engine engine = dnnl::ocl_interop::make_engine(device, context);
   dnnl::stream stream = dnnl::ocl_interop::make_stream(engine, queue);
 
-  const dnnl::memory::dims matrixDims = {
-      static_cast<dnnl::memory::dim>(rowCount),
-      static_cast<dnnl::memory::dim>(columnCount)};
   const dnnl::memory::dims vectorDims = {
-      static_cast<dnnl::memory::dim>(columnCount), 1};
+      1, static_cast<dnnl::memory::dim>(columnCount)};
+  const dnnl::memory::dims matrixDims = {
+      static_cast<dnnl::memory::dim>(columnCount),
+      static_cast<dnnl::memory::dim>(rowCount)};
   const dnnl::memory::dims resultDims = {
-      static_cast<dnnl::memory::dim>(rowCount), 1};
+      1, static_cast<dnnl::memory::dim>(rowCount)};
 
-  const auto matrixDesc = dnnl::memory::desc(
-      matrixDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
   const auto vectorDesc = dnnl::memory::desc(
       vectorDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+  const auto matrixDesc = dnnl::memory::desc(
+      matrixDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ba);
   const auto resultDesc = dnnl::memory::desc(
       resultDims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
 
   cl_int status = CL_SUCCESS;
-  cl_mem matrixBuffer =
-      clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                     matrix.size() * sizeof(float),
-                     const_cast<float*>(matrix.data()), &status);
-  ASSERT_OCL_SUCCESS(status);
   cl_mem vectorBuffer =
       clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                      vector.size() * sizeof(float),
                      const_cast<float*>(vector.data()), &status);
   ASSERT_OCL_SUCCESS(status);
-  cl_mem resultBuffer =
-      clCreateBuffer(context, CL_MEM_WRITE_ONLY, rowCount * sizeof(float),
-                     nullptr, &status);
+  cl_mem matrixBuffer =
+      clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                     matrix.size() * sizeof(float),
+                     const_cast<float*>(matrix.data()), &status);
+  ASSERT_OCL_SUCCESS(status);
+  cl_mem resultBuffer = clCreateBuffer(
+      context, CL_MEM_WRITE_ONLY, rowCount * sizeof(float), nullptr, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  auto matrixMemory =
-      dnnl::ocl_interop::make_memory(matrixDesc, engine, matrixBuffer);
   auto vectorMemory =
       dnnl::ocl_interop::make_memory(vectorDesc, engine, vectorBuffer);
+  auto matrixMemory =
+      dnnl::ocl_interop::make_memory(matrixDesc, engine, matrixBuffer);
   auto resultMemory =
       dnnl::ocl_interop::make_memory(resultDesc, engine, resultBuffer);
+
   const auto gemv = dnnl::matmul(
-      dnnl::matmul::primitive_desc(engine, matrixDesc, vectorDesc, resultDesc));
-  const std::unordered_map<int, dnnl::memory> gemvArguments = {
-      {DNNL_ARG_SRC, matrixMemory},
-      {DNNL_ARG_WEIGHTS, vectorMemory},
+      dnnl::matmul::primitive_desc(engine, vectorDesc, matrixDesc, resultDesc));
+
+  const std::unordered_map<int, dnnl::memory> args = {
+      {DNNL_ARG_SRC, vectorMemory},
+      {DNNL_ARG_WEIGHTS, matrixMemory},
       {DNNL_ARG_DST, resultMemory}};
 
   for (size_t iteration = 0; iteration < warmupIterations; ++iteration) {
-        gemv.execute(stream, gemvArguments);
+    gemv.execute(stream, args);
   }
-    stream.wait();
+  stream.wait();
 
   std::vector<double> latenciesUs;
   latenciesUs.reserve(benchmarkIterations);
@@ -200,16 +187,16 @@ LatencyStats benchmarkDnnlGemvLatency(const std::vector<float>& matrix,
     cl_event endEvent = nullptr;
     ASSERT_OCL_SUCCESS(
         clEnqueueMarkerWithWaitList(queue, 0, nullptr, &startEvent));
-    gemv.execute(stream, gemvArguments);
+    gemv.execute(stream, args);
     ASSERT_OCL_SUCCESS(
         clEnqueueMarkerWithWaitList(queue, 0, nullptr, &endEvent));
     ASSERT_OCL_SUCCESS(clWaitForEvents(1, &endEvent));
 
     cl_ulong startNs = 0;
     cl_ulong endNs = 0;
-    ASSERT_OCL_SUCCESS(clGetEventProfilingInfo(
-        startEvent, CL_PROFILING_COMMAND_END, sizeof(startNs), &startNs,
-        nullptr));
+    ASSERT_OCL_SUCCESS(
+        clGetEventProfilingInfo(startEvent, CL_PROFILING_COMMAND_END,
+                                sizeof(startNs), &startNs, nullptr));
     ASSERT_OCL_SUCCESS(clGetEventProfilingInfo(
         endEvent, CL_PROFILING_COMMAND_START, sizeof(endNs), &endNs, nullptr));
     ASSERT_OCL_SUCCESS(clReleaseEvent(endEvent));
@@ -218,11 +205,16 @@ LatencyStats benchmarkDnnlGemvLatency(const std::vector<float>& matrix,
     latenciesUs.push_back(static_cast<double>(endNs - startNs) / 1000.0);
   }
 
+  std::vector<float> result(rowCount, 0.0f);
+  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue, resultBuffer, CL_TRUE, 0,
+                                         result.size() * sizeof(float),
+                                         result.data(), 0, nullptr, nullptr));
+
   ASSERT_OCL_SUCCESS(clReleaseMemObject(resultBuffer));
   ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
   ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
 
-  return calculateLatencyStats(latenciesUs);
+  return calculateLatencyStats(latenciesUs, result);
 }
 
 class PreloadingTest : public ocltest::OclTestFixture {
@@ -245,78 +237,28 @@ class PreloadingTest : public ocltest::OclTestFixture {
 
 TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   cl_int status = CL_SUCCESS;
-  constexpr size_t rowCount = 64;
-  constexpr size_t columnCount = 128;
 
   std::vector<float> matrix =
       utils::createRandomBuffer(rowCount * columnCount, 0);
   std::vector<float> vector = utils::createRandomBuffer(columnCount, 1);
-  std::vector<float> result(rowCount, 0.0f);
 
-  cl_mem matrixBuffer =
-      clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                     matrix.size() * sizeof(float), matrix.data(), &status);
-  ASSERT_OCL_SUCCESS(status);
-  cl_mem vectorBuffer =
-      clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                     vector.size() * sizeof(float), vector.data(), &status);
-  ASSERT_OCL_SUCCESS(status);
-  cl_mem resultBuffer =
-      clCreateBuffer(context(), CL_MEM_WRITE_ONLY,
-                     result.size() * sizeof(float), nullptr, &status);
-  ASSERT_OCL_SUCCESS(status);
+  const BenchmarkResult latency = benchmarkGemvKernelLatency(
+      kernel(), matrix, vector, rowCount, columnCount, deviceId(), context(),
+      queue(), warmupIterations, benchmarkIterations);
 
-  const cl_uint clRowCount = static_cast<cl_uint>(rowCount);
-  const cl_uint clColumnCount = static_cast<cl_uint>(columnCount);
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel(), 0, sizeof(cl_mem), &matrixBuffer));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel(), 1, sizeof(cl_mem), &vectorBuffer));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel(), 2, sizeof(cl_mem), &resultBuffer));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel(), 3, sizeof(clRowCount), &clRowCount));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel(), 4, sizeof(clColumnCount), &clColumnCount));
-
-  const size_t globalWorkSize = rowCount;
-  ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), kernel(), 1, nullptr,
-                                            &globalWorkSize, nullptr, 0,
-                                            nullptr, nullptr));
-  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue(), resultBuffer, CL_TRUE, 0,
-                                         result.size() * sizeof(float),
-                                         result.data(), 0, nullptr, nullptr));
-
-  constexpr size_t warmupIterations = 10;
-  constexpr size_t benchmarkIterations = 100;
-  const LatencyStats latency = benchmarkGemvKernelLatency(
-      queue(), kernel(), globalWorkSize, warmupIterations, benchmarkIterations);
-  const LatencyStats dnnlLatency = benchmarkDnnlGemvLatency(
+  const BenchmarkResult dnnlLatency = benchmarkDnnlGemvLatency(
       matrix, vector, rowCount, columnCount, deviceId(), context(), queue(),
       warmupIterations, benchmarkIterations);
 
-  const std::vector<float> reference = computeGemvReference(
-      matrix, vector, rowCount, columnCount, deviceId(), context(), queue());
   constexpr float tolerance = 1e-4f;
 
   for (size_t row = 0; row < rowCount; ++row) {
-    ASSERT_NEAR(result[row], reference[row], tolerance)
+    ASSERT_NEAR(latency.result[row], dnnlLatency.result[row], tolerance)
         << "GEMV result mismatch at row " << row;
   }
 
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(resultBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
-
-  std::cout << "GEMV OpenCL kernel executed successfully.\n";
-  std::cout << "GEMV OpenCL kernel latency over " << latency.iterations
-            << " iterations: avg=" << latency.averageUs
-            << " us, min=" << latency.minUs << " us, max=" << latency.maxUs
-            << " us\n";
-    std::cout << "GEMV oneDNN reference latency over " << dnnlLatency.iterations
-                        << " iterations: avg=" << dnnlLatency.averageUs
-                        << " us, min=" << dnnlLatency.minUs
-                        << " us, max=" << dnnlLatency.maxUs << " us\n";
+  latency.print("GEMV OpenCL kernel");
+  dnnlLatency.print("GEMV oneDNN kernel");
 }
 
 }  // namespace
