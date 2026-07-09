@@ -20,6 +20,8 @@ static constexpr size_t ROWS_PER_GROUP = 1;
 
 static_assert(WG_SIZE % ROWS_PER_GROUP == 0,
               "WG_SIZE must be divisible by ROWS_PER_GROUP");
+static_assert(WG_SIZE == 32,
+              "Kernel is specialized for a 32-thread work-group");
 
 struct BenchmarkResult {
   double averageUs = 0.0;
@@ -80,9 +82,6 @@ BenchmarkResult benchmarkGemvKernelLatency(
       clSetKernelArg(kernel, 3, sizeof(clRowCount), &clRowCount));
   ASSERT_OCL_SUCCESS(
       clSetKernelArg(kernel, 4, sizeof(clColumnCount), &clColumnCount));
-  // Arg 5: local reduction scratch buffer – one float per work-item.
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel, 5, WG_SIZE * sizeof(float), nullptr));
 
   const size_t localWorkSize = WG_SIZE;
   const size_t workGroupCount =
@@ -248,7 +247,7 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
       utils::createRandomBuffer(rowCount * columnCount, 0);
   std::vector<float> vector = utils::createRandomBuffer(columnCount, 1);
 
-  const BenchmarkResult latency = benchmarkGemvKernelLatency(
+  const BenchmarkResult gemvLatency = benchmarkGemvKernelLatency(
       kernel(), matrix, vector, rowCount, columnCount, deviceId(), context(),
       queue(), warmupIterations, benchmarkIterations);
 
@@ -259,11 +258,11 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   constexpr float tolerance = 1e-4f;
 
   for (size_t row = 0; row < rowCount; ++row) {
-    ASSERT_NEAR(latency.result[row], dnnlLatency.result[row], tolerance)
+    ASSERT_NEAR(gemvLatency.result[row], dnnlLatency.result[row], tolerance)
         << "GEMV result mismatch at row " << row;
   }
 
-  latency.print("GEMV OpenCL kernel");
+  gemvLatency.print("GEMV OpenCL kernel");
   dnnlLatency.print("GEMV oneDNN kernel");
 }
 

@@ -1,62 +1,68 @@
-// Tiled GEMV: each work-group is partitioned into several independent row lanes.
-// Work-items in the same lane collaboratively tile across one row's columns,
-// then perform a lane-local tree reduction to produce that row's output value.
+// Tiled GEMV specialized for one 32-wide subgroup per output row.
+// Each work-group computes one row and uses subgroup reduction for the final sum.
 //
 // Launch configuration (host side):
 //   global = (ceil(rowCount / ROWS_PER_GROUP) * WG_SIZE)
-//   local  = (WG_SIZE) -- must be divisible by ROWS_PER_GROUP
-//   arg 5  = __local float[WG_SIZE] -- scratch reduction buffer
+//   local  = (WG_SIZE)
 #define ROWS_PER_GROUP 1u
 
+__attribute__((reqd_work_group_size(32, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(32)))
+__attribute__((vec_type_hint(float4)))
 __kernel void gemv(__global const float* restrict matrix,
                    __global const float* restrict vector,
                    __global float* restrict result,
                    const uint rowCount,
-                   const uint columnCount,
-                   __local float* localSums) {
-    const uint lid = get_local_id(0);
-    const uint lsize = get_local_size(0);
-    const uint laneSize = lsize / ROWS_PER_GROUP;
-    const uint rowInGroup = lid / laneSize;
-    const uint laneLid = lid % laneSize;
-    const uint row = get_group_id(0) * ROWS_PER_GROUP + rowInGroup;
+                   const uint columnCount) {
+    const uint laneLid = get_sub_group_local_id();
+    const uint row = get_group_id(0);
     const bool rowIsValid = row < rowCount;
 
-    // Phase 1 – tiled accumulation: each lane strides across columns by laneSize
-    // so a full row is covered without overlap inside the lane.
+    __asm__ volatile("": : :"memory");
+
     float acc = 0.0f;
     if (rowIsValid) {
         const uint rowOffset = row * columnCount;
         const uint vecLimit = columnCount & ~3u;
         uint col = laneLid << 2;
         float acc1 = 0.0f;
+        float acc2 = 0.0f;
+        float acc3 = 0.0f;
 
-        for (; col + (laneSize << 2) < vecLimit; col += laneSize << 3) {
+        #pragma unroll
+        for (; col + 384u < vecLimit; col += 512u) {
             const float4 m = vload4(0, matrix + rowOffset + col);
             const float4 v = vload4(0, vector + col);
-            const uint col1 = col + (laneSize << 2);
+            const uint col1 = col + 128u;
             const float4 m1 = vload4(0, matrix + rowOffset + col1);
             const float4 v1 = vload4(0, vector + col1);
+            const uint col2 = col + 256u;
+            const float4 m2 = vload4(0, matrix + rowOffset + col2);
+            const float4 v2 = vload4(0, vector + col2);
+            const uint col3 = col + 384u;
+            const float4 m3 = vload4(0, matrix + rowOffset + col3);
+            const float4 v3 = vload4(0, vector + col3);
             acc += dot(m, v);
             acc1 += dot(m1, v1);
+            acc2 += dot(m2, v2);
+            acc3 += dot(m3, v3);
         }
 
-        acc += acc1;
+        acc += acc1 + acc2 + acc3;
 
-        for (; col < vecLimit; col += laneSize << 2) {
+        #pragma unroll
+        for (; col < vecLimit; col += 128u) {
             const float4 m = vload4(0, matrix + rowOffset + col);
             const float4 v = vload4(0, vector + col);
             acc += dot(m, v);
         }
 
-        for (uint tail = vecLimit + laneLid; tail < columnCount; tail += laneSize) {
+        for (uint tail = vecLimit + laneLid; tail < columnCount; tail += 32u) {
             acc += matrix[rowOffset + tail] * vector[tail];
         }
     }
     const float reduced = sub_group_reduce_add(acc);
 
-    // The first work-item in each lane writes the final dot-product.
     if (rowIsValid && laneLid == 0) {
         result[row] = reduced;
     }
