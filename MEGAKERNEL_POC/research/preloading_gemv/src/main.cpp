@@ -11,11 +11,15 @@
 namespace {
 
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
-static constexpr size_t warmupIterations = 10;
-static constexpr size_t benchmarkIterations = 100;
+static constexpr size_t warmupIterations = 100;
+static constexpr size_t benchmarkIterations = 1000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr size_t WG_SIZE = 256;
+static constexpr size_t ROWS_PER_GROUP = 4;
+
+static_assert(WG_SIZE % ROWS_PER_GROUP == 0,
+              "WG_SIZE must be divisible by ROWS_PER_GROUP");
 
 struct BenchmarkResult {
   double averageUs = 0.0;
@@ -81,7 +85,9 @@ BenchmarkResult benchmarkGemvKernelLatency(
       clSetKernelArg(kernel, 5, WG_SIZE * sizeof(float), nullptr));
 
   const size_t localWorkSize = WG_SIZE;
-  const size_t globalWorkSize = rowCount * WG_SIZE;
+  const size_t workGroupCount =
+      (rowCount + ROWS_PER_GROUP - 1) / ROWS_PER_GROUP;
+  const size_t globalWorkSize = workGroupCount * WG_SIZE;
   for (size_t iteration = 0; iteration < warmupIterations; ++iteration) {
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
                                               &globalWorkSize, &localWorkSize,
