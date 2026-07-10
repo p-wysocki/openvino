@@ -211,8 +211,13 @@ void OclTestFixture::SetUp() {
   oclContext = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  commandQueue = clCreateCommandQueue(oclContext, device,
-                                      CL_QUEUE_PROFILING_ENABLE, &status);
+  const cl_queue_properties props[] = {
+      CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE,
+      0  // terminator
+  };
+
+  commandQueue =
+      clCreateCommandQueueWithProperties(oclContext, device, props, &status);
   ASSERT_OCL_SUCCESS(status);
 }
 

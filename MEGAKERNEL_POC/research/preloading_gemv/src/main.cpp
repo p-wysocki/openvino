@@ -1,10 +1,8 @@
-#include <algorithm>
 #include <dnnl.hpp>
 #include <dnnl_ocl.hpp>
-#include <numeric>
-#include <stdexcept>
 #include <unordered_map>
 
+#include "../../common/benchmarkOpenCLpipeline.h"
 #include "../../common/oclTestFixture.h"
 #include "../../common/utils.h"
 
@@ -24,33 +22,9 @@ static_assert(WG_SIZE == 32,
               "Kernel is specialized for a 32-thread work-group");
 
 struct BenchmarkResult {
-  double averageUs = 0.0;
-  double minUs = 0.0;
-  double maxUs = 0.0;
-  size_t iterations = 0;
-  std::vector<float> result;
-
-  void print(const std::string& label) const {
-    std::cout << label << " latency over " << iterations
-              << " iterations: avg=" << averageUs << " us, min=" << minUs
-              << " us, max=" << maxUs << " us\n";
-  }
+  ocltest::ProfileResult profileResult;
+  std::vector<float> output;
 };
-
-BenchmarkResult calculateLatencyStats(const std::vector<double>& latenciesUs,
-                                      const std::vector<float>& result) {
-  const auto minMax =
-      std::minmax_element(latenciesUs.begin(), latenciesUs.end());
-  BenchmarkResult stats;
-  stats.averageUs =
-      std::accumulate(latenciesUs.begin(), latenciesUs.end(), 0.0) /
-      static_cast<double>(latenciesUs.size());
-  stats.minUs = *minMax.first;
-  stats.maxUs = *minMax.second;
-  stats.iterations = latenciesUs.size();
-  stats.result = result;
-  return stats;
-}
 
 BenchmarkResult benchmarkGemvKernelLatency(
     cl_kernel kernel, const std::vector<float>& matrix,
@@ -87,33 +61,14 @@ BenchmarkResult benchmarkGemvKernelLatency(
   const size_t workGroupCount =
       (rowCount + ROWS_PER_GROUP - 1) / ROWS_PER_GROUP;
   const size_t globalWorkSize = workGroupCount * WG_SIZE;
-  for (size_t iteration = 0; iteration < warmupIterations; ++iteration) {
-    ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
-                                              &globalWorkSize, &localWorkSize,
-                                              0, nullptr, nullptr));
-  }
-  ASSERT_OCL_SUCCESS(clFinish(queue));
 
-  std::vector<double> latenciesUs;
-  latenciesUs.reserve(benchmarkIterations);
-
-  for (size_t iteration = 0; iteration < benchmarkIterations; ++iteration) {
-    cl_event event = nullptr;
-    ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
-                                              &globalWorkSize, &localWorkSize,
-                                              0, nullptr, &event));
-    ASSERT_OCL_SUCCESS(clWaitForEvents(1, &event));
-
-    cl_ulong startNs = 0;
-    cl_ulong endNs = 0;
-    ASSERT_OCL_SUCCESS(clGetEventProfilingInfo(
-        event, CL_PROFILING_COMMAND_START, sizeof(startNs), &startNs, nullptr));
-    ASSERT_OCL_SUCCESS(clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END,
-                                               sizeof(endNs), &endNs, nullptr));
-    ASSERT_OCL_SUCCESS(clReleaseEvent(event));
-
-    latenciesUs.push_back(static_cast<double>(endNs - startNs) / 1000.0);
-  }
+  ocltest::ProfileResult stats = ocltest::ProfileOpenCL(
+      [&](void) {
+        ASSERT_OCL_SUCCESS(
+            clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &globalWorkSize,
+                                   &localWorkSize, 0, nullptr, nullptr));
+      },
+      queue, warmupIterations, benchmarkIterations);
 
   ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue, resultBuffer, CL_TRUE, 0,
                                          result.size() * sizeof(float),
@@ -123,7 +78,7 @@ BenchmarkResult benchmarkGemvKernelLatency(
   ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
   ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
 
-  return calculateLatencyStats(latenciesUs, result);
+  return {stats, result};
 }
 
 BenchmarkResult benchmarkDnnlGemvLatency(
@@ -179,36 +134,9 @@ BenchmarkResult benchmarkDnnlGemvLatency(
       {DNNL_ARG_WEIGHTS, matrixMemory},
       {DNNL_ARG_DST, resultMemory}};
 
-  for (size_t iteration = 0; iteration < warmupIterations; ++iteration) {
-    gemv.execute(stream, args);
-  }
-  stream.wait();
-
-  std::vector<double> latenciesUs;
-  latenciesUs.reserve(benchmarkIterations);
-
-  for (size_t iteration = 0; iteration < benchmarkIterations; ++iteration) {
-    cl_event startEvent = nullptr;
-    cl_event endEvent = nullptr;
-    ASSERT_OCL_SUCCESS(
-        clEnqueueMarkerWithWaitList(queue, 0, nullptr, &startEvent));
-    gemv.execute(stream, args);
-    ASSERT_OCL_SUCCESS(
-        clEnqueueMarkerWithWaitList(queue, 0, nullptr, &endEvent));
-    ASSERT_OCL_SUCCESS(clWaitForEvents(1, &endEvent));
-
-    cl_ulong startNs = 0;
-    cl_ulong endNs = 0;
-    ASSERT_OCL_SUCCESS(
-        clGetEventProfilingInfo(startEvent, CL_PROFILING_COMMAND_END,
-                                sizeof(startNs), &startNs, nullptr));
-    ASSERT_OCL_SUCCESS(clGetEventProfilingInfo(
-        endEvent, CL_PROFILING_COMMAND_START, sizeof(endNs), &endNs, nullptr));
-    ASSERT_OCL_SUCCESS(clReleaseEvent(endEvent));
-    ASSERT_OCL_SUCCESS(clReleaseEvent(startEvent));
-
-    latenciesUs.push_back(static_cast<double>(endNs - startNs) / 1000.0);
-  }
+  ocltest::ProfileResult stats =
+      ocltest::ProfileOpenCL([&](void) { gemv.execute(stream, args); }, queue,
+                             warmupIterations, benchmarkIterations);
 
   std::vector<float> result(rowCount, 0.0f);
   ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue, resultBuffer, CL_TRUE, 0,
@@ -219,7 +147,7 @@ BenchmarkResult benchmarkDnnlGemvLatency(
   ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
   ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
 
-  return calculateLatencyStats(latenciesUs, result);
+  return {stats, result};
 }
 
 class PreloadingTest : public ocltest::OclTestFixture {
@@ -258,12 +186,12 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   constexpr float tolerance = 1e-4f;
 
   for (size_t row = 0; row < rowCount; ++row) {
-    ASSERT_NEAR(gemvLatency.result[row], dnnlLatency.result[row], tolerance)
+    ASSERT_NEAR(gemvLatency.output[row], dnnlLatency.output[row], tolerance)
         << "GEMV result mismatch at row " << row;
   }
 
-  gemvLatency.print("GEMV OpenCL kernel");
-  dnnlLatency.print("GEMV oneDNN kernel");
+  gemvLatency.profileResult.print("GEMV OpenCL kernel");
+  dnnlLatency.profileResult.print("GEMV oneDNN kernel");
 }
 
 }  // namespace
