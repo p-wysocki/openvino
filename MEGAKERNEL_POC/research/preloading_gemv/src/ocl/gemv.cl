@@ -4,21 +4,21 @@
 // Launch configuration (host side):
 //   global = (ceil(rowCount / ROWS_PER_GROUP) * WG_SIZE)
 //   local  = (WG_SIZE)
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+
 #define ROWS_PER_GROUP 1u
 
 __attribute__((reqd_work_group_size(32, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(32)))
 __attribute__((vec_type_hint(float4)))
-__kernel void gemv(__global const float* restrict matrix,
-                   __global const float* restrict vector,
-                   __global float* restrict result,
+__kernel void gemv(__global const half* restrict matrix,
+                   __global const half* restrict vector,
+                   __global half* restrict result,
                    const uint rowCount,
                    const uint columnCount) {
     const uint laneLid = get_sub_group_local_id();
     const uint row = get_group_id(0);
     const bool rowIsValid = row < rowCount;
-
-    __asm__ volatile("": : :"memory");
 
     float acc = 0.0f;
     if (rowIsValid) {
@@ -31,17 +31,17 @@ __kernel void gemv(__global const float* restrict matrix,
 
         #pragma unroll
         for (; col + 384u < vecLimit; col += 512u) {
-            const float4 m = vload4(0, matrix + rowOffset + col);
-            const float4 v = vload4(0, vector + col);
+            const float4 m = convert_float4(vload4(0, matrix + rowOffset + col));
+            const float4 v = convert_float4(vload4(0, vector + col));
             const uint col1 = col + 128u;
-            const float4 m1 = vload4(0, matrix + rowOffset + col1);
-            const float4 v1 = vload4(0, vector + col1);
+            const float4 m1 = convert_float4(vload4(0, matrix + rowOffset + col1));
+            const float4 v1 = convert_float4(vload4(0, vector + col1));
             const uint col2 = col + 256u;
-            const float4 m2 = vload4(0, matrix + rowOffset + col2);
-            const float4 v2 = vload4(0, vector + col2);
+            const float4 m2 = convert_float4(vload4(0, matrix + rowOffset + col2));
+            const float4 v2 = convert_float4(vload4(0, vector + col2));
             const uint col3 = col + 384u;
-            const float4 m3 = vload4(0, matrix + rowOffset + col3);
-            const float4 v3 = vload4(0, vector + col3);
+            const float4 m3 = convert_float4(vload4(0, matrix + rowOffset + col3));
+            const float4 v3 = convert_float4(vload4(0, vector + col3));
             acc += dot(m, v);
             acc1 += dot(m1, v1);
             acc2 += dot(m2, v2);
@@ -52,18 +52,18 @@ __kernel void gemv(__global const float* restrict matrix,
 
         #pragma unroll
         for (; col < vecLimit; col += 128u) {
-            const float4 m = vload4(0, matrix + rowOffset + col);
-            const float4 v = vload4(0, vector + col);
+            const float4 m = convert_float4(vload4(0, matrix + rowOffset + col));
+            const float4 v = convert_float4(vload4(0, vector + col));
             acc += dot(m, v);
         }
 
         for (uint tail = vecLimit + laneLid; tail < columnCount; tail += 32u) {
-            acc += matrix[rowOffset + tail] * vector[tail];
+            acc += (float)matrix[rowOffset + tail] * (float)vector[tail];
         }
     }
     const float reduced = sub_group_reduce_add(acc);
 
     if (rowIsValid && laneLid == 0) {
-        result[row] = reduced;
+        result[row] = convert_half_rte(reduced);
     }
 }
