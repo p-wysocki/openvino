@@ -12,19 +12,19 @@
 namespace {
 
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
-static constexpr size_t warmupIterations = 10;
-static constexpr size_t benchmarkIterations = 100;
+static constexpr size_t warmupIterations = 100;
+static constexpr size_t benchmarkIterations = 1000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr float ABS_ERROR = 1e-4f;
 
-static constexpr size_t WG_SIZE = 32;
-static constexpr size_t ROWS_PER_GROUP = 1;
+static constexpr size_t WG_SIZE = 128;
+static constexpr size_t ROWS_PER_GROUP = 16;
 
-static_assert(WG_SIZE % ROWS_PER_GROUP == 0,
-              "WG_SIZE must be divisible by ROWS_PER_GROUP");
-static_assert(WG_SIZE == 32,
-              "Kernel is specialized for a 32-thread work-group");
+static_assert(WG_SIZE % 32 == 0,
+              "WG_SIZE must contain whole 32-thread subgroups");
+static_assert(ROWS_PER_GROUP % (WG_SIZE / 32) == 0,
+              "Each subgroup must compute the same number of rows");
 
 struct BenchmarkResult {
   ocltest::ProfileResult profileResult;
