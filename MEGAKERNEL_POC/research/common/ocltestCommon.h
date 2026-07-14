@@ -8,11 +8,18 @@ namespace ocltest {
 // Prints OpenCL error status as a string.
 const char* printOclErrorStr(cl_int status);
 
+// Define true to print error and exit on first OCL failure
+#define EXIT_ON_FIRST_OCL_ERROR false  
+
 // Gtest OCL assert.
-#define ASSERT_OCL_SUCCESS(status)                                         \
-  EXPECT_EQ(status, CL_SUCCESS)                                            \
-      << " error: " << ocltest::printOclErrorStr(status) << " (" << status \
-      << ")"
+#define ASSERT_OCL_SUCCESS(status)                                           \
+  {                                                                          \
+    EXPECT_EQ(status, CL_SUCCESS)                                            \
+        << " error: " << ocltest::printOclErrorStr(status) << " (" << status \
+        << ")";                                                              \
+    if (status != CL_SUCCESS && EXIT_ON_FIRST_OCL_ERROR)                     \
+      std::exit(EXIT_FAILURE);                                               \
+  }
 
 ////////////////////////////////////////////////////////////////////
 //
