@@ -7,11 +7,12 @@
 //   local  = (WG_SIZE)
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
-#define TOTAL_WARPS 4
+#define TOTAL_WARPS 8
 #define COMPUTE_WARPS 4
 #define ROWS_PER_SUBGROUP 1
 #define COL_BLOCKS_PER_LOOP 4
 #define COMPUTE_WG_SIZE (COMPUTE_WARPS * SUBGROUP_SIZE)
+#define LOAD_DATA_WG_SIZE ((TOTAL_WARPS - COMPUTE_WARPS) * SUBGROUP_SIZE)
 #define SUBGROUP_SIZE 32
 #define SUBGROUPS_PER_GROUP (COMPUTE_WG_SIZE / SUBGROUP_SIZE)
 #define ROWS_PER_GROUP (SUBGROUPS_PER_GROUP * ROWS_PER_SUBGROUP)
@@ -103,9 +104,10 @@ inline void LoadData_block(__local half* restrict matrixBlock_local,
       (__local half16* restrict)matrixBlock_local;
   __global half16* restrict matrixBlock_global16 =
       (__global half16* restrict)matrixBlock_global;
+
 #pragma unroll
-  for (int i = get_local_id(0); i < LOAD_DATA_BLOCK_SIZE / 16;
-       i += COMPUTE_WG_SIZE) {
+  for (int i = get_local_id(0) - COMPUTE_WG_SIZE; i < LOAD_DATA_BLOCK_SIZE / 16;
+       i += LOAD_DATA_WG_SIZE) {
     matrixBlock_local16[i] = matrixBlock_global16[i];
   }
 }
@@ -113,13 +115,17 @@ inline void LoadData_block(__local half* restrict matrixBlock_local,
 // Each block handles ROWS_PER_GROUP rows, and each subgroup handles
 // ROWS_PER_SUBGROUP rows. All compute subgroups cooperate to compute the dot
 // products for their assigned rows.
-__attribute__((reqd_work_group_size(TOTAL_WARPS*SUBGROUP_SIZE, 1, 1)))
+__attribute__((reqd_work_group_size(TOTAL_WARPS * SUBGROUP_SIZE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(32)))
 __attribute__((vec_type_hint(float4))) __kernel void
 gemv(__global const half* restrict matrix, __global const half* restrict vector,
      __global half* restrict result, const uint rowCount,
      const uint columnCount) {
-  __local half matrixBlock_local[ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS];
+  __local half
+      matrixBlockBuff1_local[ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS];
+
+  __local half
+      matrixBlockBuff2_local[ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS];
 
   __global half* restrict result_block =
       result + get_group_id(0) * 4 * ROWS_PER_GROUP;
@@ -127,55 +133,55 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __global const half* restrict matrixBlock_global =
       matrix + get_group_id(0) * 4 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS;
 
-  if (get_sub_group_id() < COMPUTE_WARPS)
-    LoadData_block(matrixBlock_local, matrixBlock_global);
-
-  barrier(CLK_LOCAL_MEM_FENCE);
-
-  if (get_sub_group_id() < COMPUTE_WARPS)
-    computeGemv_block(matrixBlock_local, vector, result_block);
-
-  // -----------------------------------------------------
-
-  barrier(CLK_LOCAL_MEM_FENCE);
+  // ---------------------------------------------------
 
   if (get_sub_group_id() < COMPUTE_WARPS)
     LoadData_block(
-        matrixBlock_local,
-        matrixBlock_global + ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
+        matrixBlockBuff1_local,
+        matrixBlock_global + 0 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
 
   barrier(CLK_LOCAL_MEM_FENCE);
 
   if (get_sub_group_id() < COMPUTE_WARPS)
-    computeGemv_block(matrixBlock_local, vector, result_block + ROWS_PER_GROUP);
+    computeGemv_block(matrixBlockBuff1_local, vector,
+                      result_block + 0 * ROWS_PER_GROUP);
 
   // -----------------------------------------------------
 
+  if (get_sub_group_id() >= COMPUTE_WARPS)
+    LoadData_block(
+        matrixBlockBuff2_local,
+        matrixBlock_global + 1 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
+
   barrier(CLK_LOCAL_MEM_FENCE);
 
   if (get_sub_group_id() < COMPUTE_WARPS)
+    computeGemv_block(matrixBlockBuff2_local, vector,
+                      result_block + 1 * ROWS_PER_GROUP);
+
+  // -----------------------------------------------------
+
+  if (get_sub_group_id() >= COMPUTE_WARPS)
     LoadData_block(
-        matrixBlock_local,
+        matrixBlockBuff1_local,
         matrixBlock_global + 2 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
 
   barrier(CLK_LOCAL_MEM_FENCE);
 
   if (get_sub_group_id() < COMPUTE_WARPS)
-    computeGemv_block(matrixBlock_local, vector,
+    computeGemv_block(matrixBlockBuff1_local, vector,
                       result_block + 2 * ROWS_PER_GROUP);
 
   // -----------------------------------------------------
 
-  barrier(CLK_LOCAL_MEM_FENCE);
-
-  if (get_sub_group_id() < COMPUTE_WARPS)
+  if (get_sub_group_id() >= COMPUTE_WARPS)
     LoadData_block(
-        matrixBlock_local,
+        matrixBlockBuff2_local,
         matrixBlock_global + 3 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
 
   barrier(CLK_LOCAL_MEM_FENCE);
 
   if (get_sub_group_id() < COMPUTE_WARPS)
-    computeGemv_block(matrixBlock_local, vector,
+    computeGemv_block(matrixBlockBuff2_local, vector,
                       result_block + 3 * ROWS_PER_GROUP);
 }

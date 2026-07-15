@@ -18,7 +18,7 @@ static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr float ABS_ERROR = 1e-3f;
 
-static constexpr size_t WG_SIZE = 128;
+static constexpr size_t WG_SIZE = 256;
 static constexpr size_t ROWS_PER_GROUP = 16;
 
 static_assert(WG_SIZE % 32 == 0,
