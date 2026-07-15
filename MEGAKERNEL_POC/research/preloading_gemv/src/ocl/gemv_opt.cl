@@ -100,15 +100,16 @@ inline void computeGemv_block(__local const half* restrict matrix,
 
 #define LOAD_DATA_BLOCK_SIZE ROWS_PER_GROUP* COMPUTE_GEMV_BLOCK_COLUMS
 inline void LoadData_block(__local half* restrict matrixBlock_local,
-                           __global const half* restrict matrixBlock_global) {
+                           __global const half* restrict matrixBlock_global,
+                           int computeWGSize, int loadDataWGSize) {
   __local half16* restrict matrixBlock_local16 =
       (__local half16* restrict)matrixBlock_local;
   __global half16* restrict matrixBlock_global16 =
       (__global half16* restrict)matrixBlock_global;
 
 #pragma unroll
-  for (int i = get_local_id(0) - COMPUTE_WG_SIZE; i < LOAD_DATA_BLOCK_SIZE / 16;
-       i += LOAD_DATA_WG_SIZE) {
+  for (int i = get_local_id(0) - computeWGSize; i < LOAD_DATA_BLOCK_SIZE / 16;
+       i += loadDataWGSize) {
     matrixBlock_local16[i] = matrixBlock_global16[i];
   }
 }
@@ -139,11 +140,10 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   // ---------------------------------------------------
 
-  if (get_sub_group_id() < COMPUTE_WARPS) {
-    LoadData_block(
-        matrixBlockBuff1_local,
-        matrixBlock_global + 0 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
-  }
+  LoadData_block(
+      matrixBlockBuff1_local,
+      matrixBlock_global + 0 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS, 0,
+      TOTAL_WARPS * SUBGROUP_SIZE);
 
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -153,7 +153,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   } else {
     LoadData_block(
         matrixBlockBuff2_local,
-        matrixBlock_global + 1 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
+        matrixBlock_global + 1 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS,
+        COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -164,7 +165,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   } else {
     LoadData_block(
         matrixBlockBuff1_local,
-        matrixBlock_global + 2 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
+        matrixBlock_global + 2 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS,
+        COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -175,7 +177,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   } else {
     LoadData_block(
         matrixBlockBuff2_local,
-        matrixBlock_global + 3 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS);
+        matrixBlock_global + 3 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS,
+        COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
   barrier(CLK_LOCAL_MEM_FENCE);
