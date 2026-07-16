@@ -145,7 +145,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
       matrixBlock_global + 0 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS, 0,
       TOTAL_WARPS * SUBGROUP_SIZE);
 
-  barrier(CLK_LOCAL_MEM_FENCE);
+  //barrier(CLK_LOCAL_MEM_FENCE);
+  __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     computeGemv_block(matrixBlockBuff1_local, vector,
@@ -157,7 +158,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  barrier(CLK_LOCAL_MEM_FENCE);
+  //barrier(CLK_LOCAL_MEM_FENCE);
+  __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     computeGemv_block(matrixBlockBuff2_local, vector,
@@ -169,7 +171,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  barrier(CLK_LOCAL_MEM_FENCE);
+  //barrier(CLK_LOCAL_MEM_FENCE);
+  __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     computeGemv_block(matrixBlockBuff1_local, vector,
@@ -181,7 +184,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  barrier(CLK_LOCAL_MEM_FENCE);
+  //barrier(CLK_LOCAL_MEM_FENCE);
+  __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     computeGemv_block(matrixBlockBuff2_local, vector,
