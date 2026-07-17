@@ -13,7 +13,7 @@ namespace {
 
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
 static constexpr size_t warmupIterations = 1000;
-static constexpr size_t benchmarkIterations = 10000;
+static constexpr size_t benchmarkIterations = 100000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr float ABS_ERROR = 1e-3f;

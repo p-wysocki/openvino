@@ -20,9 +20,10 @@
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_PER_GROUP
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 
-inline void computeGemv_block(__local const half* restrict matrix,
-                              __global const half* restrict vector,
-                              __global half* restrict result) {
+inline void computeGemv_block(
+    __local const half* restrict matrix,
+    __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
+    __global half* restrict result) {
 #define VECTOR_WIDTH 4u
 #define VECTOR_ITEMS_FOR_SUBGROUP (SUBGROUP_SIZE * VECTOR_WIDTH)
 #define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_SUBGROUP)
@@ -48,28 +49,20 @@ inline void computeGemv_block(__local const half* restrict matrix,
   }
 
   const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
-  uint col = laneLid << 2;
 
 #pragma unroll
-  for (; col + LAST_COL_BLOCK_OFFSET < vecLimit; col += COL_ITEMS_PER_LOOP) {
-    uint blockCols[COL_BLOCKS_PER_LOOP];
-    float4 blockVectors[COL_BLOCKS_PER_LOOP];
-#pragma unroll COL_BLOCKS_PER_LOOP
-    for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-      blockCols[blockIdx] = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
-      blockVectors[blockIdx] =
-          convert_float4(vload4(0, vector + blockCols[blockIdx]));
-    }
-
+  for (int col = laneLid << 2; col + LAST_COL_BLOCK_OFFSET < vecLimit;
+       col += COL_ITEMS_PER_LOOP) {
 #pragma unroll ROWS_PER_SUBGROUP
     for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
       if (rowIsValid[rowIdx]) {
 #pragma unroll COL_BLOCKS_PER_LOOP
         for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
+          const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
           acc[rowIdx][blockIdx] +=
-              dot(convert_float4(vload4(
-                      0, matrix + rowOffsets[rowIdx] + blockCols[blockIdx])),
-                  blockVectors[blockIdx]);
+              dot(convert_float4(
+                      vload4(0, matrix + rowOffsets[rowIdx] + colOffset)),
+                  cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx]);
         }
       }
     }
@@ -135,21 +128,37 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __global const half* restrict matrixBlock_global =
       matrix + get_group_id(0) * 4 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS;
 
-  // named_barrier_t barrier_team_A = sub_group_barrier_init(0,
-  // get_sub_group_size());
-
   // ---------------------------------------------------
+  // Preload vector data into registers for reuse across dot products.
+  const int laneLid = get_sub_group_local_id();
+  const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
+  float4 blockVectors[COMPUTE_GEMV_BLOCK_COLUMS / COL_ITEMS_PER_LOOP]
+                     [COL_BLOCKS_PER_LOOP];
+  __private const float4(*restrict cachedVectorPtr)[COL_BLOCKS_PER_LOOP] =
+      blockVectors;
+  //---------------------------------------------------------
 
   LoadData_block(
       matrixBlockBuff1_local,
       matrixBlock_global + 0 * ROWS_PER_GROUP * COMPUTE_GEMV_BLOCK_COLUMS, 0,
       TOTAL_WARPS * SUBGROUP_SIZE);
 
-  //barrier(CLK_LOCAL_MEM_FENCE);
+  // barrier(CLK_LOCAL_MEM_FENCE);
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff1_local, vector,
+#pragma unroll
+    for (int col = laneLid << 2; col + LAST_COL_BLOCK_OFFSET < vecLimit;
+         col += COL_ITEMS_PER_LOOP) {
+#pragma unroll COL_BLOCKS_PER_LOOP
+      for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
+        const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
+        blockVectors[col / COL_ITEMS_PER_LOOP][blockIdx] =
+            convert_float4(vload4(0, vector + colOffset));
+      }
+    }
+
+    computeGemv_block(matrixBlockBuff1_local, cachedVectorPtr,
                       result_block + 0 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -158,11 +167,11 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  //barrier(CLK_LOCAL_MEM_FENCE);
+  // barrier(CLK_LOCAL_MEM_FENCE);
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, vector,
+    computeGemv_block(matrixBlockBuff2_local, cachedVectorPtr,
                       result_block + 1 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -171,11 +180,11 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  //barrier(CLK_LOCAL_MEM_FENCE);
+  // barrier(CLK_LOCAL_MEM_FENCE);
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff1_local, vector,
+    computeGemv_block(matrixBlockBuff1_local, cachedVectorPtr,
                       result_block + 2 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -184,11 +193,11 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
         COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
   }
 
-  //barrier(CLK_LOCAL_MEM_FENCE);
+  // barrier(CLK_LOCAL_MEM_FENCE);
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, vector,
+    computeGemv_block(matrixBlockBuff2_local, cachedVectorPtr,
                       result_block + 3 * ROWS_PER_GROUP);
   }
 }
