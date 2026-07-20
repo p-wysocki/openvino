@@ -35,17 +35,14 @@ inline void computeGemv_block(
   uint rows[ROWS_PER_SUBGROUP];
   bool rowIsValid[ROWS_PER_SUBGROUP];
   uint rowOffsets[ROWS_PER_SUBGROUP];
-  float acc[ROWS_PER_SUBGROUP][COL_BLOCKS_PER_LOOP];
+  float acc[ROWS_PER_SUBGROUP];
 
 #pragma unroll ROWS_PER_SUBGROUP
   for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
     rows[rowIdx] = rowBase + rowIdx;
     rowIsValid[rowIdx] = rows[rowIdx] < COMPUTE_GEMV_BLOCK_ROWS;
     rowOffsets[rowIdx] = rows[rowIdx] * COMPUTE_GEMV_BLOCK_COLUMS;
-#pragma unroll COL_BLOCKS_PER_LOOP
-    for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-      acc[rowIdx][blockIdx] = 0.0f;
-    }
+    acc[rowIdx] = 0.0f;
   }
 
 #pragma unroll
@@ -58,7 +55,7 @@ inline void computeGemv_block(
 #pragma unroll COL_BLOCKS_PER_LOOP
         for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
           const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
-          acc[rowIdx][blockIdx] +=
+          acc[rowIdx] +=
               dot(convert_float4(
                       vload4(0, matrix + rowOffsets[rowIdx] + colOffset)),
                   cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx]);
@@ -70,12 +67,7 @@ inline void computeGemv_block(
   float reduced[ROWS_PER_SUBGROUP];
 #pragma unroll ROWS_PER_SUBGROUP
   for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
-    float rowAcc = acc[rowIdx][1];
-#pragma unroll COL_BLOCKS_PER_LOOP
-    for (uint blockIdx = 2; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-      rowAcc += acc[rowIdx][blockIdx];
-    }
-    rowAcc = acc[rowIdx][0] + rowAcc;
+    float rowAcc = acc[rowIdx];
     reduced[rowIdx] = sub_group_reduce_add(rowAcc);
   }
 
