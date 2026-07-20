@@ -18,18 +18,21 @@
 #define LOAD_DATA_WG_SIZE ((TOTAL_WARPS - COMPUTE_WARPS) * WARP_SIZE)
 #define ROWS_FOR_BLOCK_FOR_PHASE (COMPUTE_WARPS * ROWS_FOR_COMPUTE_WARP)
 #define PHASES_PER_BLOCK (TOTAL_ROWS_FOR_BLOCK / ROWS_FOR_BLOCK_FOR_PHASE)
+
+// Computes gemv for give tile.
+// Each warp compuutes ROWS_FOR_COMPUTE_WARP rows.
+// Warps compute whole dot product for their assigned rows.
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
-
-inline void ComputeGemv_block(
+inline void ComputeGemvTile_block(
     __local const half* restrict matrix,
     __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
     __global half* restrict result) {
 #define VECTOR_WIDTH 4u
-#define VECTOR_ITEMS_FOR_SUBGROUP (WARP_SIZE * VECTOR_WIDTH)
-#define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_SUBGROUP)
+#define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
+#define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_WARP)
 #define LAST_COL_BLOCK_OFFSET \
-  ((COL_BLOCKS_PER_LOOP - 1) * VECTOR_ITEMS_FOR_SUBGROUP)
+  ((COL_BLOCKS_PER_LOOP - 1) * VECTOR_ITEMS_FOR_WARP)
 
   const int laneLid = get_sub_group_local_id();
   const int rowBase = get_sub_group_id() * ROWS_FOR_COMPUTE_WARP;
@@ -52,7 +55,7 @@ inline void ComputeGemv_block(
       if (rowIsValid[rowIdx]) {
 #pragma unroll COL_BLOCKS_PER_LOOP
         for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-          const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
+          const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
           acc[rowIdx] +=
               dot(convert_float4(vload4(0, matrix + rowOffset + colOffset)),
                   cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx]);
@@ -64,7 +67,7 @@ inline void ComputeGemv_block(
   float reduced[ROWS_FOR_COMPUTE_WARP];
 #pragma unroll ROWS_FOR_COMPUTE_WARP
   for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
-    float rowAcc = acc[rowIdx];
+    const float rowAcc = acc[rowIdx];
     reduced[rowIdx] = sub_group_reduce_add(rowAcc);
   }
 
@@ -81,9 +84,9 @@ inline void ComputeGemv_block(
 }
 
 #define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* COMPUTE_GEMV_BLOCK_COLUMS
-inline void LoadData_block(__local half* restrict matrixBlock_local,
-                           __global const half* restrict matrixBlock_global,
-                           int computeWGSize, int loadDataWGSize) {
+inline void LoadDataTile_block(__local half* restrict matrixBlock_local,
+                               __global const half* restrict matrixBlock_global,
+                               int computeWGSize, int loadDataWGSize) {
   __local half8* restrict matrixBlock_local8 =
       (__local half8* restrict)matrixBlock_local;
   __global half8* restrict matrixBlock_global8 =
@@ -133,8 +136,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
                               [COL_BLOCKS_PER_LOOP];
   //---------------------------------------------------------
 
-  LoadData_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE, 0,
-                 TOTAL_WARPS * WARP_SIZE);
+  LoadDataTile_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE,
+                     0, TOTAL_WARPS * WARP_SIZE);
 
   __asm__ volatile("barrier");
 
@@ -147,7 +150,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
          col += COL_ITEMS_PER_LOOP) {
 #pragma unroll COL_BLOCKS_PER_LOOP
       for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-        const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
+        const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
         cachedVector_thisWarp[col / COL_ITEMS_PER_LOOP][blockIdx] =
             convert_float4(vload4(0, vector + colOffset));
       }
@@ -159,12 +162,12 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     SwapPtr(&computeBuffer, &loadBuffer);
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
-      ComputeGemv_block(computeBuffer, cachedVector_thisWarp,
-                        result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
+      ComputeGemvTile_block(computeBuffer, cachedVector_thisWarp,
+                            result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
     } else {
-      LoadData_block(loadBuffer,
-                     matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
-                     COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
+      LoadDataTile_block(
+          loadBuffer, matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
+          COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
     }
 
     __asm__ volatile("barrier");
@@ -172,7 +175,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    ComputeGemv_block(computeBuffer, cachedVector_thisWarp,
-                      result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
+    ComputeGemvTile_block(computeBuffer, cachedVector_thisWarp,
+                          result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
   }
 }
