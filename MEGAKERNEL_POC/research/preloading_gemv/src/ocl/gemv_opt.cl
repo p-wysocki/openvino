@@ -47,15 +47,15 @@ inline void ComputeGemvTile_block(
 #pragma unroll
   for (int col = laneLid * VECTOR_WIDTH; col < COMPUTE_GEMV_BLOCK_COLUMS;
        col += COL_ITEMS_PER_LOOP) {
-#pragma unroll ROWS_FOR_COMPUTE_WARP
-    for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
-      const int rowOffset = (rowBase + rowIdx) * COMPUTE_GEMV_BLOCK_COLUMS;
-      if (rowIsValid[rowIdx]) {
 #pragma unroll COL_BLOCKS_PER_LOOP
-        for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
+    for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
+      const float4 vectorData =
+          cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx];
+#pragma unroll ROWS_FOR_COMPUTE_WARP
+      for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
+        if (rowIsValid[rowIdx]) {
+          const int rowOffset = (rowBase + rowIdx) * COMPUTE_GEMV_BLOCK_COLUMS;
           const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
-          const float4 vectorData =
-              cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx];
           const float4 matrixData =
               convert_float4(matrixTile_local[(rowOffset + colOffset) / 4]);
           acc[rowIdx] += dot(matrixData, vectorData);
