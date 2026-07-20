@@ -26,40 +26,38 @@
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 inline void ComputeGemvTile_block(
     __local const half4* restrict matrixTile_local,
-    __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
+    __private const float4* restrict cachedVector,
     __global half* restrict result) {
 #define VECTOR_WIDTH 4
 #define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
 #define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_WARP)
 
   const int laneLid = get_sub_group_local_id();
-  const int rowBase = get_sub_group_id() * ROWS_FOR_COMPUTE_WARP;
+  const int startingRowIdxForThisWarp =
+      get_sub_group_id() * ROWS_FOR_COMPUTE_WARP;
   bool rowIsValid[ROWS_FOR_COMPUTE_WARP];
   float acc[ROWS_FOR_COMPUTE_WARP];
 
 #pragma unroll ROWS_FOR_COMPUTE_WARP
   for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
-    rowIsValid[rowIdx] = (rowBase + rowIdx) < COMPUTE_GEMV_BLOCK_ROWS;
+    rowIsValid[rowIdx] =
+        (startingRowIdxForThisWarp + rowIdx) < COMPUTE_GEMV_BLOCK_ROWS;
     acc[rowIdx] = 0.0f;
   }
 
   // Compute dot products for assigned rows.
 #pragma unroll
-  for (int col = laneLid * VECTOR_WIDTH; col < COMPUTE_GEMV_BLOCK_COLUMS;
-       col += COL_ITEMS_PER_LOOP) {
-#pragma unroll COL_BLOCKS_PER_LOOP
-    for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-      const float4 vectorData =
-          cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx];
+  for (int colIdx = laneLid; colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
+       colIdx += WARP_SIZE) {
+    const float4 vectorData = cachedVector[colIdx / WARP_SIZE];
 #pragma unroll ROWS_FOR_COMPUTE_WARP
-      for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
-        if (rowIsValid[rowIdx]) {
-          const int rowOffset = (rowBase + rowIdx) * COMPUTE_GEMV_BLOCK_COLUMS;
-          const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
-          const float4 matrixData =
-              convert_float4(matrixTile_local[(rowOffset + colOffset) / 4]);
-          acc[rowIdx] += dot(matrixData, vectorData);
-        }
+    for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
+      if (rowIsValid[rowIdx]) {
+        const int rowOffset = (startingRowIdxForThisWarp + rowIdx) *
+                              (COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH);
+        const float4 matrixData =
+            convert_float4(matrixTile_local[rowOffset + colIdx]);
+        acc[rowIdx] += dot(matrixData, vectorData);
       }
     }
   }
@@ -76,7 +74,7 @@ inline void ComputeGemvTile_block(
 #pragma unroll ROWS_FOR_COMPUTE_WARP
     for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
       if (rowIsValid[rowIdx]) {
-        const int outputIdx = rowBase + rowIdx;
+        const int outputIdx = startingRowIdxForThisWarp + rowIdx;
         result[outputIdx] = convert_half_rte(reduced[rowIdx]);
       }
     }
@@ -132,8 +130,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   // ---------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
-  float4 cachedVector_thisWarp[COMPUTE_GEMV_BLOCK_COLUMS / COL_ITEMS_PER_LOOP]
-                              [COL_BLOCKS_PER_LOOP];
+  float4 cachedVector_thisWarp[COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH /
+                               WARP_SIZE];
   //---------------------------------------------------------
 
   LoadDataTile_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE,
@@ -145,14 +143,11 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     // Preload vector data into registers for reuse across dot products.
     const int laneLid = get_sub_group_local_id();
 #pragma unroll
-    for (int col = laneLid * VECTOR_WIDTH; col < COMPUTE_GEMV_BLOCK_COLUMS;
-         col += COL_ITEMS_PER_LOOP) {
-#pragma unroll COL_BLOCKS_PER_LOOP
-      for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
-        const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
-        cachedVector_thisWarp[col / COL_ITEMS_PER_LOOP][blockIdx] =
-            convert_float4(vload4(0, vector + colOffset));
-      }
+    for (int colIdx = laneLid;
+         colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
+         colIdx += WARP_SIZE) {
+      cachedVector_thisWarp[colIdx / WARP_SIZE] =
+          convert_float4(vload4(0, vector + colIdx * VECTOR_WIDTH));
     }
     // ----------------------------------------------------------------
   }
