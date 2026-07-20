@@ -108,8 +108,7 @@ inline void SwapPtr(__local half* restrict __private* a,
 // ROWS_FOR_COMPUTE_WARP rows. All compute subgroups cooperate to compute the
 // dot products for their assigned rows.
 __attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(WARP_SIZE)))
-__attribute__((vec_type_hint(float4))) __kernel void
+__attribute__((intel_reqd_sub_group_size(WARP_SIZE))) __kernel void
 gemv(__global const half* restrict matrix, __global const half* restrict vector,
      __global half* restrict result, const uint rowCount,
      const uint columnCount) {
