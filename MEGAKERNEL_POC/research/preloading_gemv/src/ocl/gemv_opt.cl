@@ -25,7 +25,7 @@
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 inline void ComputeGemvTile_block(
-    __local const half* restrict matrixTile_local,
+    __local const half4* restrict matrixTile_local,
     __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
     __global half* restrict result) {
 #define VECTOR_WIDTH 4
@@ -56,8 +56,8 @@ inline void ComputeGemvTile_block(
           const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
           const float4 vectorData =
               cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx];
-          const float4 matrixData = convert_float4(
-              vload4(0, matrixTile_local + rowOffset + colOffset));
+          const float4 matrixData =
+              convert_float4(matrixTile_local[(rowOffset + colOffset) / 4]);
           acc[rowIdx] += dot(matrixData, vectorData);
         }
       }
@@ -161,7 +161,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     SwapPtr(&computeBuffer, &loadBuffer);
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
-      ComputeGemvTile_block(computeBuffer, cachedVector_thisWarp,
+      ComputeGemvTile_block((__local half4* restrict)computeBuffer,
+                            cachedVector_thisWarp,
                             result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
     } else {
       LoadDataTile_block(
@@ -174,7 +175,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    ComputeGemvTile_block(computeBuffer, cachedVector_thisWarp,
+    ComputeGemvTile_block((__local half4* restrict)computeBuffer,
+                          cachedVector_thisWarp,
                           result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
   }
 }
