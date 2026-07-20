@@ -28,11 +28,9 @@ inline void ComputeGemvTile_block(
     __local const half* restrict matrix,
     __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
     __global half* restrict result) {
-#define VECTOR_WIDTH 4u
+#define VECTOR_WIDTH 4
 #define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
 #define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_WARP)
-#define LAST_COL_BLOCK_OFFSET \
-  ((COL_BLOCKS_PER_LOOP - 1) * VECTOR_ITEMS_FOR_WARP)
 
   const int laneLid = get_sub_group_local_id();
   const int rowBase = get_sub_group_id() * ROWS_FOR_COMPUTE_WARP;
@@ -45,9 +43,9 @@ inline void ComputeGemvTile_block(
     acc[rowIdx] = 0.0f;
   }
 
+  // Compute dot products for assigned rows.
 #pragma unroll
-  for (int col = laneLid << 2;
-       col + LAST_COL_BLOCK_OFFSET < COMPUTE_GEMV_BLOCK_COLUMS;
+  for (int col = laneLid << 2; col < COMPUTE_GEMV_BLOCK_COLUMS;
        col += COL_ITEMS_PER_LOOP) {
 #pragma unroll ROWS_FOR_COMPUTE_WARP
     for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
@@ -145,8 +143,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     // Preload vector data into registers for reuse across dot products.
     const int laneLid = get_sub_group_local_id();
 #pragma unroll
-    for (int col = laneLid << 2;
-         col + LAST_COL_BLOCK_OFFSET < COMPUTE_GEMV_BLOCK_COLUMS;
+    for (int col = laneLid << 2; col < COMPUTE_GEMV_BLOCK_COLUMS;
          col += COL_ITEMS_PER_LOOP) {
 #pragma unroll COL_BLOCKS_PER_LOOP
       for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
