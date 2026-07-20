@@ -95,15 +95,15 @@ inline void computeGemv_block(
 inline void LoadData_block(__local half* restrict matrixBlock_local,
                            __global const half* restrict matrixBlock_global,
                            int computeWGSize, int loadDataWGSize) {
-  __local half16* restrict matrixBlock_local16 =
-      (__local half16* restrict)matrixBlock_local;
-  __global half16* restrict matrixBlock_global16 =
-      (__global half16* restrict)matrixBlock_global;
+  __local half8* restrict matrixBlock_local8 =
+      (__local half8* restrict)matrixBlock_local;
+  __global half8* restrict matrixBlock_global8 =
+      (__global half8* restrict)matrixBlock_global;
 
 #pragma unroll
-  for (int i = get_local_id(0) - computeWGSize; i < LOAD_DATA_BLOCK_SIZE / 16;
+  for (int i = get_local_id(0) - computeWGSize; i < LOAD_DATA_BLOCK_SIZE / 8;
        i += loadDataWGSize) {
-    matrixBlock_local16[i] = matrixBlock_global16[i];
+    matrixBlock_local8[i] = matrixBlock_global8[i];
   }
 }
 
