@@ -20,6 +20,7 @@ static constexpr float ABS_ERROR = 1e-3f;
 
 static constexpr size_t WG_SIZE = 256;
 static constexpr size_t ROWS_PER_GROUP = 16;
+static constexpr const char* kernelSourceFileName = "gemv_opt.cl";
 
 static_assert(WG_SIZE % 32 == 0,
               "WG_SIZE must contain whole 32-thread subgroups");
@@ -192,7 +193,7 @@ class PreloadingTest : public ocltest::OclTestFixture {
  public:
   void SetUp() override {
     ocltest::OclTestFixture::SetUp();
-    _oclBinary = createProgramAndKernel(kernelSourcePath + "gemv_opt.cl", "gemv");
+    _oclBinary = createProgramAndKernel(kernelSourcePath + kernelSourceFileName, "gemv");
   }
 
   void TearDown() override {
