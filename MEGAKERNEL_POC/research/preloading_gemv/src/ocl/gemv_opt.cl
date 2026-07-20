@@ -48,10 +48,9 @@ inline void computeGemv_block(
     }
   }
 
-  const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
-
 #pragma unroll
-  for (int col = laneLid << 2; col + LAST_COL_BLOCK_OFFSET < vecLimit;
+  for (int col = laneLid << 2;
+       col + LAST_COL_BLOCK_OFFSET < COMPUTE_GEMV_BLOCK_COLUMS;
        col += COL_ITEMS_PER_LOOP) {
 #pragma unroll ROWS_PER_SUBGROUP
     for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
@@ -145,9 +144,9 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   if (get_sub_group_id() < COMPUTE_WARPS) {
     // Preload vector data into registers for reuse across dot products.
     const int laneLid = get_sub_group_local_id();
-    const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
 #pragma unroll
-    for (int col = laneLid << 2; col + LAST_COL_BLOCK_OFFSET < vecLimit;
+    for (int col = laneLid << 2;
+         col + LAST_COL_BLOCK_OFFSET < COMPUTE_GEMV_BLOCK_COLUMS;
          col += COL_ITEMS_PER_LOOP) {
 #pragma unroll COL_BLOCKS_PER_LOOP
       for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
