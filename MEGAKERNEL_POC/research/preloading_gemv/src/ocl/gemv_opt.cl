@@ -170,8 +170,9 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     __asm__ volatile("barrier");
   }
 
+  SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    ComputeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
+    ComputeGemv_block(computeBuffer, cachedVector_thisWarp,
                       result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
   }
 }
