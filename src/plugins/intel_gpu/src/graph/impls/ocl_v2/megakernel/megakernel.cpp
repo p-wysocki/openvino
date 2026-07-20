@@ -17,6 +17,7 @@
 #include "ocl/ocl_event.hpp"
 #include <CL/cl.h>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -403,6 +404,25 @@ public:
         // Number of new tokens this step (dim 1 of hidden_states).
         auto hs_ps = instance.input_memory(0).get_layout().get<ov::PartialShape>();
         uint S_new = (uint)hs_ps[1].get_length();
+
+        // Two-model decode-only mode: in the two-model PoC setup the prefill phase
+        // is served by a separate, unmodified OpenVINO model and only the decode
+        // phase is routed to this MegaKernel. When OV_MEGAKERNEL_DECODE_ONLY=1 we
+        // therefore refuse any multi-token (prefill) step so the MegaKernel can
+        // never accidentally absorb prefill work and pollute decode measurements.
+        // The internal KV cache is instead grown one token at a time by decode
+        // steps (see cur_len_ below). Default (unset) keeps the multi-token path
+        // enabled so single-model users (e.g. GenAI/Optimum) can still self-prime.
+        static const bool decode_only = [] {
+            const char* v = std::getenv("OV_MEGAKERNEL_DECODE_ONLY");
+            return v && v[0] == '1';
+        }();
+        OPENVINO_ASSERT(!(decode_only && S_new > 1),
+                        "[MegaKernel] OV_MEGAKERNEL_DECODE_ONLY=1 but received a multi-token "
+                        "(prefill) step with S=", S_new,
+                        ". In two-model mode prefill must run on the regular model; the "
+                        "MegaKernel model handles decode (S==1) only.");
+
         // Length bookkeeping via an internal counter: a multi-token step (S_new > 1)
         // starts a fresh sequence (prefill), a single-token step continues decode.
         // This is fully under our control and immune to OV's padded/stale KV shapes.

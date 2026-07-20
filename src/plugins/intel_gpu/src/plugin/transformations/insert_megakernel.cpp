@@ -1,7 +1,7 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// The pass (MegaKernel-only — handles BOTH prefill and decode):
+// The pass (MegaKernel decode model of the two-model PoC setup):
 //  1. Detects the model by counting 56 ReadValue/Assign "past_key_values" pairs.
 //  2. Collects per-layer weight Constants (q/k/v/o proj, gate/up/down proj,
 //     input_ln, post_attn_ln, q_norm, k_norm) and stacks them along a new dim-0.
@@ -15,8 +15,12 @@
 //
 // The original 28-layer SDPA sub-graph is left with no consumers and therefore
 // becomes unreachable from Results/Sinks — it is never compiled, so there is no
-// duplicate weight memory and no runtime branching (Select) overhead.  The
-// MegaKernel itself decides prefill vs decode at runtime from the token count.
+// duplicate weight memory and no runtime branching (Select) overhead.
+//
+// Two-model PoC: this pass produces the DECODE model. Prefill is served by a
+// separate, unmodified OpenVINO model (compile with OV_MEGAKERNEL_DISABLE=1) so
+// the MegaKernel never handles prefill and only decode latency is measured. The
+// pass is a no-op when OV_MEGAKERNEL_DISABLE=1, which yields that regular model.
 
 #include "insert_megakernel.hpp"
 
@@ -417,10 +421,17 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     m->validate_nodes_and_infer_types();
 
     // -----------------------------------------------------------------------
-    // Verification: assert the MegaKernel node is present in the final graph
-    // and dump the transformed graph to SVG for visual inspection.
+    // Verification: assert the MegaKernel node is present in the final graph.
+    // The optional SVG dump and progress prints are gated behind
+    // OV_MEGAKERNEL_DUMP=1 so repeated compiles during the e2e performance
+    // measurement stay quiet and don't shell out to graphviz on every compile.
     // -----------------------------------------------------------------------
     {
+        const bool dump = [] {
+            const char* v = std::getenv("OV_MEGAKERNEL_DUMP");
+            return v && v[0] == '1';
+        }();
+
         // 1. Count MegaKernel nodes (must be exactly 1).
         int mk_count = 0;
         for (auto& op : m->get_ordered_ops()) {
@@ -429,7 +440,6 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
         }
         OPENVINO_ASSERT(mk_count == 1,
                         "[MegaKernel] post-insertion check FAILED: expected 1 MegaKernel node, found ", mk_count);
-        std::cout << "[MegaKernel] PASS: MegaKernel node successfully inserted (" << mk_count << " node)." << std::endl;
 
         // 2. Confirm the 56 Assign sinks were removed (only ReadValues remain).
         int assign_kv_count = 0;
@@ -441,34 +451,38 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
         OPENVINO_ASSERT(assign_kv_count == 0,
                         "[MegaKernel] post-insertion check FAILED: ", assign_kv_count,
                         " KV Assign sinks still present (expected 0)");
-        std::cout << "[MegaKernel] PASS: all " << (2 * NUM_LAYERS)
-                  << " KV-cache Assign sinks removed." << std::endl;
 
-        // 3. Dump transformed graph to SVG.
-        // VisualizeTree always writes a .dot file; the built-in dot→SVG step is
-        // only active when ENABLE_OPENVINO_DEBUG=ON, so we invoke graphviz
-        // explicitly ourselves.
-        const char* svg_dir_env = std::getenv("OV_MEGAKERNEL_DUMP_DIR");
-        std::string svg_dir = svg_dir_env ? svg_dir_env
-                                          : "/opt/home/pwysocki/openvino/MEGAKERNEL_POC/python";
-        std::string dot_path = svg_dir + "/megakernel_transformed_graph.dot";
-        std::string svg_path = svg_dir + "/megakernel_transformed_graph.svg";
-        try {
-            // Write .dot via VisualizeTree (dot_only=true to avoid internal path mangling).
-            ov::pass::Manager viz_pass;
-            viz_pass.register_pass<ov::pass::VisualizeTree>(dot_path, nullptr, /*dot_only=*/true);
-            viz_pass.run_passes(m);
+        if (dump) {
+            std::cout << "[MegaKernel] PASS: MegaKernel node successfully inserted (" << mk_count << " node)." << std::endl;
+            std::cout << "[MegaKernel] PASS: all " << (2 * NUM_LAYERS)
+                      << " KV-cache Assign sinks removed." << std::endl;
 
-            // Convert .dot → .svg using graphviz.
-            std::string cmd = "dot -Tsvg " + dot_path + " -o " + svg_path + " 2>&1";
-            if (std::system(cmd.c_str()) == 0) {
-                std::cout << "[MegaKernel] Transformed graph dumped to: " << svg_path << std::endl;
-            } else {
-                std::cerr << "[MegaKernel] WARNING: graphviz conversion failed; raw DOT at: "
-                          << dot_path << std::endl;
+            // 3. Dump transformed graph to SVG.
+            // VisualizeTree always writes a .dot file; the built-in dot→SVG step is
+            // only active when ENABLE_OPENVINO_DEBUG=ON, so we invoke graphviz
+            // explicitly ourselves.
+            const char* svg_dir_env = std::getenv("OV_MEGAKERNEL_DUMP_DIR");
+            std::string svg_dir = svg_dir_env ? svg_dir_env
+                                              : "/opt/home/pwysocki/openvino/MEGAKERNEL_POC/python";
+            std::string dot_path = svg_dir + "/megakernel_transformed_graph.dot";
+            std::string svg_path = svg_dir + "/megakernel_transformed_graph.svg";
+            try {
+                // Write .dot via VisualizeTree (dot_only=true to avoid internal path mangling).
+                ov::pass::Manager viz_pass;
+                viz_pass.register_pass<ov::pass::VisualizeTree>(dot_path, nullptr, /*dot_only=*/true);
+                viz_pass.run_passes(m);
+
+                // Convert .dot → .svg using graphviz.
+                std::string cmd = "dot -Tsvg " + dot_path + " -o " + svg_path + " 2>&1";
+                if (std::system(cmd.c_str()) == 0) {
+                    std::cout << "[MegaKernel] Transformed graph dumped to: " << svg_path << std::endl;
+                } else {
+                    std::cerr << "[MegaKernel] WARNING: graphviz conversion failed; raw DOT at: "
+                              << dot_path << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[MegaKernel] WARNING: graph dump failed: " << e.what() << std::endl;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "[MegaKernel] WARNING: graph dump failed: " << e.what() << std::endl;
         }
     }
 
