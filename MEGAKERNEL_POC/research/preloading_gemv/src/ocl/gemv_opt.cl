@@ -30,18 +30,14 @@ inline void computeGemv_block(
 #define LAST_COL_BLOCK_OFFSET \
   ((COL_BLOCKS_PER_LOOP - 1) * VECTOR_ITEMS_FOR_SUBGROUP)
 
-  const uint laneLid = get_sub_group_local_id();
-  const uint rowBase = get_sub_group_id() * ROWS_PER_SUBGROUP;
-  uint rows[ROWS_PER_SUBGROUP];
+  const int laneLid = get_sub_group_local_id();
+  const int rowBase = get_sub_group_id() * ROWS_PER_SUBGROUP;
   bool rowIsValid[ROWS_PER_SUBGROUP];
-  uint rowOffsets[ROWS_PER_SUBGROUP];
   float acc[ROWS_PER_SUBGROUP];
 
 #pragma unroll ROWS_PER_SUBGROUP
-  for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
-    rows[rowIdx] = rowBase + rowIdx;
-    rowIsValid[rowIdx] = rows[rowIdx] < COMPUTE_GEMV_BLOCK_ROWS;
-    rowOffsets[rowIdx] = rows[rowIdx] * COMPUTE_GEMV_BLOCK_COLUMS;
+  for (int rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
+    rowIsValid[rowIdx] = (rowBase + rowIdx) < COMPUTE_GEMV_BLOCK_ROWS;
     acc[rowIdx] = 0.0f;
   }
 
@@ -50,14 +46,14 @@ inline void computeGemv_block(
        col + LAST_COL_BLOCK_OFFSET < COMPUTE_GEMV_BLOCK_COLUMS;
        col += COL_ITEMS_PER_LOOP) {
 #pragma unroll ROWS_PER_SUBGROUP
-    for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
+    for (int rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
+      const int rowOffset = (rowBase + rowIdx) * COMPUTE_GEMV_BLOCK_COLUMS;
       if (rowIsValid[rowIdx]) {
 #pragma unroll COL_BLOCKS_PER_LOOP
         for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
           const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
           acc[rowIdx] +=
-              dot(convert_float4(
-                      vload4(0, matrix + rowOffsets[rowIdx] + colOffset)),
+              dot(convert_float4(vload4(0, matrix + rowOffset + colOffset)),
                   cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx]);
         }
       }
@@ -66,7 +62,7 @@ inline void computeGemv_block(
 
   float reduced[ROWS_PER_SUBGROUP];
 #pragma unroll ROWS_PER_SUBGROUP
-  for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
+  for (int rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
     float rowAcc = acc[rowIdx];
     reduced[rowIdx] = sub_group_reduce_add(rowAcc);
   }
@@ -74,9 +70,10 @@ inline void computeGemv_block(
   // Save the results.
   if (laneLid == 0) {
 #pragma unroll ROWS_PER_SUBGROUP
-    for (uint rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
+    for (int rowIdx = 0; rowIdx < ROWS_PER_SUBGROUP; ++rowIdx) {
       if (rowIsValid[rowIdx]) {
-        result[rows[rowIdx]] = convert_half_rte(reduced[rowIdx]);
+        const int outputIdx = rowBase + rowIdx;
+        result[outputIdx] = convert_half_rte(reduced[rowIdx]);
       }
     }
   }
