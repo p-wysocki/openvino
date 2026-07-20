@@ -130,12 +130,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   // ---------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
-  const int laneLid = get_sub_group_local_id();
-  const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
-  float4 blockVectors[COMPUTE_GEMV_BLOCK_COLUMS / COL_ITEMS_PER_LOOP]
-                     [COL_BLOCKS_PER_LOOP];
-  __private const float4(*restrict cachedVectorPtr)[COL_BLOCKS_PER_LOOP] =
-      blockVectors;
+  float4 cachedVector_thisWarp[COMPUTE_GEMV_BLOCK_COLUMS / COL_ITEMS_PER_LOOP]
+                              [COL_BLOCKS_PER_LOOP];
   //---------------------------------------------------------
 
   LoadData_block(
@@ -147,18 +143,22 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
+    // Preload vector data into registers for reuse across dot products.
+    const int laneLid = get_sub_group_local_id();
+    const uint vecLimit = COMPUTE_GEMV_BLOCK_COLUMS & ~3u;
 #pragma unroll
     for (int col = laneLid << 2; col + LAST_COL_BLOCK_OFFSET < vecLimit;
          col += COL_ITEMS_PER_LOOP) {
 #pragma unroll COL_BLOCKS_PER_LOOP
       for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
         const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_SUBGROUP;
-        blockVectors[col / COL_ITEMS_PER_LOOP][blockIdx] =
+        cachedVector_thisWarp[col / COL_ITEMS_PER_LOOP][blockIdx] =
             convert_float4(vload4(0, vector + colOffset));
       }
     }
+    // ----------------------------------------------------------------
 
-    computeGemv_block(matrixBlockBuff1_local, cachedVectorPtr,
+    computeGemv_block(matrixBlockBuff1_local, cachedVector_thisWarp,
                       result_block + 0 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -171,7 +171,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, cachedVectorPtr,
+    computeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
                       result_block + 1 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -184,7 +184,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff1_local, cachedVectorPtr,
+    computeGemv_block(matrixBlockBuff1_local, cachedVector_thisWarp,
                       result_block + 2 * ROWS_PER_GROUP);
   } else {
     LoadData_block(
@@ -197,7 +197,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, cachedVectorPtr,
+    computeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
                       result_block + 3 * ROWS_PER_GROUP);
   }
 }
