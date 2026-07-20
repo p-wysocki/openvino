@@ -12,8 +12,8 @@
 namespace {
 
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
-static constexpr size_t warmupIterations = 1000;
-static constexpr size_t benchmarkIterations = 100000;
+static constexpr size_t warmupIterations = 100;
+static constexpr size_t benchmarkIterations = 1000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr float ABS_ERROR = 1e-3f;
@@ -224,6 +224,12 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   gemvLatency.profileResult.print("GEMV OpenCL kernel");
   dnnlLatency.profileResult.print("GEMV oneDNN kernel");
 
+  std::cout << "Speedup: " << dnnlLatency.profileResult.averageUs /
+                               gemvLatency.profileResult.averageUs
+            << "x\n";
+
+  ASSERT_EQ(gemvLatency.output.size(), dnnlLatency.output.size())
+      << "Output size mismatch between GEMV and oneDNN results";
   for (size_t i = 0; i < rowCount; ++i) {
     ASSERT_NEAR(gemvLatency.output[i], dnnlLatency.output[i], ABS_ERROR)
         << "GEMV result mismatch at idx " << i;
