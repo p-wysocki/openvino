@@ -25,7 +25,7 @@
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 inline void ComputeGemvTile_block(
-    __local const half* restrict matrix,
+    __local const half* restrict matrixTile_local,
     __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
     __global half* restrict result) {
 #define VECTOR_WIDTH 4
@@ -54,9 +54,11 @@ inline void ComputeGemvTile_block(
 #pragma unroll COL_BLOCKS_PER_LOOP
         for (uint blockIdx = 0; blockIdx < COL_BLOCKS_PER_LOOP; ++blockIdx) {
           const int colOffset = col + blockIdx * VECTOR_ITEMS_FOR_WARP;
-          acc[rowIdx] +=
-              dot(convert_float4(vload4(0, matrix + rowOffset + colOffset)),
-                  cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx]);
+          const float4 vectorData =
+              cachedVector[col / COL_ITEMS_PER_LOOP][blockIdx];
+          const float4 matrixData = convert_float4(
+              vload4(0, matrixTile_local + rowOffset + colOffset));
+          acc[rowIdx] += dot(matrixData, vectorData);
         }
       }
     }
