@@ -22,7 +22,7 @@ struct megakernel : public primitive_base<megakernel> {
                       int64_t num_heads,
                       int64_t intermediate_size,
                       float   rms_norm_eps)
-        : primitive_base(id, inputs, 3 /*num_outputs*/),
+        : primitive_base(id, inputs, 1 /*num_outputs: hidden_states only; KV cache is internal*/),
           num_layers(num_layers),
           hidden_size(hidden_size),
           num_kv_heads(num_kv_heads),

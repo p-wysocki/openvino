@@ -23,7 +23,7 @@ HERE = Path(__file__).parent
 DEFAULT_MODEL_DIR = HERE / "qwen3-0.6b-openvino-ir"
 DEFAULT_DEVICE = "GPU.1"
 DEFAULT_MEGAKERNEL_LIB = None
-SEQ_LEN = 8
+SEQ_LEN = 800
 BATCH = 1
 MODEL_ID = "Qwen/Qwen3-0.6B"
 
@@ -124,7 +124,11 @@ def spawn(path: str, args) -> dict:
     if out.returncode != 0:
         print(out.stdout); print(out.stderr, file=sys.stderr)
         raise RuntimeError(f"{path} worker failed (exit {out.returncode})")
-    return json.loads(out.stdout.strip().splitlines()[-1])
+    # Forward any non-JSON diagnostic lines (e.g. [MegaKernel] PASS prints) to stdout.
+    lines = out.stdout.strip().splitlines()
+    for line in lines[:-1]:
+        print(f"  [{path}] {line}")
+    return json.loads(lines[-1])
 
 
 def report(name: str, r: dict) -> None:

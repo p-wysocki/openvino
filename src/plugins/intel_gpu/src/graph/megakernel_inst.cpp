@@ -28,34 +28,21 @@ std::vector<layout> megakernel_inst::calc_output_layouts(megakernel_node const& 
     auto desc = impl_param.typed_desc<megakernel>();
 
     const auto& hs_layout   = impl_param.get_input_layout(0);  // hidden_states
-    const auto& past_layout = impl_param.get_input_layout(3);  // past_key [L,B,Kh,S_past,Hd]
 
     const auto out0_dt = data_types::f32;   // hidden_states_out
-    const auto out_kv_dt = data_types::f16; // present_key / present_val — match KV variable dtype
     const auto fmt    = format::bfyx;   // 4D format for 3D hidden_states_out
-    const auto fmt5d  = format::bfzyx;  // 5D format for present_key / present_val
 
     // Derive B, S from hidden_states
     const auto& hs_ps = hs_layout.get<ShapeType>();
     ShapeType B_dim   = hs_ps.rank().is_static() ? ShapeType{hs_ps[0]} : ShapeType{ov::Dimension::dynamic()};
     ShapeType S_dim   = hs_ps.rank().is_static() ? ShapeType{hs_ps[1]} : ShapeType{ov::Dimension::dynamic()};
 
-    // Derive S_past from past_key dim 3
-    const auto& pk_ps = past_layout.get<ShapeType>();
-    ShapeType S_past  = (pk_ps.rank().is_static() && pk_ps.rank().get_length() >= 4)
-                            ? ShapeType{pk_ps[3]}
-                            : ShapeType{ov::Dimension::dynamic()};
-
-    const int64_t L  = desc->num_layers;
     const int64_t H  = desc->hidden_size;
-    const int64_t Kh = desc->num_kv_heads;
-    const int64_t Hd = desc->head_dim;
 
-    layout out0{ShapeType{B_dim[0], S_dim[0], ov::Dimension(H)},          out0_dt, fmt};
-    layout out1{ShapeType{ov::Dimension(L), B_dim[0], ov::Dimension(Kh), S_past[0] + S_dim[0], ov::Dimension(Hd)}, out_kv_dt, fmt5d};
-    layout out2 = out1;
-
-    return {out0, out1, out2};
+    // Single output: hidden_states_out [B, S, H]. KV cache is internal to the impl.
+    std::vector<layout> outs;
+    outs.emplace_back(ShapeType{B_dim[0], S_dim[0], ov::Dimension(H)}, out0_dt, fmt);
+    return outs;
 }
 
 layout megakernel_inst::calc_output_layout(megakernel_node const& node,

@@ -25,33 +25,23 @@ bool MegaKernel::visit_attributes(ov::AttributeVisitor& visitor) {
 
 void MegaKernel::validate_and_infer_types() {
     // Port 0: hidden_states [B, S, hidden_size]
-    // Port 3: past_key      [L, B, num_kv_heads, S_past, head_dim]
     const auto& hs_ps   = get_input_partial_shape(0);
-    const auto& past_ps = get_input_partial_shape(3);
 
-    const int64_t L = m_attrs.num_layers;
     const int64_t H = m_attrs.hidden_size;
-    const int64_t Kh = m_attrs.num_kv_heads;
-    const int64_t Hd = m_attrs.head_dim;
 
     ov::Dimension B = ov::Dimension::dynamic();
     ov::Dimension S = ov::Dimension::dynamic();
-    ov::Dimension S_kv = ov::Dimension::dynamic();
 
     if (hs_ps.rank().is_static()) {
         if (hs_ps.rank().get_length() >= 1) B = hs_ps[0];
         if (hs_ps.rank().get_length() >= 2) S = hs_ps[1];
     }
-    if (past_ps.rank().is_static() && past_ps.rank().get_length() >= 4) {
-        S_kv = past_ps[3];
-    }
 
     const auto out_et = ov::element::f32;
-    // output 0: hidden_states_out [B, S, hidden_size]  — f32 (matches model.norm output)
+    // Single output: hidden_states_out [B, S, hidden_size] (f32, matches model.norm).
+    // The KV cache is kept entirely inside the plugin impl (MegaKernelFastImpl), so
+    // the op exposes no KV outputs and the pass drops the KV-cache Assign sinks.
     set_output_type(0, out_et, ov::PartialShape{B, S, H});
-    // output 1/2: present_key/val — f16 to match the KV-cache Variable dtype
-    set_output_type(1, ov::element::f16, ov::PartialShape{L, B, Kh, S_kv + S, Hd});
-    set_output_type(2, ov::element::f16, ov::PartialShape{L, B, Kh, S_kv + S, Hd});
 }
 
 std::shared_ptr<ov::Node> MegaKernel::clone_with_new_inputs(const ov::OutputVector& new_args) const {
