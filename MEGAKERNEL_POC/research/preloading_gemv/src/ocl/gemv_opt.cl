@@ -80,7 +80,7 @@ inline void computeGemv_block(
   }
 }
 
-#define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE * COMPUTE_GEMV_BLOCK_COLUMS
+#define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* COMPUTE_GEMV_BLOCK_COLUMS
 inline void LoadData_block(__local half* restrict matrixBlock_local,
                            __global const half* restrict matrixBlock_global,
                            int computeWGSize, int loadDataWGSize) {
@@ -94,6 +94,14 @@ inline void LoadData_block(__local half* restrict matrixBlock_local,
        i += loadDataWGSize) {
     matrixBlock_local8[i] = matrixBlock_global8[i];
   }
+}
+
+///////////////////////////////////////////////////////////////
+inline void swapPtr(__local half* restrict __private* a,
+                    __local half* restrict __private* b) {
+  __local half* temp = *a;
+  *a = *b;
+  *b = temp;
 }
 
 // Each block handles ROWS_FOR_BLOCK_FOR_PHASE rows, and each subgroup handles
@@ -112,7 +120,13 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
       result + get_group_id(0) * TOTAL_ROWS_FOR_BLOCK;
 
   __global const half* restrict matrixBlock_global =
-      matrix + get_group_id(0) * TOTAL_ROWS_FOR_BLOCK * COMPUTE_GEMV_BLOCK_COLUMS;
+      matrix +
+      get_group_id(0) * TOTAL_ROWS_FOR_BLOCK * COMPUTE_GEMV_BLOCK_COLUMS;
+
+  __local half* restrict computeBuffer =
+      (__local half* restrict)matrixBlockBuff2_local;
+  __local half* restrict loadBuffer =
+      (__local half* restrict)matrixBlockBuff1_local;
 
   // ---------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
@@ -120,8 +134,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
                               [COL_BLOCKS_PER_LOOP];
   //---------------------------------------------------------
 
-  LoadData_block(matrixBlockBuff1_local,
-                 matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE, 0,
+  LoadData_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE, 0,
                  TOTAL_WARPS * WARP_SIZE);
 
   __asm__ volatile("barrier");
@@ -143,38 +156,20 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     // ----------------------------------------------------------------
   }
 
-  if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff1_local, cachedVector_thisWarp,
-                      result_block + 0 * ROWS_FOR_BLOCK_FOR_PHASE);
-  } else {
-    LoadData_block(matrixBlockBuff2_local,
-                   matrixBlock_global + 1 * LOAD_DATA_BLOCK_SIZE,
-                   COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
+  for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {
+    swapPtr(&computeBuffer, &loadBuffer);
+
+    if (get_sub_group_id() < COMPUTE_WARPS) {
+      computeGemv_block(computeBuffer, cachedVector_thisWarp,
+                        result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
+    } else {
+      LoadData_block(loadBuffer,
+                     matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
+                     COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
+    }
+
+    __asm__ volatile("barrier");
   }
-
-  __asm__ volatile("barrier");
-
-  if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
-                      result_block + 1 * ROWS_FOR_BLOCK_FOR_PHASE);
-  } else {
-    LoadData_block(matrixBlockBuff1_local,
-                   matrixBlock_global + 2 * LOAD_DATA_BLOCK_SIZE,
-                   COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
-  }
-
-  __asm__ volatile("barrier");
-
-  if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff1_local, cachedVector_thisWarp,
-                      result_block + 2 * ROWS_FOR_BLOCK_FOR_PHASE);
-  } else {
-    LoadData_block(matrixBlockBuff2_local,
-                   matrixBlock_global + 3 * LOAD_DATA_BLOCK_SIZE,
-                   COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
-  }
-
-  __asm__ volatile("barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     computeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
