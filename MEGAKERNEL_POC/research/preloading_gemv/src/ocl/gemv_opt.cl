@@ -21,7 +21,7 @@
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 
-inline void computeGemv_block(
+inline void ComputeGemv_block(
     __local const half* restrict matrix,
     __private const float4 (*restrict cachedVector)[COL_BLOCKS_PER_LOOP],
     __global half* restrict result) {
@@ -97,7 +97,7 @@ inline void LoadData_block(__local half* restrict matrixBlock_local,
 }
 
 ///////////////////////////////////////////////////////////////
-inline void swapPtr(__local half* restrict __private* a,
+inline void SwapPtr(__local half* restrict __private* a,
                     __local half* restrict __private* b) {
   __local half* temp = *a;
   *a = *b;
@@ -157,10 +157,10 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   }
 
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {
-    swapPtr(&computeBuffer, &loadBuffer);
+    SwapPtr(&computeBuffer, &loadBuffer);
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
-      computeGemv_block(computeBuffer, cachedVector_thisWarp,
+      ComputeGemv_block(computeBuffer, cachedVector_thisWarp,
                         result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
     } else {
       LoadData_block(loadBuffer,
@@ -172,7 +172,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   }
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    computeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
+    ComputeGemv_block(matrixBlockBuff2_local, cachedVector_thisWarp,
                       result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
   }
 }
