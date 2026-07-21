@@ -6,7 +6,6 @@
 //   global = (ceil(rowCount / TOTAL_ROWS_FOR_BLOCK) * WG_SIZE)
 //   local  = (WG_SIZE)
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
-// #pragma OPENCL EXTENSION cl_khr_subgroup_named_barrier : enable
 
 #define TOTAL_ROWS_FOR_BLOCK 16
 #define TOTAL_WARPS 8
@@ -26,7 +25,7 @@
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
 inline void ComputeGemvTile_block(
     __local const half4* restrict matrixTile_local,
-    __private const float4* restrict cachedVector,
+    __private const half4* restrict cachedVector,
     __global half* restrict result) {
 #define VECTOR_WIDTH 4
 #define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
@@ -49,8 +48,8 @@ inline void ComputeGemvTile_block(
 #pragma unroll
   for (int colIdx = laneLid; colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
        colIdx += WARP_SIZE) {
-    const float4 vectorData = cachedVector[colIdx / WARP_SIZE];
-#pragma unroll ROWS_FOR_COMPUTE_WARP
+    const float4 vectorData = convert_float4(cachedVector[colIdx / WARP_SIZE]);
+#pragma unroll
     for (int rowIdx = 0; rowIdx < ROWS_FOR_COMPUTE_WARP; ++rowIdx) {
       if (rowIsValid[rowIdx]) {
         const int rowOffset = (startingRowIdxForThisWarp + rowIdx) *
@@ -130,8 +129,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
   // ---------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
-  float4 cachedVector_thisWarp[COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH /
-                               WARP_SIZE];
+  half4 cachedVector_thisWarp[COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH /
+                              WARP_SIZE];
   //---------------------------------------------------------
 
   LoadDataTile_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE,
@@ -147,11 +146,12 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
          colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
          colIdx += WARP_SIZE) {
       cachedVector_thisWarp[colIdx / WARP_SIZE] =
-          convert_float4(vload4(0, vector + colIdx * VECTOR_WIDTH));
+          vload4(0, vector + colIdx * VECTOR_WIDTH);
     }
     // ----------------------------------------------------------------
   }
 
+#pragma unroll
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {
     SwapPtr(&computeBuffer, &loadBuffer);
 
