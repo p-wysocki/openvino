@@ -160,7 +160,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
                          TOTAL_WARPS * WARP_SIZE),
       "INITIAL LoadDataTile_block");
 
-  IN_KERNEL_PROFILE(__asm__ volatile("barrier"), "Initial Barrier");
+  IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     // Preload vector data into registers for reuse across dot products.
@@ -187,7 +187,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
           "LoadDataTile_block");
     }
 
-    IN_KERNEL_PROFILE(__asm__ volatile("barrier"), "Barrier");
+    IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier");
   }
 
   SwapPtr(&computeBuffer, &loadBuffer);
