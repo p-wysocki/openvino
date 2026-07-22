@@ -13,7 +13,6 @@
 #define TOTAL_WARPS 16
 #define COMPUTE_WARPS 4
 #define ROWS_FOR_COMPUTE_WARP 1
-#define COL_BLOCKS_PER_LOOP 4
 #define WARP_SIZE 32
 #define COMPUTE_WG_SIZE (COMPUTE_WARPS * WARP_SIZE)
 #define LOAD_DATA_WG_SIZE ((TOTAL_WARPS - COMPUTE_WARPS) * WARP_SIZE)
@@ -31,7 +30,6 @@ inline void ComputeGemvTile_block(
     __global half* restrict result) {
 #define VECTOR_WIDTH 4
 #define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
-#define COL_ITEMS_PER_LOOP (COL_BLOCKS_PER_LOOP * VECTOR_ITEMS_FOR_WARP)
 
   const int laneLid = get_sub_group_local_id();
   const int startingRowIdxForThisWarp =
