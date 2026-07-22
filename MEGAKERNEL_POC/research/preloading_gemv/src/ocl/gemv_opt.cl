@@ -52,7 +52,23 @@ extern uint4 __builtin_IB_lsc_load_global_uint4(const __global uint4* base,
                                                 int immElemOff,
                                                 enum LSC_LDCC cacheControl);
 
+extern ulong __builtin_IB_read_cycle_counter(void);
 // --------------------------------------
+// #define PROFILE_IN_KERNEL
+#ifdef PROFILE_IN_KERNEL
+#define IN_KERNEL_PROFILE(FUNC, TXT)                            \
+  {                                                             \
+    const ulong start = __builtin_IB_read_cycle_counter();      \
+    FUNC;                                                       \
+    const ulong end = __builtin_IB_read_cycle_counter();        \
+    if (get_group_id(0) == 6) {                                 \
+      printf(TXT " took %lu cycles for warp %d\n", end - start, \
+             get_sub_group_id());                               \
+    }                                                           \
+  }
+#else
+#define IN_KERNEL_PROFILE(FUNC, TXT) FUNC
+#endif
 
 #define TOTAL_ROWS_FOR_BLOCK 16
 #define TOTAL_WARPS 8
@@ -149,6 +165,18 @@ inline void LoadDataTile_block(__local half* restrict matrixBlock_local,
   }
 }
 
+/////////////////////////////////////////////////////////////////////
+inline void PreloadVectorData(__private half4* restrict cachedVector,
+                              __global const half* restrict vector) {
+  const int laneLid = get_sub_group_local_id();
+#pragma unroll
+  for (int colIdx = laneLid; colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
+       colIdx += WARP_SIZE) {
+    cachedVector[colIdx / WARP_SIZE] =
+        vload4(0, vector + colIdx * VECTOR_WIDTH);
+  }
+}
+
 ///////////////////////////////////////////////////////////////
 inline void SwapPtr(__local half* restrict __private* a,
                     __local half* restrict __private* b) {
@@ -186,22 +214,18 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
                               WARP_SIZE];
   //---------------------------------------------------------
 
-  LoadDataTile_block(loadBuffer, matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE,
-                     0, TOTAL_WARPS * WARP_SIZE);
+  IN_KERNEL_PROFILE(
+      LoadDataTile_block(loadBuffer,
+                         matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE,
+                         0, TOTAL_WARPS * WARP_SIZE),
+      "INITIAL LoadDataTile_block");
 
-  __asm__ volatile("barrier");
+  IN_KERNEL_PROFILE(__asm__ volatile("barrier"), "Initial Barrier");
 
   if (get_sub_group_id() < COMPUTE_WARPS) {
     // Preload vector data into registers for reuse across dot products.
-    const int laneLid = get_sub_group_local_id();
-#pragma unroll
-    for (int colIdx = laneLid;
-         colIdx < COMPUTE_GEMV_BLOCK_COLUMS / VECTOR_WIDTH;
-         colIdx += WARP_SIZE) {
-      cachedVector_thisWarp[colIdx / WARP_SIZE] =
-          vload4(0, vector + colIdx * VECTOR_WIDTH);
-    }
-    // ----------------------------------------------------------------
+    IN_KERNEL_PROFILE(PreloadVectorData(cachedVector_thisWarp, vector),
+                      "PreloadVectorData");
   }
 
 #pragma unroll
@@ -209,22 +233,29 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
     SwapPtr(&computeBuffer, &loadBuffer);
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
-      ComputeGemvTile_block((__local half4* restrict)computeBuffer,
-                            cachedVector_thisWarp,
-                            result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE);
+      IN_KERNEL_PROFILE(
+          ComputeGemvTile_block(
+              (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
+              result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
+          "ComputeGemvTile_block");
     } else {
-      LoadDataTile_block(
-          loadBuffer, matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
-          COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE);
+      IN_KERNEL_PROFILE(
+          LoadDataTile_block(
+              loadBuffer,
+              matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
+              COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE),
+          "LoadDataTile_block");
     }
 
-    __asm__ volatile("barrier");
+    IN_KERNEL_PROFILE(__asm__ volatile("barrier"), "Barrier");
   }
 
   SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
-    ComputeGemvTile_block((__local half4* restrict)computeBuffer,
-                          cachedVector_thisWarp,
-                          result_block + 3 * ROWS_FOR_BLOCK_FOR_PHASE);
+    IN_KERNEL_PROFILE(
+        ComputeGemvTile_block(
+            (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
+            result_block + (PHASES_PER_BLOCK - 1) * ROWS_FOR_BLOCK_FOR_PHASE),
+        "Last ComputeGemvTile_block");
   }
 }
