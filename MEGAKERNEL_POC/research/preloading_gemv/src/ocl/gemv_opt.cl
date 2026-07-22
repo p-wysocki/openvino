@@ -9,8 +9,8 @@
 #include "detail/inkernelProfile.hcl"
 #include "detail/nonTemporalLoads.hcl"
 
-#define TOTAL_ROWS_FOR_BLOCK 16
-#define TOTAL_WARPS 8
+#define TOTAL_ROWS_FOR_BLOCK 28
+#define TOTAL_WARPS 16
 #define COMPUTE_WARPS 4
 #define ROWS_FOR_COMPUTE_WARP 1
 #define COL_BLOCKS_PER_LOOP 4

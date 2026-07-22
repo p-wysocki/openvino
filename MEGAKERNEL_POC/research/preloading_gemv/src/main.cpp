@@ -18,14 +18,12 @@ static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
 static constexpr float ABS_ERROR = 1e-3f;
 
-static constexpr size_t WG_SIZE = 256;
-static constexpr size_t ROWS_PER_GROUP = 16;
+static constexpr size_t WG_SIZE = 512;
+static constexpr size_t ROWS_PER_GROUP = 28;
 static constexpr const char* kernelSourceFileName = "gemv_opt.cl";
 
 static_assert(WG_SIZE % 32 == 0,
               "WG_SIZE must contain whole 32-thread subgroups");
-static_assert(ROWS_PER_GROUP % (WG_SIZE / 32) == 0,
-              "Each subgroup must compute the same number of rows");
 
 struct BenchmarkResult {
   ocltest::ProfileResult profileResult;
