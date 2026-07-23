@@ -5,14 +5,14 @@
 // Launch configuration (host side):
 //   global = (ceil(rowCount / TOTAL_ROWS_FOR_BLOCK) * WG_SIZE)
 //   local  = (WG_SIZE)
-#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+
+#include "detail/commonConstants.hcl"
 #include "detail/inkernelProfile.hcl"
 
 #define TOTAL_ROWS_FOR_BLOCK 28
 #define TOTAL_WARPS 16
 #define COMPUTE_WARPS 4
 #define ROWS_FOR_COMPUTE_WARP 1
-#define WARP_SIZE 32
 #define MATRIX_ROWS 2048
 #define MATRIX_COLUMNS 1024
 #define COMPUTE_WG_SIZE (COMPUTE_WARPS * WARP_SIZE)
