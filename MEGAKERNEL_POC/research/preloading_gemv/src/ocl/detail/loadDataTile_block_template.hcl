@@ -1,3 +1,4 @@
+#include "detail/nonTemporalLoads.hcl"
 #include "detail/template.hcl"
 
 #ifndef LoadDataTile_LOAD_DATA_BLOCK_SIZE
@@ -24,7 +25,7 @@ inline void TEMPLATE(LoadDataTile,
   for (int i = get_local_id(0) - LoadDataTile_COMPUTE_WG_SIZE;
        i < LoadDataTile_LOAD_DATA_BLOCK_SIZE / 8;
        i += LoadDataTile_LOAD_WG_SIZE) {
-    matrixBlock_local8[i] = LoadHalf8L1Uncached(matrixBlock_global8 + i);
+    matrixBlock_local8[i] = NontemporalLoad(matrixBlock_global8 + i);
   }
 }
 

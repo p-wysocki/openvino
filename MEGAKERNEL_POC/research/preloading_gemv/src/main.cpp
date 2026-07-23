@@ -191,9 +191,8 @@ class PreloadingTest : public ocltest::OclTestFixture {
  public:
   void SetUp() override {
     ocltest::OclTestFixture::SetUp();
-        _oclBinary = createProgramAndKernel(
-                kernelSourcePath + kernelSourceFileName, "gemv",
-                "-I " + kernelSourcePath);
+    _oclBinary = createProgramAndKernel(kernelSourcePath + kernelSourceFileName,
+                                        "gemv", "-I " + kernelSourcePath);
   }
 
   void TearDown() override {
@@ -225,8 +224,9 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   gemvLatency.profileResult.print("GEMV OpenCL kernel");
   dnnlLatency.profileResult.print("GEMV oneDNN kernel");
 
-  std::cout << "Speedup: " << dnnlLatency.profileResult.averageUs /
-                               gemvLatency.profileResult.averageUs
+  std::cout << "Speedup: "
+            << dnnlLatency.profileResult.averageUs /
+                   gemvLatency.profileResult.averageUs
             << "x\n";
 
   ASSERT_EQ(gemvLatency.output.size(), dnnlLatency.output.size())

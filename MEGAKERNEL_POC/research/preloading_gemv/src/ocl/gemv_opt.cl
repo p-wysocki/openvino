@@ -7,7 +7,6 @@
 //   local  = (WG_SIZE)
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #include "detail/inkernelProfile.hcl"
-#include "detail/nonTemporalLoads.hcl"
 
 #define TOTAL_ROWS_FOR_BLOCK 28
 #define TOTAL_WARPS 16
@@ -78,12 +77,6 @@ inline void ComputeGemvTileActiveWarps(
       }
     }
   }
-}
-
-inline half8 LoadHalf8L1Uncached(__global const half8* ptr) {
-  const uint4 value = __builtin_IB_lsc_load_global_uint4(
-      (const __global uint4*)ptr, 0, LSC_LDCC_L1C_L3UC);
-  return as_half8(value);
 }
 
 #define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* COMPUTE_GEMV_BLOCK_COLUMS

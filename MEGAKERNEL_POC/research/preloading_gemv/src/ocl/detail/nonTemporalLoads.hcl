@@ -44,3 +44,10 @@ enum LSC_LDCC {
 extern uint4 __builtin_IB_lsc_load_global_uint4(const __global uint4* base,
                                                 int immElemOff,
                                                 enum LSC_LDCC cacheControl);
+
+//////////////////////////////////////////////////////////////////
+inline half8 NontemporalLoad(__global const half8* ptr) {
+  const uint4 value = __builtin_IB_lsc_load_global_uint4(
+      (const __global uint4*)ptr, 0, LSC_LDCC_L1C_L3UC);
+  return as_half8(value);
+}
