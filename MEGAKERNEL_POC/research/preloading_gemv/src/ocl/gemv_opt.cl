@@ -80,7 +80,6 @@ inline void ComputeGemvTile_block(
   }
 }
 
-
 inline half8 LoadHalf8L1Uncached(__global const half8* ptr) {
   const uint4 value = __builtin_IB_lsc_load_global_uint4(
       (const __global uint4*)ptr, 0, LSC_LDCC_L1C_L3UC);
@@ -88,20 +87,18 @@ inline half8 LoadHalf8L1Uncached(__global const half8* ptr) {
 }
 
 #define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* COMPUTE_GEMV_BLOCK_COLUMS
-inline void LoadDataTile_block(__local half* restrict matrixBlock_local,
-                               __global const half* restrict matrixBlock_global,
-                               int computeWGSize, int loadDataWGSize) {
-  __local half8* restrict matrixBlock_local8 =
-      (__local half8* restrict)matrixBlock_local;
-  __global half8* restrict matrixBlock_global8 =
-      (__global half8* restrict)matrixBlock_global;
 
-#pragma unroll
-  for (int i = get_local_id(0) - computeWGSize; i < LOAD_DATA_BLOCK_SIZE / 8;
-       i += loadDataWGSize) {
-    matrixBlock_local8[i] = LoadHalf8L1Uncached(matrixBlock_global8 + i);
-  }
-}
+#define LoadDataTile_LOAD_DATA_BLOCK_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_WG_SIZE TOTAL_WARPS* WARP_SIZE
+#define LoadDataTile_COMPUTE_WG_SIZE 0
+#define SUFFIX _allWarps
+#include "detail/loadDataTile_block_template.hcl"
+
+#define LoadDataTile_LOAD_DATA_BLOCK_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_WG_SIZE LOAD_DATA_WG_SIZE
+#define LoadDataTile_COMPUTE_WG_SIZE COMPUTE_WG_SIZE
+#define SUFFIX _loadWarps
+#include "detail/loadDataTile_block_template.hcl"
 
 /////////////////////////////////////////////////////////////////////
 inline void PreloadVectorData(__private half4* restrict cachedVector,
@@ -153,9 +150,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   //---------------------------------------------------------
 
   IN_KERNEL_PROFILE(
-      LoadDataTile_block(loadBuffer,
-                         matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE, 0,
-                         TOTAL_WARPS * WARP_SIZE),
+      LoadDataTile_allWarps(loadBuffer,
+                            matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE),
       "INITIAL LoadDataTile_block");
 
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
@@ -177,12 +173,10 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
               result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
           "ComputeGemvTile_block");
     } else {
-      IN_KERNEL_PROFILE(
-          LoadDataTile_block(
-              loadBuffer,
-              matrixBlock_global + (phase + 1) * LOAD_DATA_BLOCK_SIZE,
-              COMPUTE_WG_SIZE, LOAD_DATA_WG_SIZE),
-          "LoadDataTile_block");
+      IN_KERNEL_PROFILE(LoadDataTile_loadWarps(
+                            loadBuffer, matrixBlock_global +
+                                            (phase + 1) * LOAD_DATA_BLOCK_SIZE),
+                        "LoadDataTile_block");
     }
 
     IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier");
