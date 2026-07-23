@@ -192,7 +192,7 @@ class PreloadingTest : public ocltest::OclTestFixture {
   void SetUp() override {
     ocltest::OclTestFixture::SetUp();
     _oclBinary = createProgramAndKernel(kernelSourcePath + kernelSourceFileName,
-                                        "gemv", "-I " + kernelSourcePath);
+                                        "gemv", "-cl-std=CL3.0 -I " + kernelSourcePath);
   }
 
   void TearDown() override {

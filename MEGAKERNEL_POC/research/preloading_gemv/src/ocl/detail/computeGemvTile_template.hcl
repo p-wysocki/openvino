@@ -44,6 +44,11 @@ void TEMPLATE(ComputeGemvTile,
 
 #define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP \
   (ComputeGemvTile_TILE_ROWS / ComputeGemvTile_COMPUTE_WARPS)
+
+_Static_assert(ComputeGemvTile_TILE_ROWS % ComputeGemvTile_COMPUTE_WARPS == 0,
+               "ComputeGemvTile_TILE_ROWS must be divisible by "
+               "ComputeGemvTile_COMPUTE_WARPS");
+
 #define ComputeGemvTile_DATA_WIDTH 4
 
 enum {
