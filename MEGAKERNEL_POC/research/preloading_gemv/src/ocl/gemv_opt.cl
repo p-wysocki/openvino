@@ -23,10 +23,9 @@
 // Warps compute whole dot product for their assigned rows.
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
-inline void ComputeGemvTileActiveWarps(
-    __local const half4* restrict matrixTile_local,
-    __private const half4* restrict cachedVector,
-    __global half* restrict result) {
+inline void ComputeGemvTile(__local const half4* restrict matrixTile_local,
+                            __private const half4* restrict cachedVector,
+                            __global half* restrict result) {
 #define VECTOR_WIDTH 4
 #define VECTOR_ITEMS_FOR_WARP (WARP_SIZE * VECTOR_WIDTH)
 
@@ -85,13 +84,13 @@ inline void ComputeGemvTileActiveWarps(
 #define LoadDataTile_LOAD_WG_SIZE TOTAL_WARPS* WARP_SIZE
 #define LoadDataTile_COMPUTE_WG_SIZE 0
 #define SUFFIX _allWarps
-#include "detail/loadDataTile_block_template.hcl"
+#include "detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_BLOCK_SIZE LOAD_DATA_BLOCK_SIZE
 #define LoadDataTile_LOAD_WG_SIZE LOAD_DATA_WG_SIZE
 #define LoadDataTile_COMPUTE_WG_SIZE COMPUTE_WG_SIZE
 #define SUFFIX _loadWarps
-#include "detail/loadDataTile_block_template.hcl"
+#include "detail/loadDataTile_template.hcl"
 
 /////////////////////////////////////////////////////////////////////
 inline void PreloadVectorData(__private half4* restrict cachedVector,
@@ -161,10 +160,10 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
       IN_KERNEL_PROFILE(
-          ComputeGemvTileActiveWarps(
-              (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
-              result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
-          "ComputeGemvTileActiveWarps");
+          ComputeGemvTile((__local half4* restrict)computeBuffer,
+                          cachedVector_thisWarp,
+                          result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
+          "ComputeGemvTile");
     } else {
       IN_KERNEL_PROFILE(LoadDataTile_loadWarps(
                             loadBuffer, matrixBlock_global +
@@ -178,9 +177,9 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
     IN_KERNEL_PROFILE(
-        ComputeGemvTileActiveWarps(
+        ComputeGemvTile(
             (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
             result_block + (PHASES_PER_BLOCK - 1) * ROWS_FOR_BLOCK_FOR_PHASE),
-        "Last ComputeGemvTileActiveWarps");
+        "Last ComputeGemvTile");
   }
 }
