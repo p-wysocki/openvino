@@ -57,36 +57,32 @@ inline void TEMPLATE(ComputeGemvTile,
                              __private const half4* restrict cachedVector,
                              __global half* restrict result) {
   const int laneLid = get_sub_group_local_id();
+  const int vectorizedNumColumns =
+      ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
   const int startingRowIdxForThisWarp =
       get_sub_group_id() * ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
-  bool rowIsValid[ComputeGemvTile_ROWS_FOR_COMPUTE_WARP];
+  __local const half4* restrict matrixTileForThisWarp_local =
+      matrixTile_local + startingRowIdxForThisWarp * vectorizedNumColumns;
   float acc[ComputeGemvTile_ROWS_FOR_COMPUTE_WARP];
 
 #pragma unroll ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
   for (int rowIdx = 0; rowIdx < ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
        ++rowIdx) {
-    rowIsValid[rowIdx] =
-        (startingRowIdxForThisWarp + rowIdx) < ComputeGemvTile_TILE_ROWS;
     acc[rowIdx] = 0.0f;
   }
 
   // Compute dot products for assigned rows.
 #pragma unroll
-  for (int colIdx = laneLid;
-       colIdx < ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
+  for (int colIdx = laneLid; colIdx < vectorizedNumColumns;
        colIdx += WARP_SIZE) {
     const float4 vectorData = convert_float4(cachedVector[colIdx / WARP_SIZE]);
 #pragma unroll
     for (int rowIdx = 0; rowIdx < ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
          ++rowIdx) {
-      if (rowIsValid[rowIdx]) {
-        const int rowOffset =
-            (startingRowIdxForThisWarp + rowIdx) *
-            (ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH);
-        const float4 matrixData =
-            convert_float4(matrixTile_local[rowOffset + colIdx]);
-        acc[rowIdx] += dot(matrixData, vectorData);
-      }
+      const int rowOffset = rowIdx * vectorizedNumColumns;
+      const float4 matrixData =
+          convert_float4(matrixTileForThisWarp_local[rowOffset + colIdx]);
+      acc[rowIdx] += dot(matrixData, vectorData);
     }
   }
 
@@ -103,10 +99,8 @@ inline void TEMPLATE(ComputeGemvTile,
 #pragma unroll ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
     for (int rowIdx = 0; rowIdx < ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
          ++rowIdx) {
-      if (rowIsValid[rowIdx]) {
-        const int outputIdx = startingRowIdxForThisWarp + rowIdx;
-        result[outputIdx] = convert_half_rte(reduced[rowIdx]);
-      }
+      const int outputIdx = startingRowIdxForThisWarp + rowIdx;
+      result[outputIdx] = convert_half_rte(reduced[rowIdx]);
     }
   }
 }
