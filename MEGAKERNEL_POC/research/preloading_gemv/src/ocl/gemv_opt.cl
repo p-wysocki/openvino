@@ -24,7 +24,7 @@
 // Warps compute whole dot product for their assigned rows.
 #define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
 #define COMPUTE_GEMV_BLOCK_COLUMS 1024
-inline void ComputeGemvTile_block(
+inline void ComputeGemvTileActiveWarps(
     __local const half4* restrict matrixTile_local,
     __private const half4* restrict cachedVector,
     __global half* restrict result) {
@@ -152,7 +152,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   IN_KERNEL_PROFILE(
       LoadDataTile_allWarps(loadBuffer,
                             matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE),
-      "INITIAL LoadDataTile_block");
+      "INITIAL LoadDataTile_allWarps");
 
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
@@ -168,15 +168,15 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
       IN_KERNEL_PROFILE(
-          ComputeGemvTile_block(
+          ComputeGemvTileActiveWarps(
               (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
               result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
-          "ComputeGemvTile_block");
+          "ComputeGemvTileActiveWarps");
     } else {
       IN_KERNEL_PROFILE(LoadDataTile_loadWarps(
                             loadBuffer, matrixBlock_global +
                                             (phase + 1) * LOAD_DATA_BLOCK_SIZE),
-                        "LoadDataTile_block");
+                        "LoadDataTile_loadWarps");
     }
 
     IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier");
@@ -185,9 +185,9 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   SwapPtr(&computeBuffer, &loadBuffer);
   if (get_sub_group_id() < COMPUTE_WARPS) {
     IN_KERNEL_PROFILE(
-        ComputeGemvTile_block(
+        ComputeGemvTileActiveWarps(
             (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
             result_block + (PHASES_PER_BLOCK - 1) * ROWS_FOR_BLOCK_FOR_PHASE),
-        "Last ComputeGemvTile_block");
+        "Last ComputeGemvTileActiveWarps");
   }
 }
