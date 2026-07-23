@@ -1,34 +1,30 @@
 #include "detail/commonConstants.hcl"
 #include "detail/inkernelProfile.hcl"
 
-#define TOTAL_ROWS_FOR_BLOCK 28
+#define BLOCK_TILE_ROWS 28
 #define TOTAL_WARPS 16
 #define COMPUTE_WARPS 4
 #define LOAD_WARPS (TOTAL_WARPS - COMPUTE_WARPS)
 #define ROWS_FOR_COMPUTE_WARP 1
 #define MATRIX_ROWS 2048
 #define MATRIX_COLUMNS 1024
-#define ROWS_FOR_BLOCK_FOR_PHASE (COMPUTE_WARPS * ROWS_FOR_COMPUTE_WARP)
-#define PHASES_PER_BLOCK (TOTAL_ROWS_FOR_BLOCK / ROWS_FOR_BLOCK_FOR_PHASE)
-#define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* MATRIX_COLUMNS
+#define PHASE_TILE_ROWS (COMPUTE_WARPS * ROWS_FOR_COMPUTE_WARP)
+#define PHASES_PER_BLOCK (BLOCK_TILE_ROWS / PHASE_TILE_ROWS)
+#define PHASE_TILE_SIZE (PHASE_TILE_ROWS * MATRIX_COLUMNS)
 
-// Computes gemv for give tile.
-// Each warp compuutes ROWS_FOR_COMPUTE_WARP rows.
-// Warps compute whole dot product for their assigned rows.
-#define COMPUTE_GEMV_BLOCK_ROWS ROWS_FOR_BLOCK_FOR_PHASE
-
-#define ComputeGemvTile_TILE_ROWS COMPUTE_GEMV_BLOCK_ROWS
+// Define templates:
+#define ComputeGemvTile_TILE_ROWS PHASE_TILE_ROWS
 #define ComputeGemvTile_TILE_COLUMNS MATRIX_COLUMNS
 #define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP ROWS_FOR_COMPUTE_WARP
 #include "detail/computeGemvTile_template.hcl"
 
-#define LoadDataTile_LOAD_DATA_TILE_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define SUFFIX _allWarps
 #include "detail/loadDataTile_template.hcl"
 
-#define LoadDataTile_LOAD_DATA_TILE_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS LOAD_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID COMPUTE_WARPS
 #define SUFFIX _loadWarps
@@ -42,27 +38,27 @@ inline void SwapPtr(__local half* restrict __private* a,
   *b = temp;
 }
 
-// Each block handles ROWS_FOR_BLOCK_FOR_PHASE rows, and each subgroup handles
+// Each block handles PHASE_TILE_ROWS rows, and each subgroup handles
 // ROWS_FOR_COMPUTE_WARP rows. All compute subgroups cooperate to compute the
 // dot products for their assigned rows.
 __attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(WARP_SIZE))) __kernel void
 gemv(__global const half* restrict matrix, __global const half* restrict vector,
-     __global half* restrict result, const uint rowCount,
+     __global half* restrict output, const uint rowCount,
      const uint columnCount) {
-  __local half matrixBlockBuff1_local[LOAD_DATA_BLOCK_SIZE];
-  __local half matrixBlockBuff2_local[LOAD_DATA_BLOCK_SIZE];
+  __local half matrixPhaseTileBuff1_local[PHASE_TILE_SIZE];
+  __local half matrixPhaseTileBuff2_local[PHASE_TILE_SIZE];
 
-  __global half* restrict result_block =
-      result + get_group_id(0) * TOTAL_ROWS_FOR_BLOCK;
+  __global half* restrict outputBlockTilePtr_global =
+      output + get_group_id(0) * BLOCK_TILE_ROWS;
 
-  __global const half* restrict matrixBlock_global =
-      matrix + get_group_id(0) * TOTAL_ROWS_FOR_BLOCK * MATRIX_COLUMNS;
+  __global const half* restrict matrixBlockTilePtr_global =
+      matrix + get_group_id(0) * BLOCK_TILE_ROWS * MATRIX_COLUMNS;
 
-  __local half* restrict computeBuffer =
-      (__local half* restrict)matrixBlockBuff2_local;
-  __local half* restrict loadBuffer =
-      (__local half* restrict)matrixBlockBuff1_local;
+  __local half* restrict computeBufferPtr_local =
+      (__local half* restrict)matrixPhaseTileBuff2_local;
+  __local half* restrict loadBufferPtr_local =
+      (__local half* restrict)matrixPhaseTileBuff1_local;
 
   // ---------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
@@ -70,8 +66,8 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   //---------------------------------------------------------
 
   IN_KERNEL_PROFILE(
-      LoadDataTile_allWarps(loadBuffer,
-                            matrixBlock_global + 0 * LOAD_DATA_BLOCK_SIZE),
+      LoadDataTile_allWarps(loadBufferPtr_local,
+                            matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
@@ -83,30 +79,32 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
 
 #pragma unroll
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {
-    SwapPtr(&computeBuffer, &loadBuffer);
+    SwapPtr(&computeBufferPtr_local, &loadBufferPtr_local);
 
     if (get_sub_group_id() < COMPUTE_WARPS) {
       IN_KERNEL_PROFILE(
-          ComputeGemvTile((__local half4* restrict)computeBuffer,
+          ComputeGemvTile((__local half4* restrict)computeBufferPtr_local,
                           cachedVector_thisWarp,
-                          result_block + phase * ROWS_FOR_BLOCK_FOR_PHASE),
+                          outputBlockTilePtr_global + phase * PHASE_TILE_ROWS),
           "ComputeGemvTile");
     } else {
-      IN_KERNEL_PROFILE(LoadDataTile_loadWarps(
-                            loadBuffer, matrixBlock_global +
-                                            (phase + 1) * LOAD_DATA_BLOCK_SIZE),
-                        "LoadDataTile_loadWarps");
+      IN_KERNEL_PROFILE(
+          LoadDataTile_loadWarps(
+              loadBufferPtr_local,
+              matrixBlockTilePtr_global + (phase + 1) * PHASE_TILE_SIZE),
+          "LoadDataTile_loadWarps");
     }
 
     IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier");
   }
 
-  SwapPtr(&computeBuffer, &loadBuffer);
+  SwapPtr(&computeBufferPtr_local, &loadBufferPtr_local);
   if (get_sub_group_id() < COMPUTE_WARPS) {
     IN_KERNEL_PROFILE(
-        ComputeGemvTile(
-            (__local half4* restrict)computeBuffer, cachedVector_thisWarp,
-            result_block + (PHASES_PER_BLOCK - 1) * ROWS_FOR_BLOCK_FOR_PHASE),
+        ComputeGemvTile((__local half4* restrict)computeBufferPtr_local,
+                        cachedVector_thisWarp,
+                        outputBlockTilePtr_global +
+                            (PHASES_PER_BLOCK - 1) * PHASE_TILE_ROWS),
         "Last ComputeGemvTile");
   }
 }
