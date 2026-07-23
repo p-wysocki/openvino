@@ -1,22 +1,13 @@
-// Tiled GEMV specialized for 32-wide subgroups.
-// Each subgroup computes ROWS_FOR_COMPUTE_WARP rows so vector loads are reused
-// across dot products.
-//
-// Launch configuration (host side):
-//   global = (ceil(rowCount / TOTAL_ROWS_FOR_BLOCK) * WG_SIZE)
-//   local  = (WG_SIZE)
-
 #include "detail/commonConstants.hcl"
 #include "detail/inkernelProfile.hcl"
 
 #define TOTAL_ROWS_FOR_BLOCK 28
 #define TOTAL_WARPS 16
 #define COMPUTE_WARPS 4
+#define LOAD_WARPS (TOTAL_WARPS - COMPUTE_WARPS)
 #define ROWS_FOR_COMPUTE_WARP 1
 #define MATRIX_ROWS 2048
 #define MATRIX_COLUMNS 1024
-#define COMPUTE_WG_SIZE (COMPUTE_WARPS * WARP_SIZE)
-#define LOAD_DATA_WG_SIZE ((TOTAL_WARPS - COMPUTE_WARPS) * WARP_SIZE)
 #define ROWS_FOR_BLOCK_FOR_PHASE (COMPUTE_WARPS * ROWS_FOR_COMPUTE_WARP)
 #define PHASES_PER_BLOCK (TOTAL_ROWS_FOR_BLOCK / ROWS_FOR_BLOCK_FOR_PHASE)
 #define LOAD_DATA_BLOCK_SIZE ROWS_FOR_BLOCK_FOR_PHASE* MATRIX_COLUMNS
@@ -31,15 +22,15 @@
 #define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP ROWS_FOR_COMPUTE_WARP
 #include "detail/computeGemvTile_template.hcl"
 
-#define LoadDataTile_LOAD_DATA_BLOCK_SIZE LOAD_DATA_BLOCK_SIZE
-#define LoadDataTile_LOAD_WG_SIZE (TOTAL_WARPS * WARP_SIZE)
-#define LoadDataTile_COMPUTE_WG_SIZE 0
+#define LoadDataTile_LOAD_DATA_TILE_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_WARPS TOTAL_WARPS
+#define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define SUFFIX _allWarps
 #include "detail/loadDataTile_template.hcl"
 
-#define LoadDataTile_LOAD_DATA_BLOCK_SIZE LOAD_DATA_BLOCK_SIZE
-#define LoadDataTile_LOAD_WG_SIZE LOAD_DATA_WG_SIZE
-#define LoadDataTile_COMPUTE_WG_SIZE COMPUTE_WG_SIZE
+#define LoadDataTile_LOAD_DATA_TILE_SIZE LOAD_DATA_BLOCK_SIZE
+#define LoadDataTile_LOAD_WARPS LOAD_WARPS
+#define LoadDataTile_FIRST_LOAD_WARP_ID COMPUTE_WARPS
 #define SUFFIX _loadWarps
 #include "detail/loadDataTile_template.hcl"
 
