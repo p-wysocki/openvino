@@ -18,7 +18,7 @@ void TEMPLATE(PreloadVectorData, SUFFIX)(__private half4* restrict cachedVector,
 // Requires template parameters:
 // #define ComputeGemvTile_TILE_ROWS
 // #define ComputeGemvTile_TILE_COLUMNS
-// #define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
+// #define ComputeGemvTile_COMPUTE_WARPS
 void TEMPLATE(ComputeGemvTile,
               SUFFIX)(__local const half4* restrict matrixTile_local,
                       __private const half4* restrict cachedVector,
@@ -38,10 +38,12 @@ void TEMPLATE(ComputeGemvTile,
 #error "ComputeGemvTile_TILE_COLUMNS is not defined"
 #endif
 
-#ifndef ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
-#error "ComputeGemvTile_ROWS_FOR_COMPUTE_WARP is not defined"
+#ifndef ComputeGemvTile_COMPUTE_WARPS
+#error "ComputeGemvTile_COMPUTE_WARPS is not defined"
 #endif
 
+#define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP \
+  (ComputeGemvTile_TILE_ROWS / ComputeGemvTile_COMPUTE_WARPS)
 #define ComputeGemvTile_DATA_WIDTH 4
 
 enum {
@@ -125,6 +127,7 @@ inline void TEMPLATE(PreloadVectorData,
 
 #undef ComputeGemvTile_TILE_ROWS
 #undef ComputeGemvTile_TILE_COLUMNS
+#undef ComputeGemvTile_COMPUTE_WARPS
 #undef ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
 #undef ComputeGemvTile_DATA_WIDTH
 #undef SUFFIX

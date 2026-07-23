@@ -1,21 +1,20 @@
 #include "detail/commonConstants.hcl"
 #include "detail/inkernelProfile.hcl"
 
-#define BLOCK_TILE_ROWS 28
-#define TOTAL_WARPS 16
-#define COMPUTE_WARPS 4
-#define LOAD_WARPS (TOTAL_WARPS - COMPUTE_WARPS)
-#define ROWS_FOR_COMPUTE_WARP 1
 #define MATRIX_ROWS 2048
 #define MATRIX_COLUMNS 1024
-#define PHASE_TILE_ROWS (COMPUTE_WARPS * ROWS_FOR_COMPUTE_WARP)
+#define BLOCK_TILE_ROWS 28
+#define PHASE_TILE_ROWS 4
+
+#define COMPUTE_WARPS 4
+#define LOAD_WARPS (TOTAL_WARPS - COMPUTE_WARPS)
 #define PHASES_PER_BLOCK (BLOCK_TILE_ROWS / PHASE_TILE_ROWS)
 #define PHASE_TILE_SIZE (PHASE_TILE_ROWS * MATRIX_COLUMNS)
 
 // Define templates:
 #define ComputeGemvTile_TILE_ROWS PHASE_TILE_ROWS
 #define ComputeGemvTile_TILE_COLUMNS MATRIX_COLUMNS
-#define ComputeGemvTile_ROWS_FOR_COMPUTE_WARP ROWS_FOR_COMPUTE_WARP
+#define ComputeGemvTile_COMPUTE_WARPS COMPUTE_WARPS
 #include "detail/computeGemvTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
