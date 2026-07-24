@@ -64,49 +64,6 @@ cl_int EnqueueGemvKernel(cl_mem vectorBuffer, cl_mem matrixBuffer,
                                 &localWorkSize, 0, nullptr, nullptr);
 }
 
-BenchmarkResult benchmarkGemvKernelLatency(
-    cl_kernel kernel, const std::vector<float>& matrix,
-    const std::vector<float>& vector, size_t rowCount, size_t columnCount,
-    cl_device_id device, cl_context context, cl_command_queue queue,
-    size_t warmupIterations, size_t benchmarkIterations) {
-  const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
-  const std::vector<cl_half> vectorHalf = convertToHalf(vector);
-  std::vector<cl_half> resultHalf(rowCount,
-                                  cl_half_from_float(0.0f, CL_HALF_RTE));
-
-  cl_int status = CL_SUCCESS;
-  cl_mem matrixBuffer = clCreateBuffer(
-      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-      matrixHalf.size() * sizeof(cl_half), (void*)matrixHalf.data(), &status);
-  ASSERT_OCL_SUCCESS(status);
-  cl_mem vectorBuffer = clCreateBuffer(
-      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-      vectorHalf.size() * sizeof(cl_half), (void*)vectorHalf.data(), &status);
-  ASSERT_OCL_SUCCESS(status);
-  cl_mem resultBuffer =
-      clCreateBuffer(context, CL_MEM_WRITE_ONLY,
-                     resultHalf.size() * sizeof(cl_half), nullptr, &status);
-  ASSERT_OCL_SUCCESS(status);
-
-  ocltest::ProfileResult stats = ocltest::ProfileOpenCL(
-      [&](void) {
-        ASSERT_OCL_SUCCESS(EnqueueGemvKernel(vectorBuffer, matrixBuffer,
-                                             resultBuffer, rowCount,
-                                             columnCount, kernel, queue));
-      },
-      queue, warmupIterations, benchmarkIterations);
-
-  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(
-      queue, resultBuffer, CL_TRUE, 0, resultHalf.size() * sizeof(cl_half),
-      resultHalf.data(), 0, nullptr, nullptr));
-
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(resultBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
-  ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
-
-  return {stats, convertToFloat(resultHalf)};
-}
-
 BenchmarkResult benchmarkDnnlGemvLatency(
     const std::vector<float>& matrix, const std::vector<float>& vector,
     size_t rowCount, size_t columnCount, cl_device_id device,
@@ -185,22 +142,55 @@ BenchmarkResult benchmarkDnnlGemvLatency(
 
 class PreloadingTest : public ocltest::OclTestFixture {
  public:
-  void SetUp() override {
-    ocltest::OclTestFixture::SetUp();
-    _oclBinary =
+  // Benchmarks the GEMV kernel latency using OpenCL.
+  BenchmarkResult benchmarkGemvKernelLatency(
+      const std::vector<float>& matrix, const std::vector<float>& vector,
+      size_t rowCount, size_t columnCount, cl_device_id device,
+      cl_context context, cl_command_queue queue, size_t warmupIterations,
+      size_t benchmarkIterations) {
+    ocltest::OclTestFixture::OCLBinary oclBinary =
         createProgramAndKernel(kernelSourcePath + kernelSourceFileName, "gemv",
                                "-cl-std=CL3.0 -I " + kernelSourcePath);
+
+    const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
+    const std::vector<cl_half> vectorHalf = convertToHalf(vector);
+    std::vector<cl_half> resultHalf(rowCount,
+                                    cl_half_from_float(0.0f, CL_HALF_RTE));
+
+    cl_int status = CL_SUCCESS;
+    cl_mem matrixBuffer = clCreateBuffer(
+        context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        matrixHalf.size() * sizeof(cl_half), (void*)matrixHalf.data(), &status);
+    ASSERT_OCL_SUCCESS(status);
+    cl_mem vectorBuffer = clCreateBuffer(
+        context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        vectorHalf.size() * sizeof(cl_half), (void*)vectorHalf.data(), &status);
+    ASSERT_OCL_SUCCESS(status);
+    cl_mem resultBuffer =
+        clCreateBuffer(context, CL_MEM_WRITE_ONLY,
+                       resultHalf.size() * sizeof(cl_half), nullptr, &status);
+    ASSERT_OCL_SUCCESS(status);
+
+    ocltest::ProfileResult stats = ocltest::ProfileOpenCL(
+        [&](void) {
+          ASSERT_OCL_SUCCESS(EnqueueGemvKernel(
+              vectorBuffer, matrixBuffer, resultBuffer, rowCount, columnCount,
+              oclBinary.kernel, queue));
+        },
+        queue, warmupIterations, benchmarkIterations);
+
+    ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(
+        queue, resultBuffer, CL_TRUE, 0, resultHalf.size() * sizeof(cl_half),
+        resultHalf.data(), 0, nullptr, nullptr));
+
+    ASSERT_OCL_SUCCESS(clReleaseMemObject(resultBuffer));
+    ASSERT_OCL_SUCCESS(clReleaseMemObject(vectorBuffer));
+    ASSERT_OCL_SUCCESS(clReleaseMemObject(matrixBuffer));
+
+    releaseOCLBinary(oclBinary);
+
+    return {stats, convertToFloat(resultHalf)};
   }
-
-  void TearDown() override {
-    releaseOCLBinary(_oclBinary);
-    ocltest::OclTestFixture::TearDown();
-  }
-
-  cl_kernel kernel() const { return _oclBinary.kernel; }
-
- private:
-  OCLBinary _oclBinary;
 };
 
 TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
@@ -211,8 +201,8 @@ TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
   std::vector<float> vector = utils::createRandomBuffer(columnCount, 1);
 
   const BenchmarkResult gemvLatency = benchmarkGemvKernelLatency(
-      kernel(), matrix, vector, rowCount, columnCount, deviceId(), context(),
-      queue(), warmupIterations, benchmarkIterations);
+      matrix, vector, rowCount, columnCount, deviceId(), context(), queue(),
+      warmupIterations, benchmarkIterations);
 
   const BenchmarkResult dnnlLatency = benchmarkDnnlGemvLatency(
       matrix, vector, rowCount, columnCount, deviceId(), context(), queue(),
