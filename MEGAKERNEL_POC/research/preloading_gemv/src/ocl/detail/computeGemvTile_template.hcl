@@ -1,13 +1,18 @@
 #include "detail/template.hcl"
 
+#ifndef ComputeGemvTile_SUFFIX
+#define ComputeGemvTile_SUFFIX
+#endif
+
 // Preloads vector data into private memory.
 // cached vector is assumed to have size defined by
-// TEMPLATE(ComputeGemvTile_CACHE_SIZE, SUFFIX).
+// TEMPLATE(ComputeGemvTile_CACHE_SIZE, ComputeGemvTile_SUFFIX).
 
 // Requires template parameters:
 // #define ComputeGemvTile_TILE_COLUMNS
-void TEMPLATE(PreloadVectorData, SUFFIX)(__private half4* restrict cachedVector,
-                                         __global const half* restrict vector);
+void TEMPLATE(PreloadVectorData,
+              ComputeGemvTile_SUFFIX)(__private half4* restrict cachedVector,
+                                      __global const half* restrict vector);
 
 // Template function.
 // Computes gemv for given tile. Each warp computes multiple rows of the tile.
@@ -19,10 +24,13 @@ void TEMPLATE(PreloadVectorData, SUFFIX)(__private half4* restrict cachedVector,
 // #define ComputeGemvTile_TILE_ROWS
 // #define ComputeGemvTile_TILE_COLUMNS
 // #define ComputeGemvTile_COMPUTE_WARPS
-void TEMPLATE(ComputeGemvTile,
-              SUFFIX)(__local const half4* restrict matrixTile_local,
-                      __private const half4* restrict cachedVector,
-                      __global half* restrict result);
+
+// Optional parameter to give unique name of template instantiation.
+// #define ComputeGemvTile_SUFFIX
+void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
+    __local const half4* restrict matrixTile_local,
+    __private const half4* restrict cachedVector,
+    __global half* restrict result);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -52,15 +60,15 @@ _Static_assert(ComputeGemvTile_TILE_ROWS % ComputeGemvTile_COMPUTE_WARPS == 0,
 #define ComputeGemvTile_DATA_WIDTH 4
 
 enum {
-  TEMPLATE(ComputeGemvTile_CACHE_SIZE, SUFFIX) =
+  TEMPLATE(ComputeGemvTile_CACHE_SIZE, ComputeGemvTile_SUFFIX) =
       ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH / WARP_SIZE
 };
 
 ////////////////////////////////////////////////////////////////
-inline void TEMPLATE(ComputeGemvTile,
-                     SUFFIX)(__local const half4* restrict matrixTile_local,
-                             __private const half4* restrict cachedVector,
-                             __global half* restrict result) {
+inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
+    __local const half4* restrict matrixTile_local,
+    __private const half4* restrict cachedVector,
+    __global half* restrict result) {
   const int laneLid = get_sub_group_local_id();
   const int vectorizedNumColumns =
       ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
@@ -129,4 +137,4 @@ inline void TEMPLATE(PreloadVectorData,
 #undef ComputeGemvTile_COMPUTE_WARPS
 #undef ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
 #undef ComputeGemvTile_DATA_WIDTH
-#undef SUFFIX
+#undef ComputeGemvTile_SUFFIX

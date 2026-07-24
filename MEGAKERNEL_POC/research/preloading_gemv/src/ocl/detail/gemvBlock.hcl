@@ -21,7 +21,7 @@
 // #define GemvBlock_PHASE_TILE_ROWS
 // #define GemvBlock_COMPUTE_WARPS
 
-// Optional template parameter:
+// Optional parameter to give unique name of template instantiation.
 // #define GemvBlock_SUFFIX
 inline void TEMPLATE(GemvBlock,
                      GemvBlock_SUFFIX)(__global const half* restrict matrix,
@@ -78,13 +78,13 @@ enum {
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
-#define SUFFIX _allWarps
+#define LoadDataTile_SUFFIX _allWarps
 #include "detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS LOAD_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID GemvBlock_COMPUTE_WARPS
-#define SUFFIX _loadWarps
+#define LoadDataTile_SUFFIX _loadWarps
 #include "detail/loadDataTile_template.hcl"
 
 ///////////////////////////////////////////////////////////////

@@ -1,6 +1,10 @@
 #include "detail/nonTemporalLoads.hcl"
 #include "detail/template.hcl"
 
+#ifndef LoadDataTile_SUFFIX
+#define LoadDataTile_SUFFIX
+#endif
+
 // Template function.
 // Loads tile of data from global memory to local memory. Data is assumed to be
 // continous in global memory.
@@ -11,9 +15,12 @@
 // #define LoadDataTile_LOAD_DATA_TILE_SIZE
 // #define LoadDataTile_LOAD_WARPS
 // #define LoadDataTile_FIRST_LOAD_WARP_ID
-inline void TEMPLATE(LoadDataTile,
-                     SUFFIX)(__local half* restrict dataTile_local,
-                             __global const half* restrict dataBlock_global);
+
+// Optional parameter to give unique name of template instantiation.
+// #define LoadDataTile_SUFFIX
+inline void TEMPLATE(LoadDataTile, LoadDataTile_SUFFIX)(
+    __local half* restrict dataTile_local,
+    __global const half* restrict dataBlock_global);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -33,9 +40,9 @@ inline void TEMPLATE(LoadDataTile,
 #error "LoadDataTile_FIRST_LOAD_WARP_ID is not defined"
 #endif
 
-inline void TEMPLATE(LoadDataTile,
-                     SUFFIX)(__local half* restrict dataTile_local,
-                             __global const half* restrict dataBlock_global) {
+inline void TEMPLATE(LoadDataTile, LoadDataTile_SUFFIX)(
+    __local half* restrict dataTile_local,
+    __global const half* restrict dataBlock_global) {
   __local half8* restrict dataTile_local8 =
       (__local half8* restrict)dataTile_local;
   __global half8* restrict dataBlock_global8 =
@@ -52,4 +59,4 @@ inline void TEMPLATE(LoadDataTile,
 #undef LoadDataTile_LOAD_DATA_TILE_SIZE
 #undef LoadDataTile_LOAD_WARPS
 #undef LoadDataTile_FIRST_LOAD_WARP_ID
-#undef SUFFIX
+#undef LoadDataTile_SUFFIX
