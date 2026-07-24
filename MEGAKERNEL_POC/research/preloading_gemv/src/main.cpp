@@ -16,12 +16,15 @@ static constexpr size_t warmupIterations = 100;
 static constexpr size_t benchmarkIterations = 1000;
 static constexpr size_t rowCount = 2048;
 static constexpr size_t columnCount = 1024;
+
 static constexpr float ABS_ERROR = 1e-3f;
-
 static constexpr size_t WG_SIZE = 512;
-static constexpr size_t ROWS_PER_GROUP = 28;
-static constexpr const char* kernelSourceFileName = "gemv_opt.cl";
 
+// -- This param should be tweaked to make sure kernel runs in one wave.
+static constexpr size_t ROWS_PER_BLOCK = 32;
+// --
+
+static constexpr const char* kernelSourceFileName = "gemv_opt.cl";
 static_assert(WG_SIZE % 32 == 0,
               "WG_SIZE must contain whole 32-thread subgroups");
 
@@ -58,7 +61,7 @@ cl_int EnqueueGemvKernel(cl_mem vectorBuffer, cl_mem matrixBuffer,
 
   const size_t localWorkSize = WG_SIZE;
   const size_t workGroupCount =
-      (rowCount + ROWS_PER_GROUP - 1) / ROWS_PER_GROUP;
+      (rowCount + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
   const size_t globalWorkSize = workGroupCount * WG_SIZE;
   return clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &globalWorkSize,
                                 &localWorkSize, 0, nullptr, nullptr);
@@ -153,7 +156,7 @@ class PreloadingTest : public ocltest::OclTestFixture {
         "-cl-std=CL3.0 -I " + kernelSourcePath +
             " -DMATRIX_ROWS=" + std::to_string(rowCount) +
             " -DMATRIX_COLUMNS=" + std::to_string(columnCount) +
-            " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_GROUP));
+            " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_BLOCK));
 
     const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
     const std::vector<cl_half> vectorHalf = convertToHalf(vector);
