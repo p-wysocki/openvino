@@ -1,9 +1,11 @@
 #include "detail/commonConstants.hcl"
 #include "detail/inkernelProfile.hcl"
 
-#define MATRIX_ROWS 2048
-#define MATRIX_COLUMNS 1024
-#define BLOCK_TILE_ROWS 28
+// Needed params for gemv kernel:
+// #define MATRIX_ROWS
+// #define MATRIX_COLUMNS 
+// #define BLOCK_TILE_ROWS
+
 #define PHASE_TILE_ROWS 4
 
 _Static_assert(BLOCK_TILE_ROWS % PHASE_TILE_ROWS == 0,

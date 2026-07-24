@@ -148,9 +148,12 @@ class PreloadingTest : public ocltest::OclTestFixture {
       size_t rowCount, size_t columnCount, cl_device_id device,
       cl_context context, cl_command_queue queue, size_t warmupIterations,
       size_t benchmarkIterations) {
-    ocltest::OclTestFixture::OCLBinary oclBinary =
-        createProgramAndKernel(kernelSourcePath + kernelSourceFileName, "gemv",
-                               "-cl-std=CL3.0 -I " + kernelSourcePath);
+    ocltest::OclTestFixture::OCLBinary oclBinary = createProgramAndKernel(
+        kernelSourcePath + kernelSourceFileName, "gemv",
+        "-cl-std=CL3.0 -I " + kernelSourcePath +
+            " -DMATRIX_ROWS=" + std::to_string(rowCount) +
+            " -DMATRIX_COLUMNS=" + std::to_string(columnCount) +
+            " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_GROUP));
 
     const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
     const std::vector<cl_half> vectorHalf = convertToHalf(vector);
