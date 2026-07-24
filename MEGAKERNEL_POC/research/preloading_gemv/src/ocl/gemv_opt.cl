@@ -44,8 +44,7 @@ inline void SwapPtr(__local half* restrict __private* a,
 __attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(WARP_SIZE))) __kernel void
 gemv(__global const half* restrict matrix, __global const half* restrict vector,
-     __global half* restrict output, const uint rowCount,
-     const uint columnCount) {
+     __global half* restrict output) {
   __local half matrixPhaseTileBuff1_local[PHASE_TILE_SIZE];
   __local half matrixPhaseTileBuff2_local[PHASE_TILE_SIZE];
 
@@ -60,7 +59,7 @@ gemv(__global const half* restrict matrix, __global const half* restrict vector,
   __local half* restrict loadBufferPtr_local =
       (__local half* restrict)matrixPhaseTileBuff1_local;
 
-  // ---------------------------------------------------
+  // --------------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
   half4 cachedVector_thisWarp[ComputeGemvTile_CACHE_SIZE];
   //---------------------------------------------------------

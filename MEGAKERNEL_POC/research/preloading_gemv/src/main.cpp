@@ -55,10 +55,6 @@ cl_int EnqueueGemvKernel(cl_mem vectorBuffer, cl_mem matrixBuffer,
   ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 0, sizeof(cl_mem), &matrixBuffer));
   ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 1, sizeof(cl_mem), &vectorBuffer));
   ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 2, sizeof(cl_mem), &resultBuffer));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel, 3, sizeof(clRowCount), &clRowCount));
-  ASSERT_OCL_SUCCESS(
-      clSetKernelArg(kernel, 4, sizeof(clColumnCount), &clColumnCount));
 
   const size_t localWorkSize = WG_SIZE;
   const size_t workGroupCount =
