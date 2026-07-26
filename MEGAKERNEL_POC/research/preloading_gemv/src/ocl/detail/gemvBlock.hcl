@@ -87,6 +87,12 @@ enum {
 #define LoadDataTile_SUFFIX _loadWarps
 #include "detail/loadDataTile_template.hcl"
 
+#define LoadDataTile_LOAD_DATA_TILE_SIZE GemvBlock_MATRIX_COLUMNS
+#define LoadDataTile_LOAD_WARPS TOTAL_WARPS
+#define LoadDataTile_FIRST_LOAD_WARP_ID 0
+#define LoadDataTile_SUFFIX _allWarpsVectorLoad
+#include "detail/loadDataTile_template.hcl"
+
 ///////////////////////////////////////////////////////////////
 inline void SwapPtr(__local half* restrict __private* a,
                     __local half* restrict __private* b) {
@@ -125,12 +131,18 @@ inline void TEMPLATE(GemvBlock,
                             matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
+  IN_KERNEL_PROFILE(
+      LoadDataTileCached_allWarpsVectorLoad(computeBufferPtr_local, vector),
+      "INITIAL VECTOR LOAD LoadDataTile_allWarps");
+
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
   if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
-    IN_KERNEL_PROFILE(PreloadVectorData(cachedVector_thisWarp, vector),
-                      "PreloadVectorData");
+    IN_KERNEL_PROFILE(
+        PreloadVectorData(cachedVector_thisWarp, computeBufferPtr_local),
+        "PreloadVectorData");
   }
+  IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier After PreloadVectorData");
 
 #pragma unroll
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {

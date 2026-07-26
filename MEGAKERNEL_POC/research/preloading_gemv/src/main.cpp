@@ -14,8 +14,8 @@ namespace {
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
 static constexpr size_t warmupIterations = 100;
 static constexpr size_t benchmarkIterations = 1000;
-static constexpr size_t rowCount = 2048;
-static constexpr size_t columnCount = 1024;
+static constexpr size_t rowCount = 1024;
+static constexpr size_t columnCount = 2048;
 
 static constexpr float ABS_ERROR = 1e-3f;
 static constexpr size_t WG_SIZE = 512;

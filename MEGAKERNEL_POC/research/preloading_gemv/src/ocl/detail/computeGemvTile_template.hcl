@@ -12,7 +12,7 @@
 // #define ComputeGemvTile_TILE_COLUMNS
 void TEMPLATE(PreloadVectorData,
               ComputeGemvTile_SUFFIX)(__private half4* restrict cachedVector,
-                                      __global const half* restrict vector);
+                                      __local const half* restrict vector);
 
 // Template function.
 // Computes gemv for given tile. Each warp computes multiple rows of the tile.
@@ -121,14 +121,15 @@ inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
 /////////////////////////////////////////////////////////////////////
 inline void TEMPLATE(PreloadVectorData,
                      SUFFIX)(__private half4* restrict cachedVector,
-                             __global const half* restrict vector) {
+                             __local const half* restrict vector) {
   const int laneLid = get_sub_group_local_id();
+  __local const half4* restrict vector4 =
+      (__local const half4* restrict)vector;
 #pragma unroll
   for (int colIdx = laneLid;
        colIdx < ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
        colIdx += WARP_SIZE) {
-    cachedVector[colIdx / WARP_SIZE] =
-        vload4(0, vector + colIdx * ComputeGemvTile_DATA_WIDTH);
+    cachedVector[colIdx / WARP_SIZE] = vector4[colIdx];
   }
 }
 

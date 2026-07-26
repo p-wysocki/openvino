@@ -56,6 +56,22 @@ inline void TEMPLATE(LoadDataTile, LoadDataTile_SUFFIX)(
   }
 }
 
+inline void TEMPLATE(LoadDataTileCached, LoadDataTile_SUFFIX)(
+    __local half* restrict dataTile_local,
+    __global const half* restrict dataBlock_global) {
+  __local half8* restrict dataTile_local8 =
+      (__local half8* restrict)dataTile_local;
+  __global half8* restrict dataBlock_global8 =
+      (__global half8* restrict)dataBlock_global;
+
+#pragma unroll
+  for (int i = get_local_id(0) - LoadDataTile_FIRST_LOAD_WARP_ID * WARP_SIZE;
+       i < LoadDataTile_LOAD_DATA_TILE_SIZE / 8;
+       i += LoadDataTile_LOAD_WARPS * WARP_SIZE) {
+    dataTile_local8[i] = dataBlock_global8[i];
+  }
+}
+
 #undef LoadDataTile_LOAD_DATA_TILE_SIZE
 #undef LoadDataTile_LOAD_WARPS
 #undef LoadDataTile_FIRST_LOAD_WARP_ID
