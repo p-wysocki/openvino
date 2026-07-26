@@ -76,19 +76,19 @@ BenchmarkResult benchmarkDnnlGemvLatency(
   dnnl::stream stream = dnnl::ocl_interop::make_stream(engine, queue);
 
   const dnnl::memory::dims vectorDims = {
-      1, static_cast<dnnl::memory::dim>(columnCount)};
+      1, 1, static_cast<dnnl::memory::dim>(columnCount)};
   const dnnl::memory::dims matrixDims = {
-      static_cast<dnnl::memory::dim>(columnCount),
+      1, static_cast<dnnl::memory::dim>(columnCount),
       static_cast<dnnl::memory::dim>(rowCount)};
   const dnnl::memory::dims resultDims = {
-      1, static_cast<dnnl::memory::dim>(rowCount)};
+      1, 1, static_cast<dnnl::memory::dim>(rowCount)};
 
   const auto vectorDesc = dnnl::memory::desc(
-      vectorDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::ab);
+      vectorDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::abc);
   const auto matrixDesc = dnnl::memory::desc(
-      matrixDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::ba);
+      matrixDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::acb);
   const auto resultDesc = dnnl::memory::desc(
-      resultDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::ab);
+      resultDims, dnnl::memory::data_type::f16, dnnl::memory::format_tag::abc);
 
   const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
   const std::vector<cl_half> vectorHalf = convertToHalf(vector);
