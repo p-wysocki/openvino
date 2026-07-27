@@ -202,6 +202,73 @@ __kernel void mk_attn(
     for (int j=0; j<NPL; j++) xn[h*HD+l+SG*j]=convert_half(acc[j]*il);
 }
 
+// Flash-decoding attention: split the S_past key/value scan across TFD sub-groups
+// inside one workgroup. Each sub-group runs the same barrier-free online softmax
+// over a contiguous tile of keys, producing a partial (max m, denom ls, acc)
+// state; the TFD partials are then merged with a log-sum-exp reduction in local
+// memory by sub-group 0. This parallelises the attention scan across the GPU as
+// the KV cache grows, where the single-subgroup mk_attn is serial-bound.
+// TFD is chosen per step on the host (1 for short context -> identical to
+// mk_attn, up to MAX_TFD for long context). Empty tiles (s0>=SA) contribute
+// nothing: their m stays -INFINITY so exp(m-mn)->0 in the merge.
+#define MAX_TFD 8
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void mk_attn_fd(
+    const __global float* qb, const __global half* kc, const __global half* vc,
+    int SA, __global half* xn, uint layer, uint CS, uint TFD)
+{
+    uint h  = get_group_id(0);
+    uint sg = get_sub_group_id();
+    uint l  = get_sub_group_local_id();
+    uint kv = h/GQA;
+    const float scl = rsqrt((float)HD);
+    const ulong base = ((ulong)layer*KVH + kv)*(ulong)CS*HD;
+
+    uint tile = ((uint)SA + TFD - 1) / TFD;
+    uint s0 = sg*tile;
+    uint s1 = min(s0 + tile, (uint)SA);
+
+    float qr[NPL], acc[NPL];
+#pragma unroll
+    for (int j=0; j<NPL; j++) { qr[j]=qb[h*HD + l+SG*j]; acc[j]=0; }
+    float m=-INFINITY, ls=0;
+    for (uint s=s0; s<s1; s++) {
+        float pa=0;
+#pragma unroll
+        for (int j=0; j<NPL; j++) pa += qr[j]*convert_float(kc[base+(ulong)s*HD+l+SG*j]);
+        float sc=sub_group_reduce_add(pa)*scl;
+        float mn=fmax(m,sc), cr=native_exp(m-mn), p=native_exp(sc-mn);
+        ls=ls*cr+p;
+#pragma unroll
+        for (int j=0; j<NPL; j++) acc[j]=acc[j]*cr+p*convert_float(vc[base+(ulong)s*HD+l+SG*j]);
+        m=mn;
+    }
+
+    // Publish this tile's partial state, then merge in sub-group 0.
+    __local float lm[MAX_TFD], ll[MAX_TFD];
+    __local float la[MAX_TFD][NPL][SG];
+    if (l==0) { lm[sg]=m; ll[sg]=ls; }
+#pragma unroll
+    for (int j=0; j<NPL; j++) la[sg][j][l]=acc[j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (sg==0) {
+        float M=lm[0], L=ll[0], ac[NPL];
+#pragma unroll
+        for (int j=0; j<NPL; j++) ac[j]=la[0][j][l];
+        for (uint t=1; t<TFD; t++) {
+            float mn=fmax(M, lm[t]), cr=native_exp(M-mn), p=native_exp(lm[t]-mn);
+            L=L*cr+ll[t]*p;
+#pragma unroll
+            for (int j=0; j<NPL; j++) ac[j]=ac[j]*cr+la[t][j][l]*p;
+            M=mn;
+        }
+        float il=1.0f/L;
+#pragma unroll
+        for (int j=0; j<NPL; j++) xn[h*HD+l+SG*j]=convert_half(ac[j]*il);
+    }
+}
+
 // Split-K residual GEMV: h += a . w  (o-proj and down-proj)
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void mk_gemv_sk(
@@ -268,6 +335,8 @@ static constexpr int  SG = 16, RPS = 4;
 static constexpr int  LW_QKV = 64, LW_GU = 128;
 static constexpr int  KS_O = 4, KS_DN = 6;
 static constexpr int  MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
+static constexpr int  MAX_TFD = 8;     // max flash-decoding tiles (must match kernel MAX_TFD)
+static constexpr int  FD_TOKENS_PER_TILE = 32;  // target KV tokens per flash-decoding tile
 
 // ---------------------------------------------------------------------------
 // MegaKernelFastImpl
@@ -335,6 +404,7 @@ public:
         kProjQKV_= gk("mk_proj_qkv");
         kRope_   = gk("mk_qk_rope");
         kAttn_   = gk("mk_attn");
+        kAttnFd_ = gk("mk_attn_fd");
         kGemvSk_ = gk("mk_gemv_sk");
         kGateUp_ = gk("mk_gate_up");
 
@@ -453,6 +523,13 @@ public:
             OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
         };
 
+        // Flash-decoding attention is on by default; OV_MEGAKERNEL_NO_FLASH=1
+        // falls back to the original single-subgroup mk_attn for A/B comparison.
+        static const bool use_flash = [] {
+            const char* v = std::getenv("OV_MEGAKERNEL_NO_FLASH");
+            return !(v && v[0] == '1');
+        }();
+
         { uint n = S_new * H_DIM;
           SM(kToF32_,0,hs); SM(kToF32_,1,oh); SU(kToF32_,2,n);
           enq(kToF32_, n, 256); }
@@ -487,10 +564,23 @@ public:
                 enq(kRope_, gQr, HD);
 
                 int sa=(int)(pos_v+1);
-                SM(kAttn_,0,aQb); SM(kAttn_,1,aKC); SM(kAttn_,2,aVC);
-                SI(kAttn_,3,sa); SM(kAttn_,4,aXn);
-                SU(kAttn_,5,layer); SU(kAttn_,6,MAX_SEQ);
-                enq(kAttn_, gAt, SG);
+                if (use_flash) {
+                    // Flash decoding: split the S_past scan across TFD tiles so
+                    // the attention kernel fills the GPU as the KV cache grows.
+                    // TFD scales with context (1 for short -> matches mk_attn).
+                    uint TFD = (uint)sa / FD_TOKENS_PER_TILE;
+                    if (TFD < 1u) TFD = 1u;
+                    if (TFD > (uint)MAX_TFD) TFD = (uint)MAX_TFD;
+                    SM(kAttnFd_,0,aQb); SM(kAttnFd_,1,aKC); SM(kAttnFd_,2,aVC);
+                    SI(kAttnFd_,3,sa); SM(kAttnFd_,4,aXn);
+                    SU(kAttnFd_,5,layer); SU(kAttnFd_,6,MAX_SEQ); SU(kAttnFd_,7,TFD);
+                    enq(kAttnFd_, (size_t)NH*TFD*SG, (size_t)TFD*SG);
+                } else {
+                    SM(kAttn_,0,aQb); SM(kAttn_,1,aKC); SM(kAttn_,2,aVC);
+                    SI(kAttn_,3,sa); SM(kAttn_,4,aXn);
+                    SU(kAttn_,5,layer); SU(kAttn_,6,MAX_SEQ);
+                    enq(kAttn_, gAt, SG);
+                }
 
                 { uint id=QDIM;
                   SM(kGemvSk_,0,aXn); SM(kGemvSk_,1,ow); SM(kGemvSk_,2,oh);
@@ -529,6 +619,7 @@ private:
     cl_kernel kToF32_=nullptr, kProjQKV_=nullptr;
     cl_kernel kRope_ =nullptr, kAttn_  =nullptr, kGemvSk_ =nullptr;
     cl_kernel kGateUp_=nullptr;
+    cl_kernel kAttnFd_=nullptr;          // flash-decoding attention
     cl_mem mQb_=nullptr, mKb_=nullptr, mVb_=nullptr, mGb_=nullptr, mXn_=nullptr;
     cl_mem mKC_=nullptr, mVC_=nullptr;   // persistent internal KV cache (K, V)
     uint32_t cur_len_ = 0;               // number of tokens currently in the cache
