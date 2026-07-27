@@ -78,19 +78,22 @@ enum {
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
+#define LoadDataTile_NON_TEMPORAL_LOAD 1
 #define LoadDataTile_SUFFIX _allWarps
 #include "detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS LOAD_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID GemvBlock_COMPUTE_WARPS
+#define LoadDataTile_NON_TEMPORAL_LOAD 1
 #define LoadDataTile_SUFFIX _loadWarps
 #include "detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE GemvBlock_MATRIX_COLUMNS
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
-#define LoadDataTile_SUFFIX _allWarpsVectorLoad
+#define LoadDataTile_NON_TEMPORAL_LOAD 0
+#define LoadDataTile_SUFFIX _allWarpsCached
 #include "detail/loadDataTile_template.hcl"
 
 ///////////////////////////////////////////////////////////////
@@ -131,9 +134,12 @@ inline void TEMPLATE(GemvBlock,
                             matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
-  IN_KERNEL_PROFILE(
-      LoadDataTileCached_allWarpsVectorLoad(computeBufferPtr_local, vector),
-      "INITIAL VECTOR LOAD LoadDataTile_allWarps");
+  // The way that preloading of vector dara is implemented should be
+  // parametrized by 'policy' design, which is hard to achive wihouth templates.
+  // Basically that policy will depend on the size of vector.
+  // For now, I just hardcoded this policy as it is the best in avg case.
+  IN_KERNEL_PROFILE(LoadDataTile_allWarpsCached(computeBufferPtr_local, vector),
+                    "INITIAL VECTOR LOAD LoadDataTile_allWarps");
 
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
@@ -142,7 +148,8 @@ inline void TEMPLATE(GemvBlock,
         PreloadVectorData(cachedVector_thisWarp, computeBufferPtr_local),
         "PreloadVectorData");
   }
-  IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Barrier After PreloadVectorData");
+  IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE),
+                    "Barrier After PreloadVectorData");
 
 #pragma unroll
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {

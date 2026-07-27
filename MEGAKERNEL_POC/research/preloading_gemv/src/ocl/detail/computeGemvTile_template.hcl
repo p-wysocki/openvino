@@ -123,8 +123,7 @@ inline void TEMPLATE(PreloadVectorData,
                      SUFFIX)(__private half4* restrict cachedVector,
                              __local const half* restrict vector) {
   const int laneLid = get_sub_group_local_id();
-  __local const half4* restrict vector4 =
-      (__local const half4* restrict)vector;
+  __local const half4* restrict vector4 = (__local const half4* restrict)vector;
 #pragma unroll
   for (int colIdx = laneLid;
        colIdx < ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;

@@ -223,6 +223,8 @@ class PreloadingTest : public ocltest::OclTestFixture {
   }
 };
 
+// NOTE: rowsPerBlock is a meta-parameter of opt gemv kernel,
+// that should be tuned for each matrix size and hw - e.g. with auto-tuning.
 #define RUN_GEMV_BENCHMARK(rows, columns, rowsPerBlock) \
   TEST_F(PreloadingTest, Gemv##rows##x##columns) {      \
     RunGemvBenchmark(rows, columns, rowsPerBlock);      \
@@ -231,6 +233,6 @@ class PreloadingTest : public ocltest::OclTestFixture {
 RUN_GEMV_BENCHMARK(2048, 1024, 28)
 RUN_GEMV_BENCHMARK(1024, 2048, 32)
 RUN_GEMV_BENCHMARK(1024, 3072, 32)
-RUN_GEMV_BENCHMARK(3072, 1024, 16)
+RUN_GEMV_BENCHMARK(3072, 1024, 20)
 
 }  // namespace
