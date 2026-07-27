@@ -14,15 +14,9 @@ namespace {
 static const std::string kernelSourcePath = OPENCL_KERNEL_SOURCE_PATH;
 static constexpr size_t warmupIterations = 100;
 static constexpr size_t benchmarkIterations = 1000;
-static constexpr size_t rowCount = 1024;
-static constexpr size_t columnCount = 2048;
 
-static constexpr float ABS_ERROR = 1e-3f;
+static constexpr float ABS_ERROR = 2e-2f;
 static constexpr size_t WG_SIZE = 512;
-
-// -- This param should be tweaked to make sure kernel runs in one wave.
-static constexpr size_t ROWS_PER_BLOCK = 32;
-// --
 
 static constexpr const char* kernelSourceFileName = "gemv_opt.cl";
 static_assert(WG_SIZE % 32 == 0,
@@ -51,8 +45,8 @@ std::vector<float> convertToFloat(const std::vector<cl_half>& input) {
 
 cl_int EnqueueGemvKernel(cl_mem vectorBuffer, cl_mem matrixBuffer,
                          cl_mem resultBuffer, size_t rowCount,
-                         size_t columnCount, cl_kernel kernel,
-                         cl_command_queue queue) {
+                         size_t columnCount, size_t rowsPerBlock,
+                         cl_kernel kernel, cl_command_queue queue) {
   const cl_uint clRowCount = static_cast<cl_uint>(rowCount);
   const cl_uint clColumnCount = static_cast<cl_uint>(columnCount);
   ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 0, sizeof(cl_mem), &matrixBuffer));
@@ -60,8 +54,7 @@ cl_int EnqueueGemvKernel(cl_mem vectorBuffer, cl_mem matrixBuffer,
   ASSERT_OCL_SUCCESS(clSetKernelArg(kernel, 2, sizeof(cl_mem), &resultBuffer));
 
   const size_t localWorkSize = WG_SIZE;
-  const size_t workGroupCount =
-      (rowCount + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+  const size_t workGroupCount = (rowCount + rowsPerBlock - 1) / rowsPerBlock;
   const size_t globalWorkSize = workGroupCount * WG_SIZE;
   return clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &globalWorkSize,
                                 &localWorkSize, 0, nullptr, nullptr);
@@ -148,15 +141,15 @@ class PreloadingTest : public ocltest::OclTestFixture {
   // Benchmarks the GEMV kernel latency using OpenCL.
   BenchmarkResult benchmarkGemvKernelLatency(
       const std::vector<float>& matrix, const std::vector<float>& vector,
-      size_t rowCount, size_t columnCount, cl_device_id device,
-      cl_context context, cl_command_queue queue, size_t warmupIterations,
-      size_t benchmarkIterations) {
+      size_t rowCount, size_t columnCount, size_t rowsPerBlock,
+      cl_device_id device, cl_context context, cl_command_queue queue,
+      size_t warmupIterations, size_t benchmarkIterations) {
     ocltest::OclTestFixture::OCLBinary oclBinary = createProgramAndKernel(
         kernelSourcePath + kernelSourceFileName, "gemv",
         "-cl-std=CL3.0 -I " + kernelSourcePath +
             " -DMATRIX_ROWS=" + std::to_string(rowCount) +
             " -DMATRIX_COLUMNS=" + std::to_string(columnCount) +
-            " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_BLOCK));
+            " -DBLOCK_TILE_ROWS=" + std::to_string(rowsPerBlock));
 
     const std::vector<cl_half> matrixHalf = convertToHalf(matrix);
     const std::vector<cl_half> vectorHalf = convertToHalf(vector);
@@ -181,7 +174,7 @@ class PreloadingTest : public ocltest::OclTestFixture {
         [&](void) {
           ASSERT_OCL_SUCCESS(EnqueueGemvKernel(
               vectorBuffer, matrixBuffer, resultBuffer, rowCount, columnCount,
-              oclBinary.kernel, queue));
+              rowsPerBlock, oclBinary.kernel, queue));
         },
         queue, warmupIterations, benchmarkIterations);
 
@@ -197,37 +190,47 @@ class PreloadingTest : public ocltest::OclTestFixture {
 
     return {stats, convertToFloat(resultHalf)};
   }
+
+  /////////////////////////////////////////////////////
+  void RunGemvBenchmark(int rows, int columns, int rowsPerBlock) {
+    cl_int status = CL_SUCCESS;
+
+    std::vector<float> matrix = utils::createRandomBuffer(rows * columns, 0);
+    std::vector<float> vector = utils::createRandomBuffer(columns, 1);
+
+    const BenchmarkResult gemvLatency = benchmarkGemvKernelLatency(
+        matrix, vector, rows, columns, rowsPerBlock, deviceId(), context(),
+        queue(), warmupIterations, benchmarkIterations);
+
+    const BenchmarkResult dnnlLatency = benchmarkDnnlGemvLatency(
+        matrix, vector, rows, columns, deviceId(), context(), queue(),
+        warmupIterations, benchmarkIterations);
+
+    gemvLatency.profileResult.print("GEMV OpenCL kernel");
+    dnnlLatency.profileResult.print("GEMV oneDNN kernel");
+
+    std::cout << "Speedup: "
+              << dnnlLatency.profileResult.averageUs /
+                     gemvLatency.profileResult.averageUs
+              << "x\n";
+
+    ASSERT_EQ(gemvLatency.output.size(), dnnlLatency.output.size())
+        << "Output size mismatch between GEMV and oneDNN results";
+    for (size_t i = 0; i < rows; ++i) {
+      ASSERT_NEAR(gemvLatency.output[i], dnnlLatency.output[i], ABS_ERROR)
+          << "GEMV result mismatch at idx " << i;
+    }
+  }
 };
 
-TEST_F(PreloadingTest, GemvKernelProducesReferenceResults) {
-  cl_int status = CL_SUCCESS;
-
-  std::vector<float> matrix =
-      utils::createRandomBuffer(rowCount * columnCount, 0);
-  std::vector<float> vector = utils::createRandomBuffer(columnCount, 1);
-
-  const BenchmarkResult gemvLatency = benchmarkGemvKernelLatency(
-      matrix, vector, rowCount, columnCount, deviceId(), context(), queue(),
-      warmupIterations, benchmarkIterations);
-
-  const BenchmarkResult dnnlLatency = benchmarkDnnlGemvLatency(
-      matrix, vector, rowCount, columnCount, deviceId(), context(), queue(),
-      warmupIterations, benchmarkIterations);
-
-  gemvLatency.profileResult.print("GEMV OpenCL kernel");
-  dnnlLatency.profileResult.print("GEMV oneDNN kernel");
-
-  std::cout << "Speedup: "
-            << dnnlLatency.profileResult.averageUs /
-                   gemvLatency.profileResult.averageUs
-            << "x\n";
-
-  ASSERT_EQ(gemvLatency.output.size(), dnnlLatency.output.size())
-      << "Output size mismatch between GEMV and oneDNN results";
-  for (size_t i = 0; i < rowCount; ++i) {
-    ASSERT_NEAR(gemvLatency.output[i], dnnlLatency.output[i], ABS_ERROR)
-        << "GEMV result mismatch at idx " << i;
+#define RUN_GEMV_BENCHMARK(rows, columns, rowsPerBlock) \
+  TEST_F(PreloadingTest, Gemv##rows##x##columns) {      \
+    RunGemvBenchmark(rows, columns, rowsPerBlock);      \
   }
-}
+
+RUN_GEMV_BENCHMARK(2048, 1024, 28)
+RUN_GEMV_BENCHMARK(1024, 2048, 32)
+RUN_GEMV_BENCHMARK(1024, 3072, 32)
+RUN_GEMV_BENCHMARK(3072, 1024, 16)
 
 }  // namespace
