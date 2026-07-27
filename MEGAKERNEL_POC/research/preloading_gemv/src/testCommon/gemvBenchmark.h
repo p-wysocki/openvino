@@ -14,6 +14,7 @@ static constexpr const char* KERNEL_SOURCE_FILE_NAME = "gemv_opt.cl";
 static constexpr size_t WARMUP_ITERATIONS = 100;
 static constexpr size_t BENCHMARK_ITERATIONS = 1000;
 static constexpr float ABS_ERROR = 2e-2f;
+static constexpr bool CLEAR_CACHE_BEFORE_BENCHMARK = true;
 
 struct GemvShape {
   size_t rowCount;

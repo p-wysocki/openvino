@@ -87,17 +87,18 @@ GemvBenchmarkResult GemvTestFixture::benchmarkOpenClGemvChain(
     ASSERT_OCL_SUCCESS(status);
   }
 
-  const ProfileResult profileResult = ProfileOpenCL(
-      [&]() {
-        for (size_t layer = 0; layer < shapes.size(); ++layer) {
-          const cl_mem layerInput =
-              layer == 0 ? inputBuffer : outputBuffers[layer - 1];
-          ASSERT_OCL_SUCCESS(enqueueGemvKernel(
-              layerInput, matrixBuffers[layer], outputBuffers[layer],
-              shapes[layer], oclBinaries[layer].kernel, queue()));
-        }
-      },
-      queue(), warmupIterations, benchmarkIterations);
+  const ProfileResult profileResult =
+      ProfileOpenCL<CLEAR_CACHE_BEFORE_BENCHMARK>(
+          [&]() {
+            for (size_t layer = 0; layer < shapes.size(); ++layer) {
+              const cl_mem layerInput =
+                  layer == 0 ? inputBuffer : outputBuffers[layer - 1];
+              ASSERT_OCL_SUCCESS(enqueueGemvKernel(
+                  layerInput, matrixBuffers[layer], outputBuffers[layer],
+                  shapes[layer], oclBinaries[layer].kernel, queue()));
+            }
+          },
+          queue(), warmupIterations, benchmarkIterations);
 
   std::vector<cl_half> outputHalf(shapes.back().rowCount);
   ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue(), outputBuffers.back(), CL_TRUE,
@@ -180,17 +181,18 @@ GemvBenchmarkResult GemvTestFixture::benchmarkDnnlGemvChain(
         engine, inputDesc, matrixDesc, outputDesc, attr));
   }
 
-  const ProfileResult profileResult = ProfileOpenCL(
-      [&]() {
-        for (size_t layer = 0; layer < shapes.size(); ++layer) {
-          const std::unordered_map<int, dnnl::memory> arguments = {
-              {DNNL_ARG_SRC, inputMemories[layer]},
-              {DNNL_ARG_WEIGHTS, matrixMemories[layer]},
-              {DNNL_ARG_DST, outputMemories[layer]}};
-          gemvs[layer].execute(stream, arguments);
-        }
-      },
-      queue(), warmupIterations, benchmarkIterations);
+  const ProfileResult profileResult =
+      ProfileOpenCL<CLEAR_CACHE_BEFORE_BENCHMARK>(
+          [&]() {
+            for (size_t layer = 0; layer < shapes.size(); ++layer) {
+              const std::unordered_map<int, dnnl::memory> arguments = {
+                  {DNNL_ARG_SRC, inputMemories[layer]},
+                  {DNNL_ARG_WEIGHTS, matrixMemories[layer]},
+                  {DNNL_ARG_DST, outputMemories[layer]}};
+              gemvs[layer].execute(stream, arguments);
+            }
+          },
+          queue(), warmupIterations, benchmarkIterations);
 
   std::vector<cl_half> outputHalf(shapes.back().rowCount);
   ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(queue(), outputBuffers.back(), CL_TRUE,
