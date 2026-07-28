@@ -207,18 +207,16 @@ def native_worker(args) -> list[dict]:
             lat.append((time.perf_counter() - t) * 1e3)
             past += 1
 
-        # Real greedy generation (only when a custom prompt is given) so the
-        # user can see the text the model actually produces. Uses a fresh
-        # request so the fixed-token benchmark above never pollutes it.
-        text_out = None
-        if getattr(args, "prompt", None):
-            text_out = native_generate_text(compiled, tokenizer, ids, prompt_len,
-                                            is_mk, args.max_new_tokens, keep_alive)
+        # Greedy-generate real output for output similarity comparison.
+        # Uses a fresh request so the timed benchmark loop above is not affected.
+        text_out = native_generate_text(compiled, tokenizer, ids, prompt_len,
+                                        is_mk, args.max_new_tokens, keep_alive)
 
         results.append({
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
             "prefill_ms": prefill_ms,
+            "n_tok": args.decode_iters,
             "decode": stats(lat),
             "argmax": next_id,
             "logits": logits.tolist(),
@@ -275,7 +273,6 @@ def optimum_worker(args) -> list[dict]:
         out = model.generate(
             **model_inputs,
             max_new_tokens=n_new,
-            min_new_tokens=n_new,
             do_sample=False,
             num_beams=1,
         )
@@ -305,10 +302,13 @@ def optimum_worker(args) -> list[dict]:
 
         ttft_mean = statistics.mean(ttft)
         full_mean = statistics.mean(full)
-        n_decode = args.max_new_tokens - 1
-        decode_total = max(full_mean - ttft_mean, 1e-6)
-        per_tok_ms = decode_total / max(n_decode, 1)
         out_ids = last_out[0][prompt_len:].tolist()
+        actual_n_tok = len(out_ids)
+        # TTFT measures 1-token generation; remaining (actual_n_tok - 1) tokens
+        # are decode steps. Guard against degenerate short outputs.
+        n_decode = max(actual_n_tok - 1, 1)
+        decode_total = max(full_mean - ttft_mean, 1e-6)
+        per_tok_ms = decode_total / n_decode
         argmax = int(out_ids[0]) if out_ids else -1
         gen_text = tokenizer.decode(out_ids, skip_special_tokens=True)
 
@@ -316,6 +316,7 @@ def optimum_worker(args) -> list[dict]:
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
             "prefill_ms": ttft_mean,
+            "n_tok": actual_n_tok,
             "decode": {
                 "mean": per_tok_ms,
                 "median": per_tok_ms,
@@ -349,7 +350,6 @@ def genai_worker(args) -> list[dict]:
 
     cfg = ov_genai.GenerationConfig()
     cfg.max_new_tokens = args.max_new_tokens
-    cfg.min_new_tokens = args.max_new_tokens
     cfg.do_sample = False
     cfg.num_beams = 1
 
@@ -372,16 +372,19 @@ def genai_worker(args) -> list[dict]:
             gen_text = res.texts[0] if getattr(res, "texts", None) else str(res)
 
         tpot_mean = statistics.mean(tpot_ms)
+        # Count actual output tokens from the last generation by re-tokenizing.
+        actual_n_tok = len(tokenizer.encode(gen_text, add_special_tokens=False)) if gen_text else args.max_new_tokens
         results.append({
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
             "prefill_ms": statistics.mean(ttft_ms),
+            "n_tok": actual_n_tok,
             "decode": {
                 "mean": tpot_mean,
                 "median": tpot_mean,
                 "tok_s": 1000.0 / tpot_mean,
                 "throughput_tok_s": statistics.mean(tput),
-                "count": args.max_new_tokens,
+                "count": actual_n_tok,
             },
             "device": dev_name,
             "compile_s": compile_s,
@@ -417,8 +420,6 @@ def spawn(framework: str, path: str, args) -> list[dict]:
     ]
     if getattr(args, "prompt", None):
         cmd += ["--prompt", args.prompt]
-    if getattr(args, "show_output", False):
-        cmd += ["--show-output"]
     out = subprocess.run(cmd, env=worker_env(framework, path), capture_output=True, text=True)
     if out.returncode != 0:
         sys.stdout.write(out.stdout)
@@ -436,7 +437,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 def report_framework(framework: str, base: list[dict], mega: list[dict],
-                     max_new_tokens: int, show_output: bool = False) -> None:
+                     max_new_tokens: int) -> None:
     print(f"\n{'=' * 92}\n {framework.upper()}\n{'=' * 92}")
     genai_note = "  [baseline=PA, megakernel=SDPA+MK]" if framework == "genai" else ""
     header = (f"  {'prompt':<8} {'ctx':>5} | {'base pf ms':>10} {'mega pf ms':>10} | "
@@ -460,14 +461,12 @@ def report_framework(framework: str, base: list[dict], mega: list[dict],
         print(f"  {b['prompt']:<8} {b['prompt_len']:>5} | {bpf:>10.3f} {mpf:>10.3f} | "
               f"{bd:>14.3f} {md:>14.3f} | "
               f"{sp:>5.2f}x {e2e:>9.2f}x{extra}")
-    # Generated text — only printed when --show-output is set.
-    if show_output and any(x.get("text") for x in base + mega):
-        print("  Generated text:")
+    # Print generated text from both paths so outputs can be compared directly.
+    if any(x.get("text") for x in base + mega):
+        print("  Generated text (baseline vs megakernel):")
         for b, m in zip(base, mega):
-            if b.get("text"):
-                print(f"    [{b['prompt']}] baseline  : {b['text'].strip()!r}")
-            if m.get("text"):
-                print(f"    [{m['prompt']}] megakernel: {m['text'].strip()!r}")
+            print(f"    [{b['prompt']}] baseline  : {(b.get('text') or '').strip()!r}")
+            print(f"    [{b['prompt']}] megakernel: {(m.get('text') or '').strip()!r}")
 
 
 def main() -> None:
@@ -489,8 +488,6 @@ def main() -> None:
     ap.add_argument("--prompt", default=None,
                     help="Run a single custom prompt (e.g. --prompt \"What's my name?\") "
                          "and print the text the model generates. Overrides the built-in prompts.")
-    ap.add_argument("--show-output", action="store_true",
-                    help="Print the generated text produced by each framework/path.")
     # internal
     ap.add_argument("--worker", choices=list(WORKERS), default=None, help=argparse.SUPPRESS)
     ap.add_argument("--path", choices=("baseline", "megakernel"), default=None, help=argparse.SUPPRESS)
@@ -517,35 +514,56 @@ def main() -> None:
 
     for fw in frameworks:
         report_framework(fw, all_results[fw]["baseline"], all_results[fw]["megakernel"],
-                         args.max_new_tokens, show_output=args.show_output)
+                         args.max_new_tokens)
 
-    n_dec = max(args.max_new_tokens - 1, 0)
-    print(f"\n{'=' * 92}")
-    print(f" SUMMARY  (MegaKernel vs baseline, {args.max_new_tokens} new tokens)")
-    print(f" {'framework':<10} {'prompt':<8} {'ctx':>5}"
-          f" | {'base pf':>9} {'mega pf':>9}"
-          f" | {'base dec':>9} {'mega dec':>9}"
-          f"  (mean ms/tok)"
-          f" | {'base tok/s':>9} {'mega tok/s':>10}"
-          f" | {'dec x':>6} {'e2e x':>6}")
-    print(" " + "-" * 90)
+    h0 = f" {'framework':<10} {'prompt':<8} {'in_tok':>6} {'gen b/m':>9}"
+    h1 = f" | {'ttft_ms':>8} {'ms/tok':>8} {'decode_ms':>10} {'total_ms':>10}"   # baseline
+    h2 = f" | {'ttft_ms':>8} {'ms/tok':>8} {'decode_ms':>10} {'total_ms':>10}"   # megakernel
+    h3 = f" | {'decode_x':>8} {'e2e_x':>7}"
+    W = len(h0) + len(h1) + len(h2) + len(h3) + 2
+
+    print(f"\n{'=' * W}")
+    print(" SUMMARY  (MegaKernel vs baseline, real measured times)")
+    # Sub-header labels for the two time blocks
+    bl = len(h1)
+    base_lbl = "baseline".center(bl - 3)
+    mega_lbl = "megakernel".center(bl - 3)
+    print(f"{' ' * len(h0)} | {base_lbl} | {mega_lbl} |")
+    print(h0 + h1 + h2 + h3)
+    print(" " + "-" * (W - 1))
     for fw in frameworks:
         base, mega = all_results[fw]["baseline"], all_results[fw]["megakernel"]
         for b, m in zip(base, mega):
-            bd = b["decode"]["mean"]
-            md = m["decode"]["mean"]
-            bpf = b.get("prefill_ms", float("nan"))
+            bd  = b["decode"]["mean"]   # measured mean per-token decode latency (ms)
+            md  = m["decode"]["mean"]
+            bpf = b.get("prefill_ms", float("nan"))   # prefill / time-to-first-token (ms)
             mpf = m.get("prefill_ms", float("nan"))
-            dec_x = bd / md if md else float("nan")
-            base_e2e = bpf + n_dec * bd
-            mega_e2e = mpf + n_dec * md
-            e2e_x = base_e2e / mega_e2e if mega_e2e else float("nan")
-            print(f" {fw:<10} {b['prompt']:<8} {b['prompt_len']:>5}"
-                  f" | {bpf:>9.3f} {mpf:>9.3f}"
-                  f" | {bd:>9.3f} {md:>9.3f}"
-                  f" | {b['decode']['tok_s']:>9.1f} {m['decode']['tok_s']:>10.1f}"
-                  f" | {dec_x:>5.2f}x {e2e_x:>5.2f}x")
-    print(f"{'=' * 92}")
+            b_n_tok = b.get("n_tok", b["decode"]["count"])   # actual tokens generated
+            m_n_tok = m.get("n_tok", m["decode"]["count"])
+            # Real total decode time over the actual number of tokens each path
+            # generated (the two paths may generate different counts).
+            b_dec_ms = max(b_n_tok - 1, 0) * bd
+            m_dec_ms = max(m_n_tok - 1, 0) * md
+            base_tot = bpf + b_dec_ms
+            mega_tot = mpf + m_dec_ms
+            dec_x  = bd / md if md else float("nan")
+            e2e_x  = base_tot / mega_tot if mega_tot else float("nan")
+            gen_bm = f"{b_n_tok}/{m_n_tok}"
+            print(f" {fw:<10} {b['prompt']:<8} {b['prompt_len']:>6} {gen_bm:>9}"
+                  f" | {bpf:>8.1f} {bd:>8.3f} {b_dec_ms:>10.1f} {base_tot:>10.1f}"
+                  f" | {mpf:>8.1f} {md:>8.3f} {m_dec_ms:>10.1f} {mega_tot:>10.1f}"
+                  f" | {dec_x:>7.2f}x {e2e_x:>6.2f}x")
+    print(f"{'=' * W}")
+    print(" Legend:")
+    print("   in_tok     input (prompt) token count")
+    print("   gen b/m    tokens actually generated (baseline/megakernel); may differ")
+    print("              because greedy decoding can stop at different points")
+    print("   ttft_ms    prefill latency = time to first token (ms)")
+    print("   ms/tok     measured mean per-token decode latency (ms/token)")
+    print("   decode_ms  real total decode time = (gen - 1) * ms/tok")
+    print("   total_ms   ttft_ms + decode_ms (real end-to-end for the tokens generated)")
+    print("   decode_x   per-token decode speedup (baseline ms/tok / megakernel ms/tok)")
+    print("   e2e_x      end-to-end speedup (baseline total_ms / megakernel total_ms)")
 
 
 if __name__ == "__main__":
