@@ -8,7 +8,7 @@ namespace {
 
 static const std::vector<ocltest::GemvShape> gemvShapes = {
     {1024, 2048, 32},
-    {3072, 1024, 20},
+    {3072, 1024, 32},
     {1024, 3072, 32},
 };
 

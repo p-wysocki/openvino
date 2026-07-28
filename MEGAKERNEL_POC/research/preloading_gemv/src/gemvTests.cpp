@@ -43,9 +43,9 @@ class PreloadingTest : public ocltest::GemvTestFixture {
     RunGemvBenchmark(rows, columns, rowsPerBlock);      \
   }
 
-RUN_GEMV_BENCHMARK(2048, 1024, 28)
+RUN_GEMV_BENCHMARK(2048, 1024, 32)
 RUN_GEMV_BENCHMARK(1024, 2048, 32)
 RUN_GEMV_BENCHMARK(1024, 3072, 32)
-RUN_GEMV_BENCHMARK(3072, 1024, 20)
+RUN_GEMV_BENCHMARK(3072, 1024, 32)
 
 }  // namespace
