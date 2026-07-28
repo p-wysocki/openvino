@@ -19,9 +19,9 @@ struct ProfileResult {
 // execution time in microseconds.
 // If CLEAR_CACHE is true, the L3 cache will be saturated before each kernel
 // submission to minimize the effect of caching on the profiling results.
-template <typename T, bool CLEAR_CACHE = true>
-ProfileResult ProfileOpenCL(const T& submitFunc, cl_command_queue queue,
-                            size_t warmupIterations,
+template <bool CLEAR_CACHE, typename TSUBMIT_FUNC>
+ProfileResult ProfileOpenCL(const TSUBMIT_FUNC& submitFunc,
+                            cl_command_queue queue, size_t warmupIterations,
                             size_t benchmarkIterations);
 
 /////////////////////////////////////////////////////////////////////
@@ -161,9 +161,9 @@ ProfileResult ProfileOpenCL_Impl(const T& submitFunc, cl_command_queue queue,
 }
 
 ////////////////////////////////////////////////////////////////////
-template <typename T, bool CLEAR_CACHE>
-ProfileResult ProfileOpenCL(const T& submitFunc, cl_command_queue queue,
-                            size_t warmupIterations,
+template <bool CLEAR_CACHE, typename TSUBMIT_FUNC>
+ProfileResult ProfileOpenCL(const TSUBMIT_FUNC& submitFunc,
+                            cl_command_queue queue, size_t warmupIterations,
                             size_t benchmarkIterations) {
   if (!CLEAR_CACHE) {
     return ProfileOpenCL_Impl(submitFunc, queue, warmupIterations,

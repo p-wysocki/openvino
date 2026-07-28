@@ -7,6 +7,11 @@
 #define PHASE_TILE_ROWS 4
 #define COMPUTE_WARPS 4
 
+// If this is not true, the kernel will fail with out-of-bounds memory access
+// for now.
+_Static_assert(MATRIX_ROWS % BLOCK_TILE_ROWS == 0,
+               "MATRIX_ROWS must be divisible by BLOCK_TILE_ROWS");
+
 #define GemvBlock_MATRIX_ROWS MATRIX_ROWS
 #define GemvBlock_MATRIX_COLUMNS MATRIX_COLUMNS
 #define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
@@ -19,6 +24,8 @@ __attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(WARP_SIZE))) __kernel void
 gemv(__global const half* restrict matrix, __global const half* restrict vector,
      __global half* restrict output) {
+  _Static_assert(GemvBlockSLMNeededSizeInBytes <= 64 * 1024,
+                 "SLM size exceeds 64KB limit");
   __local char slmBuffer[GemvBlockSLMNeededSizeInBytes];
 
   GemvBlock(matrix, vector, output, slmBuffer);
