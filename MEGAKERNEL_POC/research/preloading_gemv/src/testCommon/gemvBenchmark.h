@@ -9,8 +9,8 @@
 
 namespace ocltest {
 
-static const std::string KERNEL_SOURCE_PATH = OPENCL_KERNEL_SOURCE_PATH;
-static constexpr const char* KERNEL_SOURCE_FILE_NAME = "gemv_opt.cl";
+static const std::string KERNEL_SOURCE_PATH = std::string(OPENCL_KERNEL_SOURCE_PATH)+"/gemv_opt/";
+static constexpr const char* KERNEL_SOURCE_FILE_NAME = "gemvOptKernel.cl";
 static constexpr size_t WARMUP_ITERATIONS = 100;
 static constexpr size_t BENCHMARK_ITERATIONS = 1000;
 static constexpr float ABS_ERROR = 2e-2f;
