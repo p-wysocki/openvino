@@ -12,9 +12,9 @@ static const std::vector<ocltest::GemvShape> gemvShapes = {
     {1024, 3072, 32},
 };
 
-class MultipleGemvTest : public ocltest::GemvTestFixture {};
+class ChainGemvTests : public ocltest::GemvTestFixture {};
 
-TEST_F(MultipleGemvTest, ThreeGemvChain) {
+TEST_F(ChainGemvTests, ThreeGemvChain) {
   std::vector<std::vector<float>> matrices(gemvShapes.size());
   for (size_t layer = 0; layer < gemvShapes.size(); ++layer) {
     matrices[layer] = utils::createRandomBuffer(
