@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 || ! "$1" =~ ^[1-9][0-9]*$ ]]; then
-	echo "Usage: $0 <attention_mask_size>" >&2
+attention_mask_size=1
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+model_path="${script_dir}/python/qwen3-0.6b-openvino-ir/openvino_model.xml"
+benchmark_app_path="/home/REPO/openvino/openvino/bin/intel64/Release/benchmark_app"
+
+if [[ ! -x "${benchmark_app_path}" ]]; then
+	echo "Error: benchmark_app executable not found or not executable: ${benchmark_app_path} -> fix hardcoded path in the script!" >&2
 	exit 1
 fi
 
-attention_mask_size="$1"
 input_dir="$(mktemp -d)"
 trap 'rm -rf "${input_dir}"' EXIT
 
@@ -24,8 +28,8 @@ np.save(input_dir / "position_ids.npy", np.array([[attention_mask_size - 1]], dt
 np.save(input_dir / "beam_idx.npy", np.array([0], dtype=np.int32))
 PY
 
-ZE_AFFINITY_MASK=0 /home/REPO/openvino/openvino/bin/intel64/Release/benchmark_app \
-	-m /home/REPO/MODELS/Qwen3-06B/fp16/openvino_model.xml \
+ZE_AFFINITY_MASK=0 "${benchmark_app_path}" \
+	-m "${model_path}" \
 	-d GPU \
 	-hint latency \
 	-api sync \
@@ -36,5 +40,4 @@ ZE_AFFINITY_MASK=0 /home/REPO/openvino/openvino/bin/intel64/Release/benchmark_ap
 	"input_ids:${input_dir}/input_ids.npy" \
 	"attention_mask:${input_dir}/attention_mask.npy" \
 	"position_ids:${input_dir}/position_ids.npy" \
-	"beam_idx:${input_dir}/beam_idx.npy" \
-	-pc
+	"beam_idx:${input_dir}/beam_idx.npy"
