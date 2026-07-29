@@ -9,8 +9,8 @@
 
 namespace {
 
-constexpr size_t WORKERS = 6;
-constexpr size_t THREADS = 8;
+constexpr size_t WORKERS = 48;
+constexpr size_t THREADS = 512;
 
 #define CHECK_OCL_SUCCESS(stmt) \
   {                             \
@@ -129,22 +129,22 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), binary.kernel, 1,
                                               nullptr, &globalWorkSize,
                                               &THREADS, 0, nullptr, nullptr));
+
+    ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(
+        queue(), taskExecutedGPU, CL_TRUE, 0, taskCount * sizeof(int),
+        taskExecutedHost.data(), 0, nullptr, nullptr));
+
+    for (int i = 0; i < taskExecutedHost.size(); ++i) {
+      std::cout << "Task with id <" << i << "> was executed by "
+                << taskExecutedHost[i] << std::endl;
+      ASSERT_GE(taskExecutedHost[i], 0);
+    }
   }
-  
-  ASSERT_OCL_SUCCESS(clEnqueueReadBuffer(
-      queue(), taskExecutedGPU, CL_TRUE, 0, taskCount * sizeof(int),
-      taskExecutedHost.data(), 0, nullptr, nullptr));
 
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskExecutedGPU));
   ASSERT_OCL_SUCCESS(HostReleaseTaskSystem(taskManager, deviceId(), context()));
   releaseOCLBinary(binary);
-
-  for (int i = 0; i < taskExecutedHost.size(); ++i) {
-    std::cout << "Task with id <" << i << "> was executed by "
-              << taskExecutedHost[i] << std::endl;
-    ASSERT_GE(taskExecutedHost[i], 0);
-  }
 }
 
 }  // namespace
