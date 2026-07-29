@@ -239,7 +239,7 @@ OclTestFixture::OCLBinary OclTestFixture::createProgramAndKernel(
                                                  &sourceSize, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  const std::string defaultBuildOptions = "-Werror";
+  const std::string defaultBuildOptions = "-Werror -cl-std=CL3.0";
   const std::string finalBuildOptions =
       defaultBuildOptions + " " + buildOptions;
   status = clBuildProgram(program, 1, &device, finalBuildOptions.c_str(),
