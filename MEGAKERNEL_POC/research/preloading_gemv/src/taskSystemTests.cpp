@@ -5,30 +5,20 @@
 #include <vector>
 
 #include "../../common/oclTestFixture.h"
+#include "ocl/taskSystem/taskManager.h"
 
 namespace {
 
+constexpr size_t WORKERS = 6;
+constexpr size_t THREADS = 8;
+
 class TaskSystemTests : public ocltest::OclTestFixture {};
-
-struct HostTaskDesc {
-  const void* weights;
-  const void* input;
-  void* output;
-  int id;
-  int taskType;
-};
-
-struct HostTaskManager {
-  const HostTaskDesc* array;
-  int* atomicSlotId;
-};
 
 const std::string TASK_SYSTEM_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "/taskSystem/";
 
 TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   constexpr size_t taskCount = 100;
-  constexpr size_t workGroupSize = 8;
 
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_KERNEL_PATH + "taskManagerTest.cl", "taskManagerTest",
@@ -51,9 +41,9 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   ASSERT_NE(setKernelArgMemPointer, nullptr);
 
   cl_int status = CL_SUCCESS;
-  auto* tasks = static_cast<HostTaskDesc*>(sharedMemAlloc(
-      context(), deviceId(), nullptr, taskCount * sizeof(HostTaskDesc),
-      alignof(HostTaskDesc), &status));
+  auto* tasks = static_cast<TaskDesc*>(
+      sharedMemAlloc(context(), deviceId(), nullptr,
+                     taskCount * sizeof(TaskDesc), alignof(TaskDesc), &status));
   ASSERT_OCL_SUCCESS(status);
   auto* atomicSlotId = static_cast<int*>(sharedMemAlloc(
       context(), deviceId(), nullptr, sizeof(int), alignof(int), &status));
@@ -64,11 +54,16 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   ASSERT_OCL_SUCCESS(status);
 
   for (size_t index = 0; index < taskCount; ++index) {
-    tasks[index] = {nullptr, nullptr, nullptr, static_cast<int>(index), 0};
+    tasks[index].input = nullptr;
+    tasks[index].output = nullptr;
+    tasks[index].weights = nullptr;
+    tasks[index].id = static_cast<int>(index);
+    tasks[index].taskType = GEMV;
   }
+
   *atomicSlotId = 0;
   std::fill(claimedTaskIds, claimedTaskIds + taskCount, -1);
-  HostTaskManager taskManager = {tasks, atomicSlotId};
+  TaskManager taskManager = {tasks, static_cast<int>(taskCount), atomicSlotId};
   cl_mem taskManagerBuffer =
       clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                      sizeof(taskManager), &taskManager, &status);
@@ -81,17 +76,14 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   ASSERT_OCL_SUCCESS(
       clSetKernelExecInfo(binary.kernel, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL,
                           sizeof(indirectUsmPointers), indirectUsmPointers));
-  const size_t globalWorkSize = taskCount * workGroupSize;
+  const size_t globalWorkSize = WORKERS * THREADS;
   ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), binary.kernel, 1, nullptr,
-                                            &globalWorkSize, &workGroupSize, 0,
+                                            &globalWorkSize, &THREADS, 0,
                                             nullptr, nullptr));
   ASSERT_OCL_SUCCESS(clFinish(queue()));
 
   const int claimedTaskCount = *atomicSlotId;
   std::vector<int> actualTaskIds(claimedTaskIds, claimedTaskIds + taskCount);
-  std::sort(actualTaskIds.begin(), actualTaskIds.end());
-  std::vector<int> expectedTaskIds(taskCount);
-  std::iota(expectedTaskIds.begin(), expectedTaskIds.end(), 0);
 
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));
   ASSERT_OCL_SUCCESS(memFree(context(), claimedTaskIds));
@@ -99,8 +91,11 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   ASSERT_OCL_SUCCESS(memFree(context(), tasks));
   releaseOCLBinary(binary);
 
-  EXPECT_EQ(claimedTaskCount, taskCount);
-  EXPECT_EQ(actualTaskIds, expectedTaskIds);
+  for (int i = 0; i < actualTaskIds.size(); ++i) {
+    std::cout << "Task with id <" << i << "> was executed by "
+              << actualTaskIds[i] << std::endl;
+    ASSERT_GE(actualTaskIds[i], 0);
+  }
 }
 
 }  // namespace
