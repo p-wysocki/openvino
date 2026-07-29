@@ -16,18 +16,18 @@
 // 9. Task workers are guaranteed to be executed in parallel, otherwise deadLock
 // may occur.
 typedef struct TaskManager {
-  GLOBAL_DEVICE_PTR const TaskDesc* array;
-  const int arraySize;
-  volatile GLOBAL_DEVICE_PTR int* atomicSlotId;
+  GLOBAL_DEVICE_PTR const TaskDesc* workQueue;
+  GLOBAL_DEVICE_PTR int* processedTaskCount;
+  int workQueueSize;
 } TaskManager;
 
 #ifdef DEVICE_COMPILATION
 static inline __global const TaskDesc* GetNextTask(
     __constant const TaskManager* taskManager) {
-  const int slotId = atomic_inc(taskManager->atomicSlotId);
-  if (slotId >= taskManager->arraySize) {
+  const int slotId = atomic_inc(taskManager->processedTaskCount);
+  if (slotId >= taskManager->workQueueSize) {
     return NULL;
   }
-  return taskManager->array + slotId;
+  return taskManager->workQueue + slotId;
 }
 #endif
