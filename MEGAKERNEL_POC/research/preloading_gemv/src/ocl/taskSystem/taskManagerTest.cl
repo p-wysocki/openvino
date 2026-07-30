@@ -11,6 +11,7 @@ __attribute__((intel_reqd_sub_group_size(32))) __kernel void taskManagerTest(
     }
   }
 
+  // This is needed to clear state of task manager for next iteration.
   GlobalBarrier(taskManager);
 
   if (get_global_id(0) == 0) {
