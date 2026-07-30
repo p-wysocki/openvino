@@ -3,9 +3,16 @@
 void inline ExecuteTask(__global const TaskDesc* task, __global int* taskIds) {
   switch (task->type) {
     case 0: {
-      const TestTask* testTask = (TestTask*)(task->payload);
-      taskIds[testTask->id] = get_group_id(0);
-
+      const __global TestTask* testTask =
+          (const __global TestTask*)task->payload;
+      __global int* output = testTask->output;
+      if (output != taskIds) {
+        printf(
+            "Error: output pointer mismatch for task %d, output=%p, "
+            "taskIds=%p\n",
+            testTask->id, output, taskIds);
+      }
+      output[testTask->id] = get_group_id(0);
       break;
     }
     default:
