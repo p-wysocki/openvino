@@ -1,11 +1,11 @@
-"""End-to-end MegaKernel decode performance measurement (two-model PoC).
+"""End-to-end MegaKernel decode performance measurement.
 
 Usage
 -----
     source /opt/home/pwysocki/openvino_dist/setupvars.sh
     /opt/home/pwysocki/.venv/bin/python e2e_performance_measurement.py
     ... --device GPU.1 --frameworks native optimum genai
-    ... --decode-iters 200 --max-new-tokens 128
+    ... --tokens 200
     ... --only-framework native
 """
 
@@ -150,74 +150,53 @@ def native_worker(args) -> list[dict]:
     compile_s = time.perf_counter() - t0
 
     tokenizer = load_tokenizer(Path(args.model_dir))
-    is_mk = args.path == "megakernel"
 
-    # The MegaKernel primitive keeps an internal KV counter (cur_len_) per impl
-    # instance and ignores position_ids, so each prompt must run on a fresh impl
-    # starting at cur_len_=0. We therefore (a) never reuse a request for the
-    # MegaKernel path and (b) keep every created request alive for the duration
-    # of the worker so the plugin cannot recycle a stale (already-advanced) impl.
-    keep_alive = []
-
-    if not is_mk:
-        # Baseline uses OpenVINO's own KV state (reset on every fresh request), so
-        # a one-time throwaway warmup safely compiles kernels and keeps the first
-        # measured prefill from paying the lazy-compilation cost.
-        warm = compiled.create_infer_request()
-        warm.infer(prefill_inputs(np.ones((BATCH, 8), np.int64)))
-        for pos in range(8, 12):
-            warm.infer(single_token_inputs(1, pos))
-        keep_alive.append(warm)
+    warm = compiled.create_infer_request()
+    warm.infer(prefill_inputs(np.ones((BATCH, 8), np.int64)))
+    for pos in range(8, 12):
+        warm.infer(single_token_inputs(1, pos))
 
     results = []
     for prompt in get_prompts(args):
         ids = prompt_token_ids(tokenizer, prompt["text"])
         prompt_len = int(ids.shape[1])
         req = compiled.create_infer_request()
-        keep_alive.append(req)
 
-        prefill_ms = float("nan")
-        if is_mk:
-            # Two-model PoC: the MegaKernel model cannot run a real multi-token
-            # prefill (DECODE_ONLY refuses S>1), so it "prefills" by growing its
-            # internal KV cache one token at a time. Time that priming loop so it
-            # is reported as the MegaKernel prefill cost (it is NOT free).
-            t = time.perf_counter()
-            for pos in range(prompt_len):
-                req.infer(single_token_inputs(int(ids[0, pos]), pos))
-            prefill_ms = (time.perf_counter() - t) * 1e3
-            res = req.results
-        else:
-            t = time.perf_counter()
-            res = req.infer(prefill_inputs(ids))
-            prefill_ms = (time.perf_counter() - t) * 1e3
+        t = time.perf_counter()
+        res = req.infer(prefill_inputs(ids))
+        prefill_ms = (time.perf_counter() - t) * 1e3
 
         logits = np.array(res[0])[0, -1, :].astype(np.float32)
         next_id = int(logits.argmax())
 
         past = prompt_len
-        for _ in range(args.warmup):
+        target_ctx = max(args.decode_ctx, prompt_len)
+        while past < target_ctx:
             req.infer(single_token_inputs(next_id, past))
             past += 1
+
+        decode_pos = past
+        decode_input = single_token_inputs(next_id, decode_pos)
+        for _ in range(args.warmup):
+            req.infer(decode_input)
         lat = []
-        for _ in range(args.decode_iters):
-            inp = single_token_inputs(next_id, past)
+        for _ in range(args.tokens):
             t = time.perf_counter()
-            req.infer(inp)
+            req.infer(decode_input)
             lat.append((time.perf_counter() - t) * 1e3)
-            past += 1
 
         # Greedy-generate real output for output similarity comparison.
         # Uses a fresh request so the timed benchmark loop above is not affected.
         text_out = native_generate_text(compiled, tokenizer, ids, prompt_len,
-                                        is_mk, args.max_new_tokens, keep_alive)
+                                        args.tokens)
 
         results.append({
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
             "prefill_ms": prefill_ms,
-            "n_tok": args.decode_iters,
+            "n_tok": args.tokens,
             "decode": stats(lat),
+            "decode_ctx": decode_pos,
             "argmax": next_id,
             "logits": logits.tolist(),
             "device": dev_name,
@@ -228,21 +207,15 @@ def native_worker(args) -> list[dict]:
 
 
 def native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
-                         is_mk: bool, max_new_tokens: int, keep_alive: list) -> str:
+                         n_tokens: int) -> str:
     """Greedy-decode real tokens from a fresh request and detokenize."""
     gen_req = compiled.create_infer_request()
-    keep_alive.append(gen_req)
-    r = None
-    if is_mk:
-        for pos in range(prompt_len):
-            r = gen_req.infer(single_token_inputs(int(ids[0, pos]), pos))
-    else:
-        r = gen_req.infer(prefill_inputs(ids))
+    r = gen_req.infer(prefill_inputs(ids))
     cur = int(np.array(r[0])[0, -1, :].argmax())
     pos = prompt_len
     eos = tokenizer.eos_token_id
     gen_ids: list[int] = []
-    for _ in range(max_new_tokens):
+    for _ in range(n_tokens):
         gen_ids.append(cur)
         if eos is not None and cur == eos:
             break
@@ -273,6 +246,7 @@ def optimum_worker(args) -> list[dict]:
         out = model.generate(
             **model_inputs,
             max_new_tokens=n_new,
+            min_new_tokens=n_new,
             do_sample=False,
             num_beams=1,
         )
@@ -286,18 +260,18 @@ def optimum_worker(args) -> list[dict]:
 
         # warmup
         for _ in range(max(1, args.gen_warmup)):
-            gen(model_inputs, args.max_new_tokens)
+            gen(model_inputs, args.tokens)
 
         # TTFT (prefill only) = generate exactly one new token.
         ttft = []
         for _ in range(args.gen_iters):
             ms, _ = gen(model_inputs, 1)
             ttft.append(ms)
-        # Full generation of max_new_tokens.
+        # Full generation of args.tokens tokens.
         full = []
         last_out = None
         for _ in range(args.gen_iters):
-            ms, last_out = gen(model_inputs, args.max_new_tokens)
+            ms, last_out = gen(model_inputs, args.tokens)
             full.append(ms)
 
         ttft_mean = statistics.mean(ttft)
@@ -349,7 +323,8 @@ def genai_worker(args) -> list[dict]:
     dev_name = ov.Core().get_property(args.device, "FULL_DEVICE_NAME")
 
     cfg = ov_genai.GenerationConfig()
-    cfg.max_new_tokens = args.max_new_tokens
+    cfg.max_new_tokens = args.tokens
+    cfg.min_new_tokens = args.tokens
     cfg.do_sample = False
     cfg.num_beams = 1
 
@@ -373,7 +348,7 @@ def genai_worker(args) -> list[dict]:
 
         tpot_mean = statistics.mean(tpot_ms)
         # Count actual output tokens from the last generation by re-tokenizing.
-        actual_n_tok = len(tokenizer.encode(gen_text, add_special_tokens=False)) if gen_text else args.max_new_tokens
+        actual_n_tok = len(tokenizer.encode(gen_text, add_special_tokens=False)) if gen_text else args.tokens
         results.append({
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
@@ -402,11 +377,6 @@ def worker_env(framework: str, path: str) -> dict:
         env["OV_MEGAKERNEL_DISABLE"] = "1"
     else:
         env["OV_MEGAKERNEL_DISABLE"] = "0"
-        # Only the native manual loop is strictly decode-only. Optimum/GenAI run
-        # a real (multi-token) prefill inside generate(), so the guard must stay
-        # off there — their decode is isolated via TPOT / full-minus-TTFT instead.
-        if framework == "native":
-            env["OV_MEGAKERNEL_DECODE_ONLY"] = "1"
     return env
 
 
@@ -414,9 +384,9 @@ def spawn(framework: str, path: str, args) -> list[dict]:
     cmd = [
         sys.executable, __file__, "--worker", framework, "--path", path,
         "--model-dir", str(args.model_dir), "--device", args.device,
-        "--warmup", str(args.warmup), "--decode-iters", str(args.decode_iters),
+        "--warmup", str(args.warmup), "--tokens", str(args.tokens),
+        "--decode-ctx", str(args.decode_ctx),
         "--gen-warmup", str(args.gen_warmup), "--gen-iters", str(args.gen_iters),
-        "--max-new-tokens", str(args.max_new_tokens),
     ]
     if getattr(args, "prompt", None):
         cmd += ["--prompt", args.prompt]
@@ -437,12 +407,13 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 def report_framework(framework: str, base: list[dict], mega: list[dict],
-                     max_new_tokens: int) -> None:
+                     n_tokens: int) -> None:
     print(f"\n{'=' * 92}\n {framework.upper()}\n{'=' * 92}")
     genai_note = "  [baseline=PA, megakernel=SDPA+MK]" if framework == "genai" else ""
+    # decode_x is the primary metric; pf x / e2e x are reference only.
     header = (f"  {'prompt':<8} {'ctx':>5} | {'base pf ms':>10} {'mega pf ms':>10} | "
               f"{'base dec(mean)':>14} {'mega dec(mean)':>14} | "
-              f"{'dec x':>6} {f'e2e x@{max_new_tokens}':>10}{genai_note}")
+              f"{'dec x':>6} {'pf x':>6} {f'e2e x@{n_tokens}':>10}{genai_note}")
     print(header)
     print("  " + "-" * (len(header) - 2))
     for b, m in zip(base, mega):
@@ -451,7 +422,8 @@ def report_framework(framework: str, base: list[dict], mega: list[dict],
         sp = bd / md if md else float("nan")
         bpf = b.get("prefill_ms", float("nan"))
         mpf = m.get("prefill_ms", float("nan"))
-        n_dec = max(max_new_tokens - 1, 0)
+        pf = bpf / mpf if mpf else float("nan")
+        n_dec = max(n_tokens - 1, 0)
         base_e2e = bpf + n_dec * bd
         mega_e2e = mpf + n_dec * md
         e2e = base_e2e / mega_e2e if mega_e2e else float("nan")
@@ -460,7 +432,7 @@ def report_framework(framework: str, base: list[dict], mega: list[dict],
             extra = f"  argmatch={b['argmax'] == m['argmax']} cos={cosine(b['logits'], m['logits']):.4f}"
         print(f"  {b['prompt']:<8} {b['prompt_len']:>5} | {bpf:>10.3f} {mpf:>10.3f} | "
               f"{bd:>14.3f} {md:>14.3f} | "
-              f"{sp:>5.2f}x {e2e:>9.2f}x{extra}")
+              f"{sp:>5.2f}x {pf:>5.2f}x {e2e:>9.2f}x{extra}")
     # Print generated text from both paths so outputs can be compared directly.
     if any(x.get("text") for x in base + mega):
         print("  Generated text (baseline vs megakernel):")
@@ -478,13 +450,17 @@ def main() -> None:
                     choices=list(WORKERS))
     ap.add_argument("--only-framework", choices=list(WORKERS), default=None,
                     help="Run a single framework (overrides --frameworks).")
+    ap.add_argument("--tokens", type=int, default=150, help="tokens to generate in every framework/path")
     # native decode benchmark
-    ap.add_argument("--warmup", type=int, default=20, help="native decode warmup steps")
-    ap.add_argument("--decode-iters", type=int, default=200, help="native timed decode steps")
+    ap.add_argument("--warmup", type=int, default=5, help="native decode warmup steps")
+    ap.add_argument("--decode-ctx", type=int, default=0,
+                    help="If >0, prime every prompt forward to this KV-cache length "
+                         "before timing decode, so ms/tok is measured at the same "
+                         "context for all prompts (isolates the kernel from O(context) "
+                         "attention growth). Native path only.")
     # optimum / genai generate() benchmark
     ap.add_argument("--gen-warmup", type=int, default=1, help="generate() warmup calls")
     ap.add_argument("--gen-iters", type=int, default=3, help="generate() measured calls")
-    ap.add_argument("--max-new-tokens", type=int, default=128, help="tokens per generate() call")
     ap.add_argument("--prompt", default=None,
                     help="Run a single custom prompt (e.g. --prompt \"What's my name?\") "
                          "and print the text the model generates. Overrides the built-in prompts.")
@@ -501,9 +477,8 @@ def main() -> None:
 
     frameworks = [args.only_framework] if args.only_framework else args.frameworks
     print(f"Device: {args.device}   frameworks: {frameworks}")
-    print(f"native decode: warmup={args.warmup} iters={args.decode_iters}   "
-          f"generate: warmup={args.gen_warmup} iters={args.gen_iters} "
-          f"max_new_tokens={args.max_new_tokens}")
+    print(f"tokens={args.tokens}   native decode warmup={args.warmup}   "
+          f"generate: warmup={args.gen_warmup} iters={args.gen_iters}")
 
     all_results: dict[str, dict[str, list[dict]]] = {}
     for fw in frameworks:
@@ -514,12 +489,12 @@ def main() -> None:
 
     for fw in frameworks:
         report_framework(fw, all_results[fw]["baseline"], all_results[fw]["megakernel"],
-                         args.max_new_tokens)
+                         args.tokens)
 
-    h0 = f" {'framework':<10} {'prompt':<8} {'in_tok':>6} {'gen b/m':>9}"
+    h0 = f" {'framework':<10} {'prompt':<8} {'in_tok':>6}"
     h1 = f" | {'ttft_ms':>8} {'ms/tok':>8} {'decode_ms':>10} {'total_ms':>10}"   # baseline
     h2 = f" | {'ttft_ms':>8} {'ms/tok':>8} {'decode_ms':>10} {'total_ms':>10}"   # megakernel
-    h3 = f" | {'decode_x':>8} {'e2e_x':>7}"
+    h3 = f" | {'decode_x':>8} {'prefill_x':>9} {'e2e_x':>7}"   # decode_x = primary metric
     W = len(h0) + len(h1) + len(h2) + len(h3) + 2
 
     print(f"\n{'=' * W}")
@@ -546,25 +521,25 @@ def main() -> None:
             m_dec_ms = max(m_n_tok - 1, 0) * md
             base_tot = bpf + b_dec_ms
             mega_tot = mpf + m_dec_ms
+            pf_x   = bpf / mpf if mpf else float("nan")
             dec_x  = bd / md if md else float("nan")
             e2e_x  = base_tot / mega_tot if mega_tot else float("nan")
-            gen_bm = f"{b_n_tok}/{m_n_tok}"
-            print(f" {fw:<10} {b['prompt']:<8} {b['prompt_len']:>6} {gen_bm:>9}"
+            print(f" {fw:<10} {b['prompt']:<8} {b['prompt_len']:>6}"
                   f" | {bpf:>8.1f} {bd:>8.3f} {b_dec_ms:>10.1f} {base_tot:>10.1f}"
                   f" | {mpf:>8.1f} {md:>8.3f} {m_dec_ms:>10.1f} {mega_tot:>10.1f}"
-                  f" | {dec_x:>7.2f}x {e2e_x:>6.2f}x")
+                  f" | {dec_x:>7.2f}x {pf_x:>8.2f}x {e2e_x:>6.2f}x")
     print(f"{'=' * W}")
     print(" Legend:")
     print("   in_tok     input (prompt) token count")
-    print("   gen b/m    tokens actually generated (baseline/megakernel); may differ")
-    print("              because greedy decoding can stop at different points")
     print("   ttft_ms    prefill latency = time to first token (ms)")
     print("   ms/tok     measured mean per-token decode latency (ms/token)")
     print("   decode_ms  real total decode time = (gen - 1) * ms/tok")
     print("   total_ms   ttft_ms + decode_ms (real end-to-end for the tokens generated)")
-    print("   decode_x   per-token decode speedup (baseline ms/tok / megakernel ms/tok)")
-    print("   e2e_x      end-to-end speedup (baseline total_ms / megakernel total_ms)")
-
+    print("   decode_x   *PRIMARY* per-token decode speedup (baseline ms/tok / megakernel ms/tok)")
+    print("   prefill_x  prefill speedup (baseline ttft_ms / megakernel ttft_ms) -- reference")
+    print("   e2e_x      end-to-end speedup (baseline total_ms / megakernel total_ms) -- reference")
+    print("              (the MegaKernel prefill kernel is not yet optimized, so prefill_x")
+    print("               is currently < 1; decode_x is the metric that matters for this PoC.)")
 
 if __name__ == "__main__":
     main()

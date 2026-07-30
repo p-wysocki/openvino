@@ -16,6 +16,7 @@
 #include "ocl/ocl_memory.hpp"
 #include "ocl/ocl_event.hpp"
 #include <CL/cl.h>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -475,14 +476,10 @@ public:
         auto hs_ps = instance.input_memory(0).get_layout().get<ov::PartialShape>();
         uint S_new = (uint)hs_ps[1].get_length();
 
-        // Two-model decode-only mode: in the two-model PoC setup the prefill phase
-        // is served by a separate, unmodified OpenVINO model and only the decode
-        // phase is routed to this MegaKernel. When OV_MEGAKERNEL_DECODE_ONLY=1 we
-        // therefore refuse any multi-token (prefill) step so the MegaKernel can
-        // never accidentally absorb prefill work and pollute decode measurements.
-        // The internal KV cache is instead grown one token at a time by decode
-        // steps (see cur_len_ below). Default (unset) keeps the multi-token path
-        // enabled so single-model users (e.g. GenAI/Optimum) can still self-prime.
+        // Optional decode-only guard: when OV_MEGAKERNEL_DECODE_ONLY=1 the
+        // MegaKernel refuses any multi-token (prefill) step. This is a diagnostic
+        // aid for isolating decode measurements; it is off by default so the
+        // MegaKernel handles prefill and decode exactly like the baseline model.
         static const bool decode_only = [] {
             const char* v = std::getenv("OV_MEGAKERNEL_DECODE_ONLY");
             return v && v[0] == '1';
@@ -493,13 +490,39 @@ public:
                         ". In two-model mode prefill must run on the regular model; the "
                         "MegaKernel model handles decode (S==1) only.");
 
-        // Length bookkeeping via an internal counter: a multi-token step (S_new > 1)
-        // starts a fresh sequence (prefill), a single-token step continues decode.
-        // This is fully under our control and immune to OV's padded/stale KV shapes.
-        uint S_past = (S_new > 1) ? 0u : cur_len_;
-        uint S_total = S_past + S_new;
-
-        for (auto& e : events) strm.wait_for_events({e});
+        // Length bookkeeping. The authoritative sequence position is the first
+        // new token's position_ids value (input port 1): 0 at the start of every
+        // sequence and P for a decode step at absolute position P. The MegaKernel
+        // is deliberately stateless with respect to sequence position — it derives
+        // S_past solely from position_ids, exactly like the baseline model, so that
+        // enabling the MegaKernel never changes how the model responds to a given
+        // set of inputs. A fresh sequence simply arrives with pos==0 and overwrites
+        // the internal KV slots from the start; no internal length counter is kept.
+        //
+        // NOTE / KNOWN LIMITATION (not implemented): the MegaKernel keeps its own
+        // internal KV cache (mKC_/mVC_) instead of reading the past_key/past_value
+        // inputs (ports 3/4). That internal cache is a PoC kernel-design choice and
+        // is not wired to OpenVINO's KV state; correctness relies on every slot
+        // being (re)written by this sequence before it is read, which position_ids
+        // guarantees. Sharing OpenVINO's KV buffers is left unimplemented.
+        for (auto& e : events) strm.wait_for_events({e});   // inputs ready before we read them
+        uint S_past;
+        {
+            const auto& pos_mem = instance.input_memory(1);
+            const auto pos_dt = pos_mem.get_layout().data_type;
+            int64_t pos0 = -1;
+            if (pos_dt == ov::element::i64) {
+                pos_mem.copy_to(strm, &pos0, 0, 0, sizeof(int64_t), true);
+            } else if (pos_dt == ov::element::i32) {
+                int32_t p32 = -1;
+                pos_mem.copy_to(strm, &p32, 0, 0, sizeof(int32_t), true);
+                pos0 = (int64_t)p32;
+            }
+            OPENVINO_ASSERT(pos0 >= 0,
+                            "[MegaKernel] position_ids (input 1) must be i32/i64 and >= 0; "
+                            "the MegaKernel derives its sequence position solely from it.");
+            S_past = (uint)pos0;
+        }
 
         auto set_arg = [](cl_kernel k, cl_uint i, size_t sz, const void* p) {
             cl_int r = clSetKernelArg(k, i, sz, p);
@@ -529,6 +552,24 @@ public:
             const char* v = std::getenv("OV_MEGAKERNEL_NO_FLASH");
             return !(v && v[0] == '1');
         }();
+
+        // Optional host-dispatch profiling (OV_MEGAKERNEL_PROFILE=1). This step
+        // issues ~1 + NUM_L*S_new*6 kernel enqueues; on frameworks that don't keep
+        // the GPU fed (e.g. a Python decode loop) that host-side enqueue cost is
+        // exposed rather than overlapped with GPU execution. We split it out by
+        // draining the queue first, timing the pure enqueue burst, then draining
+        // again to attribute the remainder to the GPU. Off by default (zero cost).
+        static const bool profile = [] {
+            const char* v = std::getenv("OV_MEGAKERNEL_PROFILE");
+            return v && v[0] == '1';
+        }();
+        static thread_local double prof_host_us = 0.0, prof_gpu_us = 0.0;
+        static thread_local uint64_t prof_steps = 0;
+        std::chrono::steady_clock::time_point prof_t0;
+        if (profile) {
+            clFinish(q);
+            prof_t0 = std::chrono::steady_clock::now();
+        }
 
         { uint n = S_new * H_DIM;
           SM(kToF32_,0,hs); SM(kToF32_,1,oh); SU(kToF32_,2,n);
@@ -601,10 +642,29 @@ public:
                   enq(kGemvSk_, gDsk, lDsk); }
             }
         }
-        cur_len_ = S_total;   // commit the new cache length
 #undef SM
 #undef SU
 #undef SI
+        if (profile) {
+            auto t_host = std::chrono::steady_clock::now();   // all enqueues issued
+            clFinish(q);
+            auto t_gpu = std::chrono::steady_clock::now();    // GPU drained
+            using usd = std::chrono::duration<double, std::micro>;
+            double host_us = usd(t_host - prof_t0).count();
+            double total_us = usd(t_gpu - prof_t0).count();
+            prof_host_us += host_us;
+            prof_gpu_us  += (total_us - host_us);
+            prof_steps++;
+            if (prof_steps % 50 == 0) {
+                size_t enqueues = 1 + (size_t)NUM_L * S_new * 6;
+                fprintf(stderr,
+                        "[MegaKernel][profile] steps=%llu  host_enqueue=%.1f us/tok  "
+                        "gpu=%.1f us/tok  enqueues/tok=%zu\n",
+                        (unsigned long long)prof_steps,
+                        prof_host_us / (double)prof_steps,
+                        prof_gpu_us / (double)prof_steps, enqueues);
+            }
+        }
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
         return std::make_shared<ocl_event>(cl::Event(marker, false), 0ULL);
@@ -622,7 +682,6 @@ private:
     cl_kernel kAttnFd_=nullptr;          // flash-decoding attention
     cl_mem mQb_=nullptr, mKb_=nullptr, mVb_=nullptr, mGb_=nullptr, mXn_=nullptr;
     cl_mem mKC_=nullptr, mVC_=nullptr;   // persistent internal KV cache (K, V)
-    uint32_t cur_len_ = 0;               // number of tokens currently in the cache
 };
 
 }  // namespace
