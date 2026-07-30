@@ -1,6 +1,7 @@
 #include <CL/cl_ext.h>
 
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 #include <vector>
 
@@ -26,11 +27,11 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
 
   std::vector<TaskDesc> hostTasks(taskCount);
   for (size_t index = 0; index < taskCount; ++index) {
-    hostTasks[index].input = nullptr;
-    hostTasks[index].output = nullptr;
-    hostTasks[index].weights = nullptr;
-    hostTasks[index].id = static_cast<int>(index);
-    hostTasks[index].taskType = GEMV;
+    hostTasks[index].type = 0;
+    TestTask task;
+    task.id = static_cast<int>(index);
+    task.output = nullptr;
+    std::memcpy(hostTasks[index].payload, &task, sizeof(task));
   }
 
   cl_int status = CL_SUCCESS;
@@ -74,7 +75,7 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
       ASSERT_GE(taskExecutedHost[i], 0);
     }
 
-    workers = (workers + 17) % WORKERS +
+    workers = (workers + 53) % WORKERS +
               1;  // Change number of workers for next iteration
   }
 
