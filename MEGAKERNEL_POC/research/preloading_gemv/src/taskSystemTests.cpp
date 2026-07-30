@@ -57,7 +57,7 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
     hostTasks[index].type = 0;
     TestTask task;
     task.id = static_cast<int>(index);
-    task.output = taskExecutedGPU;
+    task.output = taskExecutedGPU + index;
     static_assert(sizeof(task) <= PAYLOAD_SIZE,
                   "TestTask size exceeds payload size");
     std::memcpy(hostTasks[index].payload, &task, sizeof(task));
@@ -83,8 +83,6 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
 
     ASSERT_OCL_SUCCESS(
         clSetKernelArg(binary.kernel, 0, sizeof(cl_mem), &taskManagerBuffer));
-    ASSERT_OCL_SUCCESS(
-        setKernelArgMemPointer(binary.kernel, 1, taskExecutedGPU));
 
     const size_t globalWorkSize = workers * THREADS;
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), binary.kernel, 1,

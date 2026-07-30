@@ -2,7 +2,7 @@
 
 #include "shared/taskManager.h"
 
-inline __global const TaskDesc* GetNextTask(
+inline __global const TaskDesc* GetNextTask_thread(
     __constant const TaskManager* taskManager) {
   const int slotId = atomic_inc(taskManager->processedTaskCount);
   if (slotId >= taskManager->workQueueSize) {
@@ -11,11 +11,12 @@ inline __global const TaskDesc* GetNextTask(
   return taskManager->workQueue + slotId;
 }
 
-inline void ClearTaskManagerState(__constant const TaskManager* taskManager) {
+inline void ClearTaskManagerState_thread(
+    __constant const TaskManager* taskManager) {
   atomic_xchg(taskManager->processedTaskCount, 0);
 }
 
-inline void GlobalBarrier(__constant const TaskManager* taskManager) {
+inline void GlobalBarrier_block(__constant const TaskManager* taskManager) {
   barrier(CLK_LOCAL_MEM_FENCE);
 
   const bool firstThreadPerWg = (get_local_id(0) == 0) &&
