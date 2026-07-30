@@ -226,8 +226,19 @@ def native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
 
 
 def optimum_worker(args) -> list[dict]:
+    import torch
     from optimum.intel import OVModelForCausalLM
     from transformers import AutoTokenizer
+
+    # Cap torch's intra-op threads. optimum's generate() runs its sampling/
+    # logits-processing (torch isin/where/arange, all multi-threaded) on the host
+    # BETWEEN forwards, while OpenVINO's async GPU infer path keeps host threads
+    # busy. With torch defaulting to one thread per core, those gap ops
+    # oversubscribe the CPU and get throttled 2-3x -- which erases the
+    # MegaKernel's faster inference and makes decode look no faster than baseline.
+    # Leaving CPU headroom removes the oversubscription and restores the speedup.
+    n_threads = args.torch_threads or max(1, (os.cpu_count() or 8) // 4)
+    torch.set_num_threads(n_threads)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     t0 = time.perf_counter()
@@ -386,6 +397,7 @@ def spawn(framework: str, path: str, args) -> list[dict]:
         "--model-dir", str(args.model_dir), "--device", args.device,
         "--warmup", str(args.warmup), "--tokens", str(args.tokens),
         "--decode-ctx", str(args.decode_ctx),
+        "--torch-threads", str(args.torch_threads),
         "--gen-warmup", str(args.gen_warmup), "--gen-iters", str(args.gen_iters),
     ]
     if getattr(args, "prompt", None):
@@ -459,6 +471,11 @@ def main() -> None:
                          "context for all prompts (isolates the kernel from O(context) "
                          "attention growth). Native path only.")
     # optimum / genai generate() benchmark
+    ap.add_argument("--torch-threads", type=int, default=0,
+                    help="Cap torch intra-op threads in the optimum path (0 = auto: "
+                         "~cores/4). Prevents the HF sampling-loop torch ops from "
+                         "oversubscribing the CPU against OpenVINO's async infer "
+                         "threads, which otherwise hides the MegaKernel decode speedup.")
     ap.add_argument("--gen-warmup", type=int, default=1, help="generate() warmup calls")
     ap.add_argument("--gen-iters", type=int, default=3, help="generate() measured calls")
     ap.add_argument("--prompt", default=None,
