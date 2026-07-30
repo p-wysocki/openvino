@@ -5,11 +5,11 @@
 #include <vector>
 
 #include "../../common/oclTestFixture.h"
-#include "ocl/taskSystem/taskManager.h"
+#include "ocl/taskSystem/shared/taskManager.h"
 
 namespace {
 
-constexpr size_t WORKERS = 48;
+constexpr size_t WORKERS = 80;
 constexpr size_t THREADS = 512;
 
 #define CHECK_OCL_SUCCESS(stmt) \
@@ -110,22 +110,24 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
                      sizeof(taskManager), &taskManager, &status);
   ASSERT_OCL_SUCCESS(status);
 
+  std::vector<int> taskExecutedHost_ClearBuffer(taskCount, -1);
   std::vector<int> taskExecutedHost(taskCount, -1);
   cl_mem taskExecutedGPU = clCreateBuffer(
       context(), CL_MEM_READ_WRITE, taskCount * sizeof(int), nullptr, &status);
   ASSERT_OCL_SUCCESS(status);
 
-  for (int i = 0; i < 10; ++i) {
+  size_t workers = WORKERS;
+  for (int i = 0; i < 100; ++i) {
     ASSERT_OCL_SUCCESS(clEnqueueWriteBuffer(
         queue(), taskExecutedGPU, CL_TRUE, 0, taskCount * sizeof(int),
-        taskExecutedHost.data(), 0, nullptr, nullptr));
+        taskExecutedHost_ClearBuffer.data(), 0, nullptr, nullptr));
 
     ASSERT_OCL_SUCCESS(
         clSetKernelArg(binary.kernel, 0, sizeof(cl_mem), &taskManagerBuffer));
     ASSERT_OCL_SUCCESS(
         clSetKernelArg(binary.kernel, 1, sizeof(cl_mem), &taskExecutedGPU));
 
-    const size_t globalWorkSize = WORKERS * THREADS;
+    const size_t globalWorkSize = workers * THREADS;
     ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), binary.kernel, 1,
                                               nullptr, &globalWorkSize,
                                               &THREADS, 0, nullptr, nullptr));
@@ -139,6 +141,9 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
                 << taskExecutedHost[i] << std::endl;
       ASSERT_GE(taskExecutedHost[i], 0);
     }
+
+    workers = (workers + 17) % WORKERS +
+              1;  // Change number of workers for next iteration
   }
 
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));

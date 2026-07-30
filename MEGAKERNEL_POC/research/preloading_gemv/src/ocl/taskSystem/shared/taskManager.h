@@ -21,19 +21,3 @@ typedef struct TaskManager {
   GLOBAL_DEVICE_PTR int* syncBarrierBuffer;
   int workQueueSize;
 } TaskManager;
-
-#ifdef DEVICE_COMPILATION
-static inline __global const TaskDesc* GetNextTask(
-    __constant const TaskManager* taskManager) {
-  const int slotId = atomic_inc(taskManager->processedTaskCount);
-  if (slotId >= taskManager->workQueueSize) {
-    return NULL;
-  }
-  return taskManager->workQueue + slotId;
-}
-
-static inline void ClearTaskManagerState(
-    __constant const TaskManager* taskManager) {
-  atomic_xchg(taskManager->processedTaskCount, 0);
-}
-#endif
