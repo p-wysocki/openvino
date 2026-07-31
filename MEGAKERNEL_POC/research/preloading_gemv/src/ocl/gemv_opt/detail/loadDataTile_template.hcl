@@ -1,5 +1,5 @@
-#include "detail/nonTemporalLoads.hcl"
-#include "detail/template.hcl"
+#include "gemv_opt/detail/nonTemporalLoads.hcl"
+#include "gemv_opt/detail/template.hcl"
 
 #ifndef LoadDataTile_SUFFIX
 #define LoadDataTile_SUFFIX

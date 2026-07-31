@@ -1,4 +1,4 @@
-#include "detail/template.hcl"
+#include "gemv_opt/detail/template.hcl"
 
 #ifndef ComputeGemvTile_SUFFIX
 #define ComputeGemvTile_SUFFIX

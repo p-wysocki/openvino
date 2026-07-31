@@ -1,7 +1,7 @@
 #pragma once
-#include "detail/commonConstants.hcl"
-#include "detail/inkernelProfile.hcl"
-#include "detail/template.hcl"
+#include "gemv_opt/detail/commonConstants.hcl"
+#include "gemv_opt/detail/inkernelProfile.hcl"
+#include "gemv_opt/detail/template.hcl"
 
 #ifndef GemvBlock_SUFFIX
 #define GemvBlock_SUFFIX
@@ -73,28 +73,28 @@ enum {
 #define ComputeGemvTile_TILE_COLUMNS GemvBlock_MATRIX_COLUMNS
 #define ComputeGemvTile_COMPUTE_WARPS GemvBlock_COMPUTE_WARPS
 #define SUFFIX
-#include "detail/computeGemvTile_template.hcl"
+#include "gemv_opt/detail/computeGemvTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define LoadDataTile_NON_TEMPORAL_LOAD 1
 #define LoadDataTile_SUFFIX _allWarps
-#include "detail/loadDataTile_template.hcl"
+#include "gemv_opt/detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS LOAD_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID GemvBlock_COMPUTE_WARPS
 #define LoadDataTile_NON_TEMPORAL_LOAD 1
 #define LoadDataTile_SUFFIX _loadWarps
-#include "detail/loadDataTile_template.hcl"
+#include "gemv_opt/detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE GemvBlock_MATRIX_COLUMNS
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define LoadDataTile_NON_TEMPORAL_LOAD 0
 #define LoadDataTile_SUFFIX _allWarpsCached
-#include "detail/loadDataTile_template.hcl"
+#include "gemv_opt/detail/loadDataTile_template.hcl"
 
 ///////////////////////////////////////////////////////////////
 inline void SwapPtr(__local half* restrict __private* a,

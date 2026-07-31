@@ -1,4 +1,4 @@
-#include "../../gemv_opt/detail/template.hcl"
+#include "gemv_opt/detail/template.hcl"
 #include "taskManager.hcl"
 
 #ifndef WorkerMainLoop_block_SUFFIX

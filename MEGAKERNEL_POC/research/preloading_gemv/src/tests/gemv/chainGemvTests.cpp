@@ -1,10 +1,13 @@
 #include <cmath>
 #include <vector>
 
-#include "../../common/utils.h"
-#include "testCommon/gemvBenchmark.h"
+#include "../../../../common/utils.h"
+#include "../../testCommon/gemvBenchmark.h"
 
 namespace {
+
+const std::string KERNEL_PATH =
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/ocl/";
 
 static const std::vector<ocltest::GemvShape> gemvShapes = {
     {1024, 2048, 32},
@@ -29,7 +32,7 @@ TEST_F(ChainGemvTests, ThreeGemvChain) {
       utils::createRandomBuffer(gemvShapes.front().columnCount, 3);
 
   const ocltest::GemvBenchmarkResult openClResult =
-      benchmarkOpenClGemvChain(matrices, input, gemvShapes);
+      benchmarkOpenClGemvChain(matrices, input, gemvShapes, KERNEL_PATH);
   const ocltest::GemvBenchmarkResult dnnlResult =
       benchmarkDnnlGemvChain(matrices, input, gemvShapes);
 
