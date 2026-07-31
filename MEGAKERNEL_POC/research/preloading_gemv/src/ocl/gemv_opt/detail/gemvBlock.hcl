@@ -1,7 +1,7 @@
 #pragma once
-#include "gemv_opt/detail/commonConstants.hcl"
-#include "gemv_opt/detail/inkernelProfile.hcl"
-#include "gemv_opt/detail/template.hcl"
+#include "common/inkernelProfile.hcl"
+#include "common/template.hcl"
+#include "common/commonConstants.hcl"
 
 #ifndef GemvBlock_SUFFIX
 #define GemvBlock_SUFFIX
