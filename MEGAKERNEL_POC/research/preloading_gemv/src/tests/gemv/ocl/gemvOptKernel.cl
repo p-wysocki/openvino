@@ -29,5 +29,5 @@ gemvOptKernel(__global const half* restrict matrix,
                  "SLM size exceeds 64KB limit");
   __local char slmBuffer[GemvBlockSLMNeededSizeInBytes];
 
-  GemvBlock(matrix, vector, output, slmBuffer);
+  GemvBlock(get_group_id(0), matrix, vector, output, slmBuffer);
 }

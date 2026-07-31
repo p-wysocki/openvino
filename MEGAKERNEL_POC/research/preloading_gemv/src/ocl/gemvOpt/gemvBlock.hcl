@@ -24,7 +24,8 @@
 // Optional parameter to give unique name of template instantiation.
 // #define GemvBlock_SUFFIX
 inline void TEMPLATE(GemvBlock,
-                     GemvBlock_SUFFIX)(__global const half* restrict matrix,
+                     GemvBlock_SUFFIX)(int tileId,
+                                       __global const half* restrict matrix,
                                        __global const half* restrict vector,
                                        __global half* restrict output,
                                        __local char* restrict buff_local);
@@ -106,16 +107,16 @@ inline void SwapPtr(__local half* restrict __private* a,
 
 ////////////////////////////////////////////////////////////////
 inline void TEMPLATE(GemvBlock,
-                     GemvBlock_SUFFIX)(__global const half* restrict matrix,
+                     GemvBlock_SUFFIX)(int tileId,
+                                       __global const half* restrict matrix,
                                        __global const half* restrict vector,
                                        __global half* restrict output,
                                        __local char* restrict buff_local) {
   __global half* restrict outputBlockTilePtr_global =
-      output + get_group_id(0) * GemvBlock_BLOCK_TILE_ROWS;
+      output + tileId * GemvBlock_BLOCK_TILE_ROWS;
 
   __global const half* restrict matrixBlockTilePtr_global =
-      matrix +
-      get_group_id(0) * GemvBlock_BLOCK_TILE_ROWS * GemvBlock_MATRIX_COLUMNS;
+      matrix + tileId * GemvBlock_BLOCK_TILE_ROWS * GemvBlock_MATRIX_COLUMNS;
 
   __local half* restrict computeBufferPtr_local =
       (__local half* restrict)buff_local;
