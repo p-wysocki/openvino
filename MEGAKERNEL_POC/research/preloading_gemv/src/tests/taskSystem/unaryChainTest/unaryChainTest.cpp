@@ -1,6 +1,7 @@
 #include <CL/cl_ext.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <numeric>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "../../../../../common/oclTestFixture.h"
 #include "../../../ocl/taskSystem/host/taskManagerHost.h"
 #include "ocl/tasks/pow2Task.h"
+#include "ocl/tasks/siluTask.h"
 
 namespace {
 
@@ -20,10 +22,11 @@ const std::string TASK_SYSTEM_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) +
     "../tests/taskSystem/unaryChainTest/ocl/";
 
-inline int Pow2(int x) { return x * x; }
+inline float Pow2(float x) { return x * x; }
+inline float Silu(float x) { return x / (1.0f + std::exp(-x)); }
 
 TEST_F(TaskSystemTests, UnaryChainTest) {
-  constexpr size_t taskCount = 100;
+  constexpr size_t taskCount = 40;
 
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_KERNEL_PATH + "taskManagerKernel.cl", "taskManagerKernel",
@@ -48,40 +51,58 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
   const auto memFree = reinterpret_cast<clMemFreeINTEL_fn>(
       clGetExtensionFunctionAddressForPlatform(platform, "clMemFreeINTEL"));
 
-  std::vector<int> inputHost(taskCount * THREADS);
-  for (int i = 0; i < inputHost.size(); ++i) {
-    inputHost[i] = i;
+  constexpr size_t intermediateStride = THREADS + 1;
+  std::vector<float> inputHost(taskCount * THREADS);
+  for (size_t i = 0; i < inputHost.size(); ++i) {
+    inputHost[i] = (static_cast<int>(i % 401) - 200) / 100.0f;
   }
 
-  int* inputGPU = static_cast<int*>(
-      deviceMemAlloc(context(), deviceId(), nullptr,
-                     inputHost.size() * sizeof(int), alignof(int), &status));
+  float* inputGPU = static_cast<float*>(deviceMemAlloc(
+      context(), deviceId(), nullptr, inputHost.size() * sizeof(float),
+      alignof(float), &status));
   ASSERT_OCL_SUCCESS(status);
   ASSERT_OCL_SUCCESS(enqueueMemcpy(queue(), CL_TRUE, inputGPU, inputHost.data(),
                                    inputHost.size() * sizeof(int), 0, nullptr,
                                    nullptr));
 
-  int* outputGPU = static_cast<int*>(
-      deviceMemAlloc(context(), deviceId(), nullptr,
-                     inputHost.size() * sizeof(int), alignof(int), &status));
+  float* intermediateGPU = static_cast<float*>(deviceMemAlloc(
+      context(), deviceId(), nullptr,
+      taskCount * intermediateStride * sizeof(float), alignof(float), &status));
   ASSERT_OCL_SUCCESS(status);
 
-  std::vector<int> outputClearHOST(inputHost.size(), 0);
-  std::vector<int> outputHOST(inputHost.size(), 0);
+  float* outputGPU = static_cast<float*>(deviceMemAlloc(
+      context(), deviceId(), nullptr, inputHost.size() * sizeof(float),
+      alignof(float), &status));
+  ASSERT_OCL_SUCCESS(status);
+
+  std::vector<float> intermediateClearHOST(taskCount * intermediateStride,
+                                           0.0f);
+  std::vector<float> outputClearHOST(inputHost.size(), 0.0f);
+  std::vector<float> outputHOST(inputHost.size(), 0.0f);
   // -------------------------------------------------
 
   // Create task queue on the host and submit it:
-  std::vector<TaskDesc> topologicallySortedTaskQueue(taskCount);
+  std::vector<TaskDesc> topologicallySortedTaskQueue(taskCount * 2);
   for (size_t index = 0; index < taskCount; ++index) {
     topologicallySortedTaskQueue[index].type = 0;
     Pow2Task task;
     task.size = THREADS;
     task.input = inputGPU + index * THREADS;
-    task.output = outputGPU + index * THREADS;
+    task.output = intermediateGPU + index * intermediateStride;
     static_assert(sizeof(task) <= PAYLOAD_SIZE,
                   "Pow2Task size exceeds payload size");
     std::memcpy(topologicallySortedTaskQueue[index].payload, &task,
                 sizeof(task));
+
+    topologicallySortedTaskQueue[taskCount + index].type = 1;
+    SiluTask siluTask;
+    siluTask.size = THREADS;
+    siluTask.input = intermediateGPU + index * intermediateStride;
+    siluTask.output = outputGPU + index * THREADS;
+    static_assert(sizeof(siluTask) <= PAYLOAD_SIZE,
+                  "SiluTask size exceeds payload size");
+    std::memcpy(topologicallySortedTaskQueue[taskCount + index].payload,
+                &siluTask, sizeof(siluTask));
   }
 
   TaskManager taskManager;
@@ -92,13 +113,20 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
       clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                      sizeof(taskManager), &taskManager, &status);
   ASSERT_OCL_SUCCESS(status);
+  void* indirectPointers[] = {inputGPU, intermediateGPU, outputGPU};
+  ASSERT_OCL_SUCCESS(
+      clSetKernelExecInfo(binary.kernel, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL,
+                          sizeof(indirectPointers), indirectPointers));
   // -------------------------------------------------
 
   size_t workers = WORKERS;
   for (int i = 0; i < 100; ++i) {
     ASSERT_OCL_SUCCESS(enqueueMemcpy(
+        queue(), CL_TRUE, intermediateGPU, intermediateClearHOST.data(),
+        intermediateClearHOST.size() * sizeof(float), 0, nullptr, nullptr));
+    ASSERT_OCL_SUCCESS(enqueueMemcpy(
         queue(), CL_TRUE, outputGPU, outputClearHOST.data(),
-        outputClearHOST.size() * sizeof(int), 0, nullptr, nullptr));
+        outputClearHOST.size() * sizeof(float), 0, nullptr, nullptr));
 
     ASSERT_OCL_SUCCESS(
         clSetKernelArg(binary.kernel, 0, sizeof(cl_mem), &taskManagerBuffer));
@@ -108,12 +136,12 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
                                               nullptr, &globalWorkSize,
                                               &THREADS, 0, nullptr, nullptr));
 
-    ASSERT_OCL_SUCCESS(enqueueMemcpy(queue(), CL_TRUE, outputHOST.data(),
-                                     outputGPU, outputHOST.size() * sizeof(int),
-                                     0, nullptr, nullptr));
+    ASSERT_OCL_SUCCESS(
+        enqueueMemcpy(queue(), CL_TRUE, outputHOST.data(), outputGPU,
+                      outputHOST.size() * sizeof(float), 0, nullptr, nullptr));
 
-    for (int i = 0; i < outputHOST.size(); ++i) {
-      ASSERT_EQ(outputHOST[i], Pow2(inputHost[i]))
+    for (size_t i = 0; i < outputHOST.size(); ++i) {
+      ASSERT_NEAR(outputHOST[i], Silu(Pow2(inputHost[i])), 1e-5f)
           << "Task " << i << " was not executed correctly";
     }
 
@@ -123,6 +151,7 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
 
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));
   ASSERT_OCL_SUCCESS(memFree(context(), inputGPU));
+  ASSERT_OCL_SUCCESS(memFree(context(), intermediateGPU));
   ASSERT_OCL_SUCCESS(memFree(context(), outputGPU));
   ASSERT_OCL_SUCCESS(HostReleaseTaskSystem(taskManager, deviceId(), context()));
   releaseOCLBinary(binary);
