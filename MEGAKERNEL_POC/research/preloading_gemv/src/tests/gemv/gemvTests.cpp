@@ -1,5 +1,5 @@
 #include "../../../../common/utils.h"
-#include "../../testCommon/gemvBenchmark.h"
+#include "../testCommon/gemvBenchmark.h"
 
 namespace {
 
