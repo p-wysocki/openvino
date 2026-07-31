@@ -1,5 +1,6 @@
 
-#include "shared/taskDesc.h"
+#include "taskSystem/shared/taskDesc.h"
+#include "testTask.h"
 
 inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
   switch (task.type) {
@@ -17,7 +18,7 @@ inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
 }
 
 #define WorkerMainLoop_block_EXEC_FUN ExecuteTask
-#include "device/workerMainLoop_template.hcl"
+#include "taskSystem/device/workerMainLoop_template.hcl"
 
 __attribute__((intel_reqd_sub_group_size(32))) __kernel void taskManagerTest(
     __constant const TaskManager* taskManager) {

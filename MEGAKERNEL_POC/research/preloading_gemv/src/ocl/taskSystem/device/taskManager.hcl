@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/taskManager.h"
+#include "../shared/taskManager.h"
 
 // GetNext task to execute.
 // Returns invalid task(type = -1) if no more tasks are available.

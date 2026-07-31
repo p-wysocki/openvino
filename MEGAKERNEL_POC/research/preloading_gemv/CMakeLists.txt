@@ -35,6 +35,9 @@ target_compile_definitions(${APPLICATION_NAME} PRIVATE
     OPENCL_KERNEL_SOURCE_PATH="${CMAKE_CURRENT_LIST_DIR}/src/ocl/")
 target_link_libraries(${APPLICATION_NAME} PRIVATE OpenCL::OpenCL dnnl gtest_main)
 
+target_include_directories(${APPLICATION_NAME} PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/src/ocl/")
+
 if(UNIX AND NOT APPLE)
     set_target_properties(${APPLICATION_NAME} PROPERTIES BUILD_RPATH "$ORIGIN")
 endif()

@@ -5,8 +5,9 @@
 #include <numeric>
 #include <vector>
 
-#include "../../common/oclTestFixture.h"
-#include "ocl/taskSystem/host/taskManagerHost.h"
+#include "../../../../common/oclTestFixture.h"
+#include "../../ocl/taskSystem/host/taskManagerHost.h"
+#include "ocl/testTask.h"
 
 namespace {
 
@@ -16,14 +17,15 @@ constexpr size_t THREADS = 512;
 class TaskSystemTests : public ocltest::OclTestFixture {};
 
 const std::string TASK_SYSTEM_KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) + "/taskSystem/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/taskSystem/ocl/";
 
 TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   constexpr size_t taskCount = 100;
 
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_KERNEL_PATH + "taskManagerTest.cl", "taskManagerTest",
-      "-I " + TASK_SYSTEM_KERNEL_PATH);
+      "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
+          std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/taskSystem/ocl/");
 
   // Create buffers:
   cl_int status = CL_SUCCESS;

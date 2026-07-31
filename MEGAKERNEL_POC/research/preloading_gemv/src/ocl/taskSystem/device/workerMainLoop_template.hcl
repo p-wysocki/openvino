@@ -1,5 +1,5 @@
 #include "../../gemv_opt/detail/template.hcl"
-#include "device/taskManager.hcl"
+#include "taskManager.hcl"
 
 #ifndef WorkerMainLoop_block_SUFFIX
 #define WorkerMainLoop_block_SUFFIX
