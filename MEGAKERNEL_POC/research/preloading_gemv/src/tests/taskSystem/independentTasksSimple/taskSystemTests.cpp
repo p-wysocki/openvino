@@ -5,8 +5,8 @@
 #include <numeric>
 #include <vector>
 
-#include "../../../../common/oclTestFixture.h"
-#include "../../ocl/taskSystem/host/taskManagerHost.h"
+#include "../../../../../common/oclTestFixture.h"
+#include "../../../ocl/taskSystem/host/taskManagerHost.h"
 #include "ocl/testTask.h"
 
 namespace {
@@ -17,7 +17,8 @@ constexpr size_t THREADS = 512;
 class TaskSystemTests : public ocltest::OclTestFixture {};
 
 const std::string TASK_SYSTEM_KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/taskSystem/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) +
+    "../tests/taskSystem/independentTasksSimple/ocl/";
 
 TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   constexpr size_t taskCount = 100;
@@ -25,7 +26,7 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_KERNEL_PATH + "taskManagerTest.cl", "taskManagerTest",
       "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
-          std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/taskSystem/ocl/");
+          std::string(TASK_SYSTEM_KERNEL_PATH));
 
   // Create buffers:
   cl_int status = CL_SUCCESS;
@@ -96,9 +97,8 @@ TEST_F(TaskSystemTests, ClaimsOneHundredTasks) {
                                      0, nullptr, nullptr));
 
     for (int i = 0; i < taskExecutedHost.size(); ++i) {
-      std::cout << "Task with id <" << i << "> was executed by "
-                << taskExecutedHost[i] << std::endl;
-      ASSERT_GE(taskExecutedHost[i], 0);
+      ASSERT_GE(taskExecutedHost[i], i * i)
+          << "Task " << i << " was not executed correctly";
     }
 
     workers = (workers + 53) % WORKERS +

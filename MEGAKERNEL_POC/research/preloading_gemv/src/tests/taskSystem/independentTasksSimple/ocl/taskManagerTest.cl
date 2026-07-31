@@ -7,8 +7,9 @@ inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
     case 0: {
       if (get_local_id(0) == 0) {
         const TestTask* testTask = (const TestTask*)task.payload;
+        const int id = testTask->id;
         __global int* output = testTask->output;
-        *output = get_group_id(0);
+        *output = id * id;
       }
       break;
     }
