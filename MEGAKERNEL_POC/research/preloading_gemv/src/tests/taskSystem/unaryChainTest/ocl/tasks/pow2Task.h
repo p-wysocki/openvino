@@ -4,6 +4,8 @@
 typedef struct Pow2Task {
   GLOBAL_DEVICE_PTR float* input;
   GLOBAL_DEVICE_PTR float* output;
+  GLOBAL_DEVICE_PTR int* outputReady;
+  int syncValue;
   int size;
 } Pow2Task;
 
@@ -21,10 +23,9 @@ inline void ExecuteTestTask(const Pow2Task* task, __local char* slmBuffer) {
 
   barrier(CLK_GLOBAL_MEM_FENCE);
   if (get_local_id(0) == 0) {
-    atomic_store_explicit(
-        (volatile __global atomic_int*)(task->output + task->size), 1,
-        memory_order_release, memory_scope_device);
+    atomic_store_explicit((volatile __global atomic_int*)(task->outputReady),
+                          task->syncValue, memory_order_release,
+                          memory_scope_device);
   }
-  barrier(CLK_LOCAL_MEM_FENCE);
 }
 #endif
