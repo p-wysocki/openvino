@@ -17,7 +17,7 @@ _Static_assert(MATRIX_ROWS % BLOCK_TILE_ROWS == 0,
 #define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
 #define GemvBlock_PHASE_TILE_ROWS PHASE_TILE_ROWS
 #define GemvBlock_COMPUTE_WARPS COMPUTE_WARPS
-#include "gemv_opt/detail/gemvBlock.hcl"
+#include "gemvOpt/gemvBlock.hcl"
 
 // Each block handles BLOCK_TILE_ROWS rows.
 __attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
