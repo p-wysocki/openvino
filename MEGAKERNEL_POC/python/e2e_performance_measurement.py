@@ -169,13 +169,11 @@ def native_worker(args) -> list[dict]:
         logits = np.array(res[0])[0, -1, :].astype(np.float32)
         next_id = int(logits.argmax())
 
-        past = prompt_len
         target_ctx = max(args.decode_ctx, prompt_len)
-        while past < target_ctx:
-            req.infer(single_token_inputs(next_id, past))
-            past += 1
+        for priming_pos in range(prompt_len, target_ctx):
+            req.infer(single_token_inputs(next_id, priming_pos))
 
-        decode_pos = past
+        decode_pos = target_ctx
         decode_input = single_token_inputs(next_id, decode_pos)
         for _ in range(args.warmup):
             req.infer(decode_input)
@@ -358,8 +356,7 @@ def genai_worker(args) -> list[dict]:
             gen_text = res.texts[0] if getattr(res, "texts", None) else str(res)
 
         tpot_mean = statistics.mean(tpot_ms)
-        # Count actual output tokens from the last generation by re-tokenizing.
-        actual_n_tok = len(tokenizer.encode(gen_text, add_special_tokens=False)) if gen_text else args.tokens
+        actual_n_tok = res.perf_metrics.get_num_generated_tokens()
         results.append({
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
