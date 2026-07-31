@@ -1,7 +1,11 @@
-#include "../../common/utils.h"
-#include "testCommon/gemvBenchmark.h"
+#include "../../../../common/utils.h"
+#include "../testCommon/gemvBenchmark.h"
 
 namespace {
+
+const std::string KERNEL_PATH =
+    std::string(OPENCL_KERNEL_SOURCE_PATH) +
+    "../tests/gemv/ocl/";
 
 class PreloadingTest : public ocltest::GemvTestFixture {
  public:
@@ -13,7 +17,7 @@ class PreloadingTest : public ocltest::GemvTestFixture {
          static_cast<size_t>(rowsPerBlock)}};
 
     const ocltest::GemvBenchmarkResult gemvLatency =
-        benchmarkOpenClGemvChain({matrix}, vector, shapes);
+        benchmarkOpenClGemvChain({matrix}, vector, shapes, KERNEL_PATH);
 
     const ocltest::GemvBenchmarkResult dnnlLatency =
         benchmarkDnnlGemvChain({matrix}, vector, shapes);

@@ -58,7 +58,7 @@ GemvBenchmarkResult GemvTestFixture::benchmarkOpenClGemvChain(
     const GemvShape& shape = shapes[layer];
     oclBinaries[layer] = createProgramAndKernel(
         kernelSourcePath + kernelSourceFileName, "gemvOptKernel",
-        "-cl-std=CL3.0 -I " + kernelSourcePath +
+        "-cl-std=CL3.0 -I " + kernelSourcePath + " -I " + std::string(OPENCL_KERNEL_SOURCE_PATH) +
             " -DMATRIX_ROWS=" + std::to_string(shape.rowCount) +
             " -DMATRIX_COLUMNS=" + std::to_string(shape.columnCount) +
             " -DBLOCK_TILE_ROWS=" + std::to_string(shape.rowsPerBlock));
