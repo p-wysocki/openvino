@@ -19,7 +19,7 @@ constexpr size_t MATRIX_COLUMNS = 1024;
 constexpr size_t ROWS_PER_BLOCK = 32;
 
 const std::string GEMV_KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) +
     "../tests/gemv/taskSystem/ocl/";

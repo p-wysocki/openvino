@@ -1,13 +1,13 @@
 #include <cmath>
 #include <vector>
 
-#include "../../../../common/utils.h"
-#include "../testCommon/gemvBenchmark.h"
+#include "../../../../../common/utils.h"
+#include "../../testCommon/gemvBenchmark.h"
 
 namespace {
 
 const std::string KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 
 static const std::vector<ocltest::GemvShape> gemvShapes = {
     {1024, 2048, 32},
