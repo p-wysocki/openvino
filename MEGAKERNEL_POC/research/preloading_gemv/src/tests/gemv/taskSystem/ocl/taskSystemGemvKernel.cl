@@ -4,8 +4,8 @@
 #define GemvBlock_MATRIX_ROWS MATRIX_ROWS
 #define GemvBlock_MATRIX_COLUMNS MATRIX_COLUMNS
 #define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
-#define GemvBlock_PHASE_TILE_ROWS 4
-#define GemvBlock_COMPUTE_WARPS 4
+#define GemvBlock_PHASE_TILE_ROWS GEMV_PHASE_TILE_ROWS
+#define GemvBlock_COMPUTE_WARPS GEMV_COMPUTE_WARPS
 #include "gemvOpt/gemvBlock.hcl"
 
 inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {

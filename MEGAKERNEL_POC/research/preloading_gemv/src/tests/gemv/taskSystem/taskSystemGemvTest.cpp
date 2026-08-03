@@ -14,15 +14,11 @@ namespace {
 
 constexpr size_t WORKERS = 80;
 constexpr size_t WORK_GROUP_SIZE = 512;
-constexpr size_t MATRIX_ROWS = 2048;
-constexpr size_t MATRIX_COLUMNS = 1024;
-constexpr size_t ROWS_PER_BLOCK = 32;
 
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) +
-    "../tests/gemv/taskSystem/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/taskSystem/ocl/";
 
 std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {
   std::vector<cl_half> output(input.size());
@@ -41,15 +37,23 @@ std::vector<float> ConvertToFloat(const std::vector<cl_half>& input) {
 }
 
 class TaskSystemGemvTest : public ocltest::GemvTestFixture {
+ public:
+  void RunGemvBenchmark(size_t rows, size_t columns, size_t rowsPerBlock,
+                        size_t gemvPhaseTileRows, size_t gemvComputeWarps);
+
  protected:
   ocltest::GemvBenchmarkResult BenchmarkTaskSystemGemv(
-      const std::vector<float>& matrix, const std::vector<float>& vector) {
+      const std::vector<float>& matrix, const std::vector<float>& vector,
+      size_t rows, size_t columns, size_t rowsPerBlock,
+      size_t gemvPhaseTileRows, size_t gemvComputeWarps) {
     const std::string buildOptions =
-        "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) +
-        " -I " + TASK_SYSTEM_GEMV_KERNEL_PATH +
-        " -DMATRIX_ROWS=" + std::to_string(MATRIX_ROWS) +
-        " -DMATRIX_COLUMNS=" + std::to_string(MATRIX_COLUMNS) +
-        " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_BLOCK);
+        "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
+        TASK_SYSTEM_GEMV_KERNEL_PATH +
+        " -DMATRIX_ROWS=" + std::to_string(rows) +
+        " -DMATRIX_COLUMNS=" + std::to_string(columns) +
+        " -DBLOCK_TILE_ROWS=" + std::to_string(rowsPerBlock) +
+        " -DGEMV_PHASE_TILE_ROWS=" + std::to_string(gemvPhaseTileRows) +
+        " -DGEMV_COMPUTE_WARPS=" + std::to_string(gemvComputeWarps);
     const OCLBinary binary = createProgramAndKernel(
         TASK_SYSTEM_GEMV_KERNEL_PATH + "taskSystemGemvKernel.cl",
         "taskSystemGemvKernel", buildOptions);
@@ -85,9 +89,9 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
         context(), deviceId(), nullptr, vectorHalf.size() * sizeof(cl_half),
         alignof(cl_half), &status));
     ASSERT_OCL_SUCCESS(status);
-    cl_half* outputGpu = static_cast<cl_half*>(deviceMemAlloc(
-        context(), deviceId(), nullptr, MATRIX_ROWS * sizeof(cl_half),
-        alignof(cl_half), &status));
+    cl_half* outputGpu = static_cast<cl_half*>(
+        deviceMemAlloc(context(), deviceId(), nullptr, rows * sizeof(cl_half),
+                       alignof(cl_half), &status));
     ASSERT_OCL_SUCCESS(status);
     ASSERT_OCL_SUCCESS(enqueueMemcpy(
         queue(), CL_TRUE, matrixGpu, matrixHalf.data(),
@@ -96,7 +100,7 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
         queue(), CL_TRUE, vectorGpu, vectorHalf.data(),
         vectorHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
 
-    constexpr size_t taskCount = MATRIX_ROWS / ROWS_PER_BLOCK;
+    const size_t taskCount = rows / rowsPerBlock;
     std::vector<TaskDesc> tasks(taskCount);
     for (size_t tileId = 0; tileId < taskCount; ++tileId) {
       tasks[tileId].type = 0;
@@ -107,8 +111,9 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
       std::memcpy(tasks[tileId].payload, &task, sizeof(task));
     }
 
+    const size_t workerCount = std::min(WORKERS, taskCount);
     std::cout << "Benchmarking task-system GEMV kernel with " << taskCount
-              << " tasks...\n";
+              << " tasks and " << workerCount << " workers...\n";
 
     TaskManager taskManager;
     ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager, tasks, deviceId(),
@@ -124,7 +129,7 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
         clSetKernelExecInfo(binary.kernel, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL,
                             sizeof(indirectPointers), indirectPointers));
 
-    const size_t globalWorkSize = WORKERS * WORK_GROUP_SIZE;
+    const size_t globalWorkSize = workerCount * WORK_GROUP_SIZE;
     const ocltest::ProfileResult profileResult =
         ocltest::ProfileOpenCL<ocltest::CLEAR_CACHE_BEFORE_BENCHMARK>(
             [&]() {
@@ -134,7 +139,7 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
             },
             queue(), ocltest::WARMUP_ITERATIONS, ocltest::BENCHMARK_ITERATIONS);
 
-    std::vector<cl_half> outputHalf(MATRIX_ROWS);
+    std::vector<cl_half> outputHalf(rows);
     ASSERT_OCL_SUCCESS(enqueueMemcpy(
         queue(), CL_TRUE, outputHalf.data(), outputGpu,
         outputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
@@ -151,16 +156,19 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
   }
 };
 
-TEST_F(TaskSystemGemvTest, CompareWithGemvOptAndOneDnn) {
+void TaskSystemGemvTest::RunGemvBenchmark(size_t rows, size_t columns,
+                                          size_t rowsPerBlock,
+                                          size_t gemvPhaseTileRows,
+                                          size_t gemvComputeWarps) {
   const std::vector<float> matrix =
-      utils::createRandomBuffer(MATRIX_ROWS * MATRIX_COLUMNS, 0);
-  const std::vector<float> vector =
-      utils::createRandomBuffer(MATRIX_COLUMNS, 1);
+      utils::createRandomBuffer(rows * columns, 0);
+  const std::vector<float> vector = utils::createRandomBuffer(columns, 1);
   const std::vector<ocltest::GemvShape> shapes = {
-      {MATRIX_ROWS, MATRIX_COLUMNS, ROWS_PER_BLOCK}};
+      {rows, columns, rowsPerBlock}};
 
   const ocltest::GemvBenchmarkResult taskSystemResult =
-      BenchmarkTaskSystemGemv(matrix, vector);
+      BenchmarkTaskSystemGemv(matrix, vector, rows, columns, rowsPerBlock,
+                              gemvPhaseTileRows, gemvComputeWarps);
   ASSERT_FALSE(HasFailure());
   const ocltest::GemvBenchmarkResult gemvOptResult =
       benchmarkOpenClGemvChain({matrix}, vector, shapes, GEMV_KERNEL_PATH);
@@ -181,7 +189,7 @@ TEST_F(TaskSystemGemvTest, CompareWithGemvOptAndOneDnn) {
 
   ASSERT_EQ(taskSystemResult.output.size(), dnnlResult.output.size());
   ASSERT_EQ(taskSystemResult.output.size(), gemvOptResult.output.size());
-  for (size_t index = 0; index < MATRIX_ROWS; ++index) {
+  for (size_t index = 0; index < rows; ++index) {
     ASSERT_NEAR(taskSystemResult.output[index], dnnlResult.output[index],
                 ocltest::ABS_ERROR)
         << "Task-system GEMV differs from oneDNN at index " << index;
@@ -190,5 +198,17 @@ TEST_F(TaskSystemGemvTest, CompareWithGemvOptAndOneDnn) {
         << "Task-system GEMV differs from GemvOpt at index " << index;
   }
 }
+
+#define RUN_GEMV_BENCHMARK(rows, columns, rowsPerBlock, gemvPhaseTileRows, \
+                           gemvComputeWarps)                               \
+  TEST_F(TaskSystemGemvTest, Gemv##rows##x##columns) {                     \
+    RunGemvBenchmark(rows, columns, rowsPerBlock, gemvPhaseTileRows,       \
+                     gemvComputeWarps);                                    \
+  }
+
+RUN_GEMV_BENCHMARK(2048, 1024, 32, 4, 4)
+RUN_GEMV_BENCHMARK(1024, 2048, 32, 4, 4)
+RUN_GEMV_BENCHMARK(1024, 3072, 32, 2, 2)
+RUN_GEMV_BENCHMARK(3072, 1024, 32, 4, 4)
 
 }  // namespace
