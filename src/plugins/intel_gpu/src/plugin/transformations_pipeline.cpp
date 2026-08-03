@@ -76,6 +76,7 @@
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/sdpa_to_vlsdpa.hpp"
+#include "openvino/pass/visualize_tree.hpp"
 #include "ov_ops/gather_matmul_compressed.hpp"
 #include "plugin/transformations/bcast_and_pad_zp_buffers.hpp"
 #include "plugin/transformations/binary_conv_to_conv.hpp"
@@ -102,6 +103,7 @@
 #include "plugin/transformations/keep_xattention_threshold_precision.hpp"
 #include "plugin/transformations/kv_cache_compression.hpp"
 #include "plugin/transformations/kv_cache_fusion.hpp"
+#include "plugin/transformations/insert_megakernel.hpp"
 #include "plugin/transformations/lora_horizontal_fusion.hpp"
 #include "plugin/transformations/lora_subgraph_horizontal_fusion.hpp"
 #include "plugin/transformations/move_fc_reshape_to_weights.hpp"
@@ -1574,6 +1576,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
             const auto& rank = node->input(0).get_partial_shape().rank().get_length();
             return rank != 4;
         });
+        manager.register_pass<ov::intel_gpu::InsertMegaKernel>();
         manager.register_pass<ov::intel_gpu::KVCacheFusion>();
         manager.register_pass<ov::intel_gpu::FullyConnectedConvertFusion>();
         manager.register_pass<ov::intel_gpu::TransposeFusion>(device_info.supports_immad);
