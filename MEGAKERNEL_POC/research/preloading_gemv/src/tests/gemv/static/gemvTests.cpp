@@ -1,11 +1,11 @@
-#include "../../../../common/utils.h"
+#include "../../../../../common/utils.h"
 #include "../testCommon/gemvBenchmark.h"
 
 namespace {
 
 const std::string KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) +
-    "../tests/gemv/ocl/";
+    "../tests/gemv/static/ocl/";
 
 class PreloadingTest : public ocltest::GemvTestFixture {
  public:
