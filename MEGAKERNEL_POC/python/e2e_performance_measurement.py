@@ -585,7 +585,7 @@ def main() -> None:
                          "(isolates kernel cost from O(context) attention growth). "
                          "decode_only path only.")
     # optimum / genai generate() benchmark
-    ap.add_argument("--torch-threads", type=int, default=0,
+    ap.add_argument("--torch-threads", type=int, default=23,
                     help="Cap torch intra-op threads in the optimum path "
                          "(0 = auto: ~cores/4).")
     ap.add_argument("--gen-warmup", type=int, default=1,
