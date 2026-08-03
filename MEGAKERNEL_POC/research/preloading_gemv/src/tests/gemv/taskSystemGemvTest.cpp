@@ -1,0 +1,261 @@
+#include <CL/cl_ext.h>
+#include <CL/cl_half.h>
+
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "../../../../common/utils.h"
+#include "../../ocl/taskSystem/host/taskManagerHost.h"
+#include "../testCommon/gemvBenchmark.h"
+
+namespace {
+
+constexpr size_t WORKERS = 80;
+constexpr size_t WORK_GROUP_SIZE = 512;
+constexpr size_t MATRIX_ROWS = 2048;
+constexpr size_t MATRIX_COLUMNS = 1024;
+constexpr size_t ROWS_PER_BLOCK = 32;
+
+const std::string GEMV_KERNEL_PATH =
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/ocl/";
+
+constexpr char TASK_SYSTEM_GEMV_KERNEL[] = R"(
+#include "taskSystem/shared/taskDesc.h"
+
+typedef struct GemvTask {
+  __global const half* matrix;
+  __global const half* vector;
+  __global half* output;
+  int tileId;
+} GemvTask;
+
+#define GemvBlock_MATRIX_ROWS MATRIX_ROWS
+#define GemvBlock_MATRIX_COLUMNS MATRIX_COLUMNS
+#define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
+#define GemvBlock_PHASE_TILE_ROWS 4
+#define GemvBlock_COMPUTE_WARPS 4
+#include "gemvOpt/gemvBlock.hcl"
+
+inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
+  const GemvTask* gemvTask = (const GemvTask*)task.payload;
+  GemvBlock(gemvTask->tileId, gemvTask->matrix, gemvTask->vector,
+            gemvTask->output, slmBuffer);
+}
+
+#define WorkerMainLoop_block_EXEC_FUN ExecuteTask
+#include "taskSystem/device/workerMainLoop_template.hcl"
+
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(32)))
+__kernel void taskSystemGemvKernel(__constant const TaskManager* taskManager) {
+  _Static_assert(GemvBlockSLMNeededSizeInBytes <= 32 * 1024,
+                 "SLM size exceeds 32KB limit");
+  __local char slmBuffer[GemvBlockSLMNeededSizeInBytes];
+  WorkerMainLoop_block(taskManager, slmBuffer);
+}
+)";
+
+struct GemvTask {
+  cl_half* matrix;
+  cl_half* vector;
+  cl_half* output;
+  int tileId;
+};
+
+std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {
+  std::vector<cl_half> output(input.size());
+  for (size_t index = 0; index < input.size(); ++index) {
+    output[index] = cl_half_from_float(input[index], CL_HALF_RTE);
+  }
+  return output;
+}
+
+std::vector<float> ConvertToFloat(const std::vector<cl_half>& input) {
+  std::vector<float> output(input.size());
+  for (size_t index = 0; index < input.size(); ++index) {
+    output[index] = cl_half_to_float(input[index]);
+  }
+  return output;
+}
+
+class TaskSystemGemvTest : public ocltest::GemvTestFixture {
+ protected:
+  ocltest::GemvBenchmarkResult BenchmarkTaskSystemGemv(
+      const std::vector<float>& matrix, const std::vector<float>& vector) {
+    const char* source = TASK_SYSTEM_GEMV_KERNEL;
+    const size_t sourceSize = sizeof(TASK_SYSTEM_GEMV_KERNEL) - 1;
+    cl_int status = CL_SUCCESS;
+    OCLBinary binary;
+    binary.program =
+        clCreateProgramWithSource(context(), 1, &source, &sourceSize, &status);
+    EXPECT_EQ(status, CL_SUCCESS);
+    if (status != CL_SUCCESS) {
+      return {};
+    }
+
+    const std::string buildOptions =
+        "-cl-std=CL3.0 -I " + std::string(OPENCL_KERNEL_SOURCE_PATH) +
+        " -DMATRIX_ROWS=" + std::to_string(MATRIX_ROWS) +
+        " -DMATRIX_COLUMNS=" + std::to_string(MATRIX_COLUMNS) +
+        " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_BLOCK);
+    const cl_device_id device = deviceId();
+    status = clBuildProgram(binary.program, 1, &device, buildOptions.c_str(),
+                            nullptr, nullptr);
+    if (status != CL_SUCCESS) {
+      size_t logSize = 0;
+      clGetProgramBuildInfo(binary.program, deviceId(), CL_PROGRAM_BUILD_LOG, 0,
+                            nullptr, &logSize);
+      std::string log(logSize, '\0');
+      clGetProgramBuildInfo(binary.program, deviceId(), CL_PROGRAM_BUILD_LOG,
+                            log.size(), log.data(), nullptr);
+      ADD_FAILURE() << "Failed to build task-system GEMV kernel:\n" << log;
+      clReleaseProgram(binary.program);
+      return {};
+    }
+
+    binary.kernel =
+        clCreateKernel(binary.program, "taskSystemGemvKernel", &status);
+    EXPECT_EQ(status, CL_SUCCESS);
+    if (status != CL_SUCCESS) {
+      clReleaseProgram(binary.program);
+      return {};
+    }
+
+    cl_platform_id platform = nullptr;
+    ASSERT_OCL_SUCCESS(clGetDeviceInfo(deviceId(), CL_DEVICE_PLATFORM,
+                                       sizeof(platform), &platform, nullptr));
+    const auto deviceMemAlloc = reinterpret_cast<clDeviceMemAllocINTEL_fn>(
+        clGetExtensionFunctionAddressForPlatform(platform,
+                                                 "clDeviceMemAllocINTEL"));
+    const auto enqueueMemcpy = reinterpret_cast<clEnqueueMemcpyINTEL_fn>(
+        clGetExtensionFunctionAddressForPlatform(platform,
+                                                 "clEnqueueMemcpyINTEL"));
+    const auto memFree = reinterpret_cast<clMemFreeINTEL_fn>(
+        clGetExtensionFunctionAddressForPlatform(platform, "clMemFreeINTEL"));
+    EXPECT_NE(deviceMemAlloc, nullptr);
+    EXPECT_NE(enqueueMemcpy, nullptr);
+    EXPECT_NE(memFree, nullptr);
+    if (deviceMemAlloc == nullptr || enqueueMemcpy == nullptr ||
+        memFree == nullptr) {
+      releaseOCLBinary(binary);
+      return {};
+    }
+
+    const std::vector<cl_half> matrixHalf = ConvertToHalf(matrix);
+    const std::vector<cl_half> vectorHalf = ConvertToHalf(vector);
+    cl_half* matrixGpu = static_cast<cl_half*>(deviceMemAlloc(
+        context(), deviceId(), nullptr, matrixHalf.size() * sizeof(cl_half),
+        alignof(cl_half), &status));
+    ASSERT_OCL_SUCCESS(status);
+    cl_half* vectorGpu = static_cast<cl_half*>(deviceMemAlloc(
+        context(), deviceId(), nullptr, vectorHalf.size() * sizeof(cl_half),
+        alignof(cl_half), &status));
+    ASSERT_OCL_SUCCESS(status);
+    cl_half* outputGpu = static_cast<cl_half*>(deviceMemAlloc(
+        context(), deviceId(), nullptr, MATRIX_ROWS * sizeof(cl_half),
+        alignof(cl_half), &status));
+    ASSERT_OCL_SUCCESS(status);
+    ASSERT_OCL_SUCCESS(enqueueMemcpy(
+        queue(), CL_TRUE, matrixGpu, matrixHalf.data(),
+        matrixHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
+    ASSERT_OCL_SUCCESS(enqueueMemcpy(
+        queue(), CL_TRUE, vectorGpu, vectorHalf.data(),
+        vectorHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
+
+    constexpr size_t taskCount = MATRIX_ROWS / ROWS_PER_BLOCK;
+    std::vector<TaskDesc> tasks(taskCount);
+    for (size_t tileId = 0; tileId < taskCount; ++tileId) {
+      tasks[tileId].type = 0;
+      const GemvTask task = {matrixGpu, vectorGpu, outputGpu,
+                             static_cast<int>(tileId)};
+      static_assert(sizeof(task) <= PAYLOAD_SIZE,
+                    "GemvTask size exceeds task payload size");
+      std::memcpy(tasks[tileId].payload, &task, sizeof(task));
+    }
+
+    std::cout << "Benchmarking task-system GEMV kernel with " << taskCount
+              << " tasks...\n";
+
+    TaskManager taskManager;
+    ASSERT_OCL_SUCCESS(HostInitalizeTaskSystem(taskManager, tasks, deviceId(),
+                                               context(), queue()));
+    cl_mem taskManagerBuffer =
+        clCreateBuffer(context(), CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                       sizeof(taskManager), &taskManager, &status);
+    ASSERT_OCL_SUCCESS(status);
+    ASSERT_OCL_SUCCESS(
+        clSetKernelArg(binary.kernel, 0, sizeof(cl_mem), &taskManagerBuffer));
+    void* indirectPointers[] = {matrixGpu, vectorGpu, outputGpu};
+    ASSERT_OCL_SUCCESS(
+        clSetKernelExecInfo(binary.kernel, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL,
+                            sizeof(indirectPointers), indirectPointers));
+
+    const size_t globalWorkSize = WORKERS * WORK_GROUP_SIZE;
+    const ocltest::ProfileResult profileResult =
+        ocltest::ProfileOpenCL<ocltest::CLEAR_CACHE_BEFORE_BENCHMARK>(
+            [&]() {
+              ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(
+                  queue(), binary.kernel, 1, nullptr, &globalWorkSize,
+                  &WORK_GROUP_SIZE, 0, nullptr, nullptr));
+            },
+            queue(), ocltest::WARMUP_ITERATIONS, ocltest::BENCHMARK_ITERATIONS);
+
+    std::vector<cl_half> outputHalf(MATRIX_ROWS);
+    ASSERT_OCL_SUCCESS(enqueueMemcpy(
+        queue(), CL_TRUE, outputHalf.data(), outputGpu,
+        outputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
+
+    ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));
+    ASSERT_OCL_SUCCESS(
+        HostReleaseTaskSystem(taskManager, deviceId(), context()));
+    ASSERT_OCL_SUCCESS(memFree(context(), outputGpu));
+    ASSERT_OCL_SUCCESS(memFree(context(), vectorGpu));
+    ASSERT_OCL_SUCCESS(memFree(context(), matrixGpu));
+    releaseOCLBinary(binary);
+
+    return {profileResult, ConvertToFloat(outputHalf)};
+  }
+};
+
+TEST_F(TaskSystemGemvTest, CompareWithGemvOptAndOneDnn) {
+  const std::vector<float> matrix =
+      utils::createRandomBuffer(MATRIX_ROWS * MATRIX_COLUMNS, 0);
+  const std::vector<float> vector =
+      utils::createRandomBuffer(MATRIX_COLUMNS, 1);
+  const std::vector<ocltest::GemvShape> shapes = {
+      {MATRIX_ROWS, MATRIX_COLUMNS, ROWS_PER_BLOCK}};
+
+  const ocltest::GemvBenchmarkResult taskSystemResult =
+      BenchmarkTaskSystemGemv(matrix, vector);
+  ASSERT_FALSE(HasFailure());
+  const ocltest::GemvBenchmarkResult gemvOptResult =
+      benchmarkOpenClGemvChain({matrix}, vector, shapes, GEMV_KERNEL_PATH);
+  const ocltest::GemvBenchmarkResult dnnlResult =
+      benchmarkDnnlGemvChain({matrix}, vector, shapes);
+
+  taskSystemResult.profileResult.print("GEMV task-system kernel");
+  gemvOptResult.profileResult.print("GEMV optimized OpenCL kernel");
+  dnnlResult.profileResult.print("GEMV oneDNN kernel");
+  std::cout << "GemvOpt / task-system speedup: "
+            << gemvOptResult.profileResult.averageUs /
+                   taskSystemResult.profileResult.averageUs
+            << "x\n";
+  std::cout << "oneDNN / task-system speedup: "
+            << dnnlResult.profileResult.averageUs /
+                   taskSystemResult.profileResult.averageUs
+            << "x\n";
+
+  ASSERT_EQ(taskSystemResult.output.size(), dnnlResult.output.size());
+  ASSERT_EQ(taskSystemResult.output.size(), gemvOptResult.output.size());
+  for (size_t index = 0; index < MATRIX_ROWS; ++index) {
+    ASSERT_NEAR(taskSystemResult.output[index], dnnlResult.output[index],
+                ocltest::ABS_ERROR)
+        << "Task-system GEMV differs from oneDNN at index " << index;
+    ASSERT_NEAR(taskSystemResult.output[index], gemvOptResult.output[index],
+                ocltest::ABS_ERROR)
+        << "Task-system GEMV differs from GemvOpt at index " << index;
+  }
+}
+
+}  // namespace
