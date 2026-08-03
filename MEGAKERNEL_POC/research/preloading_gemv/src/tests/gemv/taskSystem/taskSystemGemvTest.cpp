@@ -5,9 +5,10 @@
 #include <string>
 #include <vector>
 
-#include "../../../../common/utils.h"
-#include "../../ocl/taskSystem/host/taskManagerHost.h"
-#include "../testCommon/gemvBenchmark.h"
+#include "../../../../../common/utils.h"
+#include "../../../ocl/taskSystem/host/taskManagerHost.h"
+#include "../../testCommon/gemvBenchmark.h"
+#include "ocl/tasks/gemvTask.h"
 
 namespace {
 
@@ -19,49 +20,9 @@ constexpr size_t ROWS_PER_BLOCK = 32;
 
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/ocl/";
-
-constexpr char TASK_SYSTEM_GEMV_KERNEL[] = R"(
-#include "taskSystem/shared/taskDesc.h"
-
-typedef struct GemvTask {
-  __global const half* matrix;
-  __global const half* vector;
-  __global half* output;
-  int tileId;
-} GemvTask;
-
-#define GemvBlock_MATRIX_ROWS MATRIX_ROWS
-#define GemvBlock_MATRIX_COLUMNS MATRIX_COLUMNS
-#define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
-#define GemvBlock_PHASE_TILE_ROWS 4
-#define GemvBlock_COMPUTE_WARPS 4
-#include "gemvOpt/gemvBlock.hcl"
-
-inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
-  const GemvTask* gemvTask = (const GemvTask*)task.payload;
-  GemvBlock(gemvTask->tileId, gemvTask->matrix, gemvTask->vector,
-            gemvTask->output, slmBuffer);
-}
-
-#define WorkerMainLoop_block_EXEC_FUN ExecuteTask
-#include "taskSystem/device/workerMainLoop_template.hcl"
-
-__attribute__((reqd_work_group_size(512, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(32)))
-__kernel void taskSystemGemvKernel(__constant const TaskManager* taskManager) {
-  _Static_assert(GemvBlockSLMNeededSizeInBytes <= 32 * 1024,
-                 "SLM size exceeds 32KB limit");
-  __local char slmBuffer[GemvBlockSLMNeededSizeInBytes];
-  WorkerMainLoop_block(taskManager, slmBuffer);
-}
-)";
-
-struct GemvTask {
-  cl_half* matrix;
-  cl_half* vector;
-  cl_half* output;
-  int tileId;
-};
+const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
+    std::string(OPENCL_KERNEL_SOURCE_PATH) +
+    "../tests/gemv/taskSystem/ocl/";
 
 std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {
   std::vector<cl_half> output(input.size());
@@ -83,45 +44,17 @@ class TaskSystemGemvTest : public ocltest::GemvTestFixture {
  protected:
   ocltest::GemvBenchmarkResult BenchmarkTaskSystemGemv(
       const std::vector<float>& matrix, const std::vector<float>& vector) {
-    const char* source = TASK_SYSTEM_GEMV_KERNEL;
-    const size_t sourceSize = sizeof(TASK_SYSTEM_GEMV_KERNEL) - 1;
-    cl_int status = CL_SUCCESS;
-    OCLBinary binary;
-    binary.program =
-        clCreateProgramWithSource(context(), 1, &source, &sourceSize, &status);
-    EXPECT_EQ(status, CL_SUCCESS);
-    if (status != CL_SUCCESS) {
-      return {};
-    }
-
     const std::string buildOptions =
-        "-cl-std=CL3.0 -I " + std::string(OPENCL_KERNEL_SOURCE_PATH) +
+        "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) +
+        " -I " + TASK_SYSTEM_GEMV_KERNEL_PATH +
         " -DMATRIX_ROWS=" + std::to_string(MATRIX_ROWS) +
         " -DMATRIX_COLUMNS=" + std::to_string(MATRIX_COLUMNS) +
         " -DBLOCK_TILE_ROWS=" + std::to_string(ROWS_PER_BLOCK);
-    const cl_device_id device = deviceId();
-    status = clBuildProgram(binary.program, 1, &device, buildOptions.c_str(),
-                            nullptr, nullptr);
-    if (status != CL_SUCCESS) {
-      size_t logSize = 0;
-      clGetProgramBuildInfo(binary.program, deviceId(), CL_PROGRAM_BUILD_LOG, 0,
-                            nullptr, &logSize);
-      std::string log(logSize, '\0');
-      clGetProgramBuildInfo(binary.program, deviceId(), CL_PROGRAM_BUILD_LOG,
-                            log.size(), log.data(), nullptr);
-      ADD_FAILURE() << "Failed to build task-system GEMV kernel:\n" << log;
-      clReleaseProgram(binary.program);
-      return {};
-    }
+    const OCLBinary binary = createProgramAndKernel(
+        TASK_SYSTEM_GEMV_KERNEL_PATH + "taskSystemGemvKernel.cl",
+        "taskSystemGemvKernel", buildOptions);
 
-    binary.kernel =
-        clCreateKernel(binary.program, "taskSystemGemvKernel", &status);
-    EXPECT_EQ(status, CL_SUCCESS);
-    if (status != CL_SUCCESS) {
-      clReleaseProgram(binary.program);
-      return {};
-    }
-
+    cl_int status = CL_SUCCESS;
     cl_platform_id platform = nullptr;
     ASSERT_OCL_SUCCESS(clGetDeviceInfo(deviceId(), CL_DEVICE_PLATFORM,
                                        sizeof(platform), &platform, nullptr));
