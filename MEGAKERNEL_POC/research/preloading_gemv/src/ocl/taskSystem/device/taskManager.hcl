@@ -54,6 +54,7 @@ inline __global const TaskDesc* GetNextTask_block(
 inline void ClearTaskManagerState_thread(
     __constant const TaskManager* taskManager) {
   atomic_xchg(taskManager->processedTaskCount, 0);
+  atomic_xchg(taskManager->syncBarrierBuffer, 0);
 }
 
 /////////////////////////////////////////////////////////////
