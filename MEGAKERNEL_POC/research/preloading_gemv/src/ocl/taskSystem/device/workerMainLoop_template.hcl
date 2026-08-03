@@ -38,21 +38,7 @@ inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
     taskPtr = GetNextTask_block(taskManager, slmBuffer);
   }
 
-  barrier(CLK_LOCAL_MEM_FENCE);
-
-  if (get_local_id(0) == 0) {
-    __global volatile int* syncBuffer =
-        (__global volatile int*)taskManager->syncBarrierBuffer;
-
-    int prev = atomic_inc(syncBuffer);
-    const int workers =
-        get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
-
-    // Last executing worker clears the task manager state.
-    if (prev == (workers - 1)) {
-      ClearTaskManagerState_thread(taskManager);
-    }
-  }
+  LastWorkerClearTaskManagerState_block(taskManager);
 }
 
 #undef WorkerMainLoop_block_EXEC_FUN
