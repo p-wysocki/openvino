@@ -7,7 +7,7 @@
 
 #include "../../../../../common/utils.h"
 #include "../../../ocl/taskSystem/host/taskManagerHost.h"
-#include "../../testCommon/gemvBenchmark.h"
+#include "../testCommon/gemvBenchmark.h"
 #include "ocl/tasks/gemvTask.h"
 
 namespace {
