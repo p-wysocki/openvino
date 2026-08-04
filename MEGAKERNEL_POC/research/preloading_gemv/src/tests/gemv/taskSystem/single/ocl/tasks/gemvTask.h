@@ -10,9 +10,9 @@ typedef cl_half GemvTaskElement;
 #endif
 
 typedef struct GemvTask {
-  GLOBAL_DEVICE_PTR const GemvTaskElement* matrix;
-  GLOBAL_DEVICE_PTR const GemvTaskElement* vector;
-  GLOBAL_DEVICE_PTR GemvTaskElement* output;
+  GLOBAL_DEVICE_PTR const GemvTaskElement* __restrict__ matrix;
+  GLOBAL_DEVICE_PTR const GemvTaskElement* __restrict__ vector;
+  GLOBAL_DEVICE_PTR GemvTaskElement* __restrict__ output;
   int tileId;
 } GemvTask;
 
