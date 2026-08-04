@@ -27,7 +27,5 @@ inline void ExecuteGemv1024x3072Task(const Gemv1024x3072Task* task,
                          task->wantedInputSyncValue);
   GemvBlock_1024x3072(task->tileId, task->matrix, task->vector, task->output,
                       slmBuffer);
-  SignalSemaphore_block(0,
-                        (volatile __global atomic_int*)task->outputSemaphore);
 }
 #endif
