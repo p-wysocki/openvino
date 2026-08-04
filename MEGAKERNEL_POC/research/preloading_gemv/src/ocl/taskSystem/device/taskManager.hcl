@@ -3,7 +3,7 @@
 #include "../shared/taskManager.h"
 
 // GetNext task to execute.
-// Returns invalid task(type = -1) if no more tasks are available.
+// Returns invalid task(NULL) if no more tasks are available.
 __global const TaskDesc* GetNextTask_block(
     __constant const TaskManager* taskManager, __local char* slmBuffer);
 
