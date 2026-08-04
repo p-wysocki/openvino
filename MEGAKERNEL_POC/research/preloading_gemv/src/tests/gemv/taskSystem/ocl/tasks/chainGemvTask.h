@@ -20,22 +20,13 @@ typedef struct ChainGemvTask {
 } ChainGemvTask;
 
 #ifdef DEVICE_COMPILATION
+#include "common/semaphore.hcl"
 inline void WaitForGemvInput_block(const ChainGemvTask* task) {
-  if (get_local_id(0) == 0 && task->inputReady != NULL) {
-    volatile __global atomic_int* inputReady =
-        (volatile __global atomic_int*)task->inputReady;
-    while (atomic_load_explicit(inputReady, memory_order_acquire,
-                                memory_scope_device) != task->inputTaskCount) {
-    }
-  }
-  barrier(CLK_GLOBAL_MEM_FENCE);
+  WaitForSemaphore_block(0, (volatile __global atomic_int*)task->inputReady,
+                         task->inputTaskCount);
 }
 
 inline void SignalGemvOutput_block(const ChainGemvTask* task) {
-  barrier(CLK_GLOBAL_MEM_FENCE);
-  if (get_local_id(0) == 0) {
-    atomic_fetch_add_explicit((volatile __global atomic_int*)task->outputReady,
-                              1, memory_order_release, memory_scope_device);
-  }
+  SignalSemaphore_block(0, (volatile __global atomic_int*)task->outputReady);
 }
 #endif
