@@ -10,7 +10,6 @@
 #include "../../../../../../common/utils.h"
 #include "../../../../ocl/taskSystem/host/taskManagerHost.h"
 #include "../../testCommon/gemvBenchmark.h"
-#include "ocl/tasks/chainGemvTask.h"
 #include "ocl/tasks/gemv1024x2048Task.h"
 #include "ocl/tasks/gemv1024x3072Task.h"
 #include "ocl/tasks/gemv3072x1024Task.h"
@@ -46,6 +45,22 @@ std::vector<float> ConvertToFloat(const std::vector<cl_half>& input) {
     output[index] = cl_half_to_float(input[index]);
   }
   return output;
+}
+
+template <typename GemvTask>
+TaskDesc CreateGemvTaskDesc(int type, const cl_half* matrix,
+                            const cl_half* vector, cl_half* output,
+                            int* inputSemaphore, int* outputSemaphore,
+                            int wantedInputSyncValue, int tileId) {
+  TaskDesc taskDesc{};
+  taskDesc.type = type;
+  const GemvTask task = {matrix,         vector,          output,
+                         inputSemaphore, outputSemaphore, wantedInputSyncValue,
+                         tileId};
+  static_assert(sizeof(task) <= PAYLOAD_SIZE,
+                "GEMV task size exceeds task payload size");
+  std::memcpy(taskDesc.payload, &task, sizeof(task));
+  return taskDesc;
 }
 
 class ChainTaskSystemGemvTest : public ocltest::GemvTestFixture {};
@@ -136,25 +151,32 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
     const ocltest::GemvParams& params = GEMV_PARAMS[layer];
     const size_t taskCount = params.rowCount / params.rowsPerBlock;
     for (size_t tileId = 0; tileId < taskCount; ++tileId) {
-      TaskDesc taskDesc{};
-      taskDesc.type = static_cast<int>(layer);
       const int inputTaskCount =
           layer == 0 ? 0
                      : static_cast<int>(GEMV_PARAMS[layer - 1].rowCount /
                                         GEMV_PARAMS[layer - 1].rowsPerBlock);
-      const ChainGemvTask task = {
-          matrixGpu[layer],
-          vectorsGpu[layer],
-          vectorsGpu[layer + 1],
-          layer == 0 ? nullptr : completionCountsGpu + layer - 1,
-          completionCountsGpu + layer,
-          inputTaskCount,
-          static_cast<int>(tileId),
-      };
-      static_assert(sizeof(task) <= PAYLOAD_SIZE,
-                    "ChainGemvTask size exceeds task payload size");
-      std::memcpy(taskDesc.payload, &task, sizeof(task));
-      tasks.push_back(taskDesc);
+      int* inputSemaphore =
+          layer == 0 ? nullptr : completionCountsGpu + layer - 1;
+      switch (layer) {
+        case 0:
+          tasks.push_back(CreateGemvTaskDesc<Gemv1024x2048Task>(
+              3, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
+              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
+              static_cast<int>(tileId)));
+          break;
+        case 1:
+          tasks.push_back(CreateGemvTaskDesc<Gemv3072x1024Task>(
+              4, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
+              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
+              static_cast<int>(tileId)));
+          break;
+        case 2:
+          tasks.push_back(CreateGemvTaskDesc<Gemv1024x3072Task>(
+              5, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
+              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
+              static_cast<int>(tileId)));
+          break;
+      }
     }
   }
 

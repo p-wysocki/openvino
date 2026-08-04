@@ -1,67 +1,10 @@
 #include "taskSystem/shared/taskDesc.h"
-#include "tasks/chainGemvTask.h"
 #include "tasks/gemv1024x2048Task.h"
 #include "tasks/gemv1024x3072Task.h"
 #include "tasks/gemv3072x1024Task.h"
 
-#define GemvBlock_MATRIX_ROWS 1024
-#define GemvBlock_MATRIX_COLUMNS 2048
-#define GemvBlock_BLOCK_TILE_ROWS 32
-#define GemvBlock_PHASE_TILE_ROWS 4
-#define GemvBlock_COMPUTE_WARPS 4
-#define GemvBlock_SUFFIX _layer0
-#include "gemvOpt/gemvBlock.hcl"
-
-#define GemvBlock_MATRIX_ROWS 3072
-#define GemvBlock_MATRIX_COLUMNS 1024
-#define GemvBlock_BLOCK_TILE_ROWS 32
-#define GemvBlock_PHASE_TILE_ROWS 4
-#define GemvBlock_COMPUTE_WARPS 4
-#define GemvBlock_SUFFIX _layer1
-#include "gemvOpt/gemvBlock.hcl"
-
-#define GemvBlock_MATRIX_ROWS 1024
-#define GemvBlock_MATRIX_COLUMNS 3072
-#define GemvBlock_BLOCK_TILE_ROWS 32
-#define GemvBlock_PHASE_TILE_ROWS 2
-#define GemvBlock_COMPUTE_WARPS 2
-#define GemvBlock_SUFFIX _layer2
-#include "gemvOpt/gemvBlock.hcl"
-
-inline void ExecuteChainGemvTask(TaskDesc task, __local char* slmBuffer) {
-  const ChainGemvTask* gemvTask = (const ChainGemvTask*)task.payload;
-  WaitForGemvInput_block(gemvTask);
-  switch (task.type) {
-    case 0:
-      GemvBlock_layer0(gemvTask->tileId, gemvTask->matrix, gemvTask->vector,
-                       gemvTask->output, slmBuffer);
-      break;
-    case 1:
-      GemvBlock_layer1(gemvTask->tileId, gemvTask->matrix, gemvTask->vector,
-                       gemvTask->output, slmBuffer);
-      break;
-    case 2:
-      GemvBlock_layer2(gemvTask->tileId, gemvTask->matrix, gemvTask->vector,
-                       gemvTask->output, slmBuffer);
-      break;
-  }
-  SignalGemvOutput_block(gemvTask);
-}
-
 inline void ExecuteTasks(TaskDesc task, __local char* slmBuffer) {
   switch (task.type) {
-    case 0: {
-      ExecuteChainGemvTask(task, slmBuffer);
-      break;
-    }
-    case 1: {
-      ExecuteChainGemvTask(task, slmBuffer);
-      break;
-    }
-    case 2: {
-      ExecuteChainGemvTask(task, slmBuffer);
-      break;
-    }
     case 3: {
       const Gemv1024x2048Task* gemv1024x2048Task =
           (const Gemv1024x2048Task*)task.payload;
