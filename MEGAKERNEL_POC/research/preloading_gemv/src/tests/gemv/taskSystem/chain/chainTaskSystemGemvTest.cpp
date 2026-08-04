@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "../../../../../common/utils.h"
-#include "../../../ocl/taskSystem/host/taskManagerHost.h"
-#include "../testCommon/gemvBenchmark.h"
+#include "../../../../../../common/utils.h"
+#include "../../../../ocl/taskSystem/host/taskManagerHost.h"
+#include "../../testCommon/gemvBenchmark.h"
 #include "ocl/tasks/chainGemvTask.h"
 
 namespace {
@@ -20,7 +20,7 @@ constexpr size_t WORK_GROUP_SIZE = 512;
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/taskSystem/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/taskSystem/chain/ocl/";
 
 const std::vector<ocltest::GemvParams> GEMV_PARAMS = {
     {1024, 2048, 32},
