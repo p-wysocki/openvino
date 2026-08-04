@@ -1,7 +1,7 @@
-#pragma once
 #include "common/commonConstants.hcl"
 #include "common/inkernelProfile.hcl"
 #include "common/template.hcl"
+#include "gemvOpt/detail/utils.hcl"
 
 #ifndef GemvBlock_SUFFIX
 #define GemvBlock_SUFFIX
@@ -73,37 +73,29 @@ enum {
 #define ComputeGemvTile_TILE_ROWS GemvBlock_PHASE_TILE_ROWS
 #define ComputeGemvTile_TILE_COLUMNS GemvBlock_MATRIX_COLUMNS
 #define ComputeGemvTile_COMPUTE_WARPS GemvBlock_COMPUTE_WARPS
-#define SUFFIX
+#define ComputeGemvTile_SUFFIX GemvBlock_SUFFIX
 #include "gemvOpt/detail/computeGemvTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define LoadDataTile_NON_TEMPORAL_LOAD 1
-#define LoadDataTile_SUFFIX _allWarps
+#define LoadDataTile_SUFFIX TEMPLATE(GemvBlock_SUFFIX, _allWarps)
 #include "gemvOpt/detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE PHASE_TILE_SIZE
 #define LoadDataTile_LOAD_WARPS LOAD_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID GemvBlock_COMPUTE_WARPS
 #define LoadDataTile_NON_TEMPORAL_LOAD 1
-#define LoadDataTile_SUFFIX _loadWarps
+#define LoadDataTile_SUFFIX TEMPLATE(GemvBlock_SUFFIX, _loadWarps)
 #include "gemvOpt/detail/loadDataTile_template.hcl"
 
 #define LoadDataTile_LOAD_DATA_TILE_SIZE GemvBlock_MATRIX_COLUMNS
 #define LoadDataTile_LOAD_WARPS TOTAL_WARPS
 #define LoadDataTile_FIRST_LOAD_WARP_ID 0
 #define LoadDataTile_NON_TEMPORAL_LOAD 0
-#define LoadDataTile_SUFFIX _allWarpsCached
+#define LoadDataTile_SUFFIX TEMPLATE(GemvBlock_SUFFIX, _allWarpsCached)
 #include "gemvOpt/detail/loadDataTile_template.hcl"
-
-///////////////////////////////////////////////////////////////
-inline void SwapPtr(__local half* restrict __private* a,
-                    __local half* restrict __private* b) {
-  __local half* temp = *a;
-  *a = *b;
-  *b = temp;
-}
 
 ////////////////////////////////////////////////////////////////
 inline void TEMPLATE(GemvBlock,
@@ -127,27 +119,30 @@ inline void TEMPLATE(GemvBlock,
 
   // --------------------------------------------------------
   // Preload vector data into registers for reuse across dot products.
-  half4 cachedVector_thisWarp[ComputeGemvTile_CACHE_SIZE];
+  half4 cachedVector_thisWarp[TEMPLATE(ComputeGemvTile_CACHE_SIZE,
+                                       GemvBlock_SUFFIX)];
   //---------------------------------------------------------
 
   IN_KERNEL_PROFILE(
-      LoadDataTile_allWarps(loadBufferPtr_local,
-                            matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
+      TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _allWarps))(
+          loadBufferPtr_local, matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
   // The way that preloading of vector dara is implemented should be
   // parametrized by 'policy' design, which is hard to achive wihouth templates.
   // Basically that policy will depend on the size of vector.
   // For now, I just hardcoded this policy as it is the best in avg case.
-  IN_KERNEL_PROFILE(LoadDataTile_allWarpsCached(computeBufferPtr_local, vector),
-                    "INITIAL VECTOR LOAD LoadDataTile_allWarps");
+  IN_KERNEL_PROFILE(
+      TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _allWarpsCached))(
+          computeBufferPtr_local, vector),
+      "INITIAL VECTOR LOAD LoadDataTile_allWarps");
 
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
   if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
-    IN_KERNEL_PROFILE(
-        PreloadVectorData(cachedVector_thisWarp, computeBufferPtr_local),
-        "PreloadVectorData");
+    IN_KERNEL_PROFILE(TEMPLATE(PreloadVectorData, GemvBlock_SUFFIX)(
+                          cachedVector_thisWarp, computeBufferPtr_local),
+                      "PreloadVectorData");
   }
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE),
                     "Barrier After PreloadVectorData");
@@ -158,14 +153,14 @@ inline void TEMPLATE(GemvBlock,
 
     if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
       IN_KERNEL_PROFILE(
-          ComputeGemvTile(
+          TEMPLATE(ComputeGemvTile, GemvBlock_SUFFIX)(
               (__local half4* restrict)computeBufferPtr_local,
               cachedVector_thisWarp,
               outputBlockTilePtr_global + phase * GemvBlock_PHASE_TILE_ROWS),
           "ComputeGemvTile");
     } else {
       IN_KERNEL_PROFILE(
-          LoadDataTile_loadWarps(
+          TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _loadWarps))(
               loadBufferPtr_local,
               matrixBlockTilePtr_global + (phase + 1) * PHASE_TILE_SIZE),
           "LoadDataTile_loadWarps");
@@ -177,10 +172,11 @@ inline void TEMPLATE(GemvBlock,
   SwapPtr(&computeBufferPtr_local, &loadBufferPtr_local);
   if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
     IN_KERNEL_PROFILE(
-        ComputeGemvTile((__local half4* restrict)computeBufferPtr_local,
-                        cachedVector_thisWarp,
-                        outputBlockTilePtr_global +
-                            (PHASES_PER_BLOCK - 1) * GemvBlock_PHASE_TILE_ROWS),
+        TEMPLATE(ComputeGemvTile, GemvBlock_SUFFIX)(
+            (__local half4* restrict)computeBufferPtr_local,
+            cachedVector_thisWarp,
+            outputBlockTilePtr_global +
+                (PHASES_PER_BLOCK - 1) * GemvBlock_PHASE_TILE_ROWS),
         "Last ComputeGemvTile");
   }
 }
@@ -190,4 +186,7 @@ inline void TEMPLATE(GemvBlock,
 #undef GemvBlock_BLOCK_TILE_ROWS
 #undef GemvBlock_PHASE_TILE_ROWS
 #undef GemvBlock_COMPUTE_WARPS
-#undef SUFFIX
+#undef LOAD_WARPS
+#undef PHASES_PER_BLOCK
+#undef PHASE_TILE_SIZE
+#undef GemvBlock_SUFFIX

@@ -120,8 +120,9 @@ inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
 
 /////////////////////////////////////////////////////////////////////
 inline void TEMPLATE(PreloadVectorData,
-                     SUFFIX)(__private half4* restrict cachedVector,
-                             __local const half* restrict vector) {
+           ComputeGemvTile_SUFFIX)(
+  __private half4* restrict cachedVector,
+  __local const half* restrict vector) {
   const int laneLid = get_sub_group_local_id();
   __local const half4* restrict vector4 = (__local const half4* restrict)vector;
 #pragma unroll
