@@ -32,22 +32,16 @@ cl_int HostInitalizeTaskSystem(TaskManager& taskManager,
   int* nextTaskIDGPU = static_cast<int*>(deviceMemAlloc(
       context, deviceId, nullptr, sizeof(int), alignof(int), &status));
   CHECK_OCL_SUCCESS(status);
-  int* syncBarrierBufferGPU = static_cast<int*>(deviceMemAlloc(
-      context, deviceId, nullptr, sizeof(int), alignof(int), &status));
-  CHECK_OCL_SUCCESS(status);
 
   CHECK_OCL_SUCCESS(
       enqueueMemcpy(queue, CL_TRUE, taskQueueGPU, tasksQueue.data(),
                     tasksQueue.size() * sizeof(TaskDesc), 0, nullptr, nullptr));
   CHECK_OCL_SUCCESS(enqueueMemcpy(queue, CL_TRUE, nextTaskIDGPU, &ZERO,
                                   sizeof(ZERO), 0, nullptr, nullptr));
-  CHECK_OCL_SUCCESS(enqueueMemcpy(queue, CL_TRUE, syncBarrierBufferGPU, &ZERO,
-                                  sizeof(ZERO), 0, nullptr, nullptr));
 
   taskManager.workQueue = taskQueueGPU;
   taskManager.workQueueSize = static_cast<int>(tasksQueue.size());
   taskManager.processedTaskCount = nextTaskIDGPU;
-  taskManager.syncBarrierBuffer = syncBarrierBufferGPU;
 
   return CL_SUCCESS;
 }
@@ -63,7 +57,6 @@ cl_int HostReleaseTaskSystem(TaskManager& taskManager, cl_device_id deviceId,
   CHECK_OCL_SUCCESS(
       memFree(context, const_cast<TaskDesc*>(taskManager.workQueue)));
   CHECK_OCL_SUCCESS(memFree(context, taskManager.processedTaskCount));
-  CHECK_OCL_SUCCESS(memFree(context, taskManager.syncBarrierBuffer));
 
   return CL_SUCCESS;
 }

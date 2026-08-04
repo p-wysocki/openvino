@@ -163,8 +163,8 @@ void TaskSystemGemvTest::RunGemvBenchmark(size_t rows, size_t columns,
   const std::vector<float> matrix =
       utils::createRandomBuffer(rows * columns, 0);
   const std::vector<float> vector = utils::createRandomBuffer(columns, 1);
-  const std::vector<ocltest::GemvShape> shapes = {
-      {rows, columns, rowsPerBlock}};
+  const std::vector<ocltest::GemvParams> shapes = {
+      {rows, columns, rowsPerBlock, gemvPhaseTileRows, gemvComputeWarps}};
 
   const ocltest::GemvBenchmarkResult taskSystemResult =
       BenchmarkTaskSystemGemv(matrix, vector, rows, columns, rowsPerBlock,

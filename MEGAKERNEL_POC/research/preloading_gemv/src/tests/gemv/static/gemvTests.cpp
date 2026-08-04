@@ -4,15 +4,14 @@
 namespace {
 
 const std::string KERNEL_PATH =
-    std::string(OPENCL_KERNEL_SOURCE_PATH) +
-    "../tests/gemv/static/ocl/";
+    std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 
 class PreloadingTest : public ocltest::GemvTestFixture {
  public:
   void RunGemvBenchmark(int rows, int columns, int rowsPerBlock) {
     std::vector<float> matrix = utils::createRandomBuffer(rows * columns, 0);
     std::vector<float> vector = utils::createRandomBuffer(columns, 1);
-    const std::vector<ocltest::GemvShape> shapes = {
+    const std::vector<ocltest::GemvParams> shapes = {
         {static_cast<size_t>(rows), static_cast<size_t>(columns),
          static_cast<size_t>(rowsPerBlock)}};
 

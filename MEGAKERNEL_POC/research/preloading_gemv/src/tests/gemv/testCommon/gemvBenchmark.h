@@ -17,10 +17,12 @@ static constexpr size_t BENCHMARK_ITERATIONS = 1000;
 static constexpr float ABS_ERROR = 2e-2f;
 static constexpr bool CLEAR_CACHE_BEFORE_BENCHMARK = true;
 
-struct GemvShape {
+struct GemvParams {
   size_t rowCount;
   size_t columnCount;
   size_t rowsPerBlock;
+  size_t gemvPhaseTileRows = 4;
+  size_t gemvComputeWarps = 4;
 };
 
 struct GemvBenchmarkResult {
@@ -32,7 +34,7 @@ class GemvTestFixture : public OclTestFixture {
  protected:
   GemvBenchmarkResult benchmarkOpenClGemvChain(
       const std::vector<std::vector<float>>& matrices,
-      const std::vector<float>& input, const std::vector<GemvShape>& shapes,
+      const std::vector<float>& input, const std::vector<GemvParams>& shapes,
       const std::string& kernelSourcePath = KERNEL_SOURCE_PATH,
       const std::string& kernelSourceFileName = KERNEL_SOURCE_FILE_NAME,
       size_t warmupIterations = WARMUP_ITERATIONS,
@@ -40,7 +42,7 @@ class GemvTestFixture : public OclTestFixture {
 
   GemvBenchmarkResult benchmarkDnnlGemvChain(
       const std::vector<std::vector<float>>& matrices,
-      const std::vector<float>& input, const std::vector<GemvShape>& shapes,
+      const std::vector<float>& input, const std::vector<GemvParams>& shapes,
       size_t warmupIterations = WARMUP_ITERATIONS,
       size_t benchmarkIterations = BENCHMARK_ITERATIONS);
 };

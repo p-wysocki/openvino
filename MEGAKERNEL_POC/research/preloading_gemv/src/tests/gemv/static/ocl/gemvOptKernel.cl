@@ -3,9 +3,8 @@
 // #define MATRIX_ROWS
 // #define MATRIX_COLUMNS
 // #define BLOCK_TILE_ROWS
-
-#define PHASE_TILE_ROWS 4
-#define COMPUTE_WARPS 4
+// #define GEMV_PHASE_TILE_ROWS
+// #define GEMV_COMPUTE_WARPS
 
 // If this is not true, the kernel will fail with out-of-bounds memory access
 // for now.
@@ -15,8 +14,8 @@ _Static_assert(MATRIX_ROWS % BLOCK_TILE_ROWS == 0,
 #define GemvBlock_MATRIX_ROWS MATRIX_ROWS
 #define GemvBlock_MATRIX_COLUMNS MATRIX_COLUMNS
 #define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS
-#define GemvBlock_PHASE_TILE_ROWS PHASE_TILE_ROWS
-#define GemvBlock_COMPUTE_WARPS COMPUTE_WARPS
+#define GemvBlock_PHASE_TILE_ROWS GEMV_PHASE_TILE_ROWS
+#define GemvBlock_COMPUTE_WARPS GEMV_COMPUTE_WARPS
 #include "gemvOpt/gemvBlock.hcl"
 
 // Each block handles BLOCK_TILE_ROWS rows.

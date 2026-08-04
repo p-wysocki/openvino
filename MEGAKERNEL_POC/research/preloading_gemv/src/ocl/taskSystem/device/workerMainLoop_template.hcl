@@ -29,20 +29,16 @@ inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
 
 inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
     __constant const TaskManager* taskManager, __local char* slmBuffer) {
-  TaskDesc task;
-  GetNextTask_block(taskManager, slmBuffer, &task);
+  __global const TaskDesc* taskPtr = NULL;
+  taskPtr = GetNextTask_block(taskManager, slmBuffer);
 
-  while (task.type != -1) {
+  while (taskPtr != NULL) {
+    TaskDesc task = *taskPtr;
     WorkerMainLoop_block_EXEC_FUN(task, slmBuffer);
-    GetNextTask_block(taskManager, slmBuffer, &task);
+    taskPtr = GetNextTask_block(taskManager, slmBuffer);
   }
 
-  // This is needed to clear state of task manager for next iteration.
-  GlobalBarrier_block(taskManager);
-
-  if (get_global_id(0) == 0) {
-    ClearTaskManagerState_thread(taskManager);
-  }
+  LastWorkerClearTaskManagerState_block(taskManager);
 }
 
 #undef WorkerMainLoop_block_EXEC_FUN

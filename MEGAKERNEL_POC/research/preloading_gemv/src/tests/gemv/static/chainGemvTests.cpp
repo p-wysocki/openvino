@@ -9,7 +9,7 @@ namespace {
 const std::string KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
 
-static const std::vector<ocltest::GemvShape> gemvShapes = {
+static const std::vector<ocltest::GemvParams> gemvParams = {
     {1024, 2048, 32},
     {3072, 1024, 32},
     {1024, 3072, 32},
@@ -18,23 +18,23 @@ static const std::vector<ocltest::GemvShape> gemvShapes = {
 class ChainGemvTests : public ocltest::GemvTestFixture {};
 
 TEST_F(ChainGemvTests, ThreeGemvChain) {
-  std::vector<std::vector<float>> matrices(gemvShapes.size());
-  for (size_t layer = 0; layer < gemvShapes.size(); ++layer) {
+  std::vector<std::vector<float>> matrices(gemvParams.size());
+  for (size_t layer = 0; layer < gemvParams.size(); ++layer) {
     matrices[layer] = utils::createRandomBuffer(
-        gemvShapes[layer].rowCount * gemvShapes[layer].columnCount, layer);
+        gemvParams[layer].rowCount * gemvParams[layer].columnCount, layer);
     const float scale =
-        1.0f / std::sqrt(static_cast<float>(gemvShapes[layer].columnCount));
+        1.0f / std::sqrt(static_cast<float>(gemvParams[layer].columnCount));
     for (float& value : matrices[layer]) {
       value *= scale;
     }
   }
   const std::vector<float> input =
-      utils::createRandomBuffer(gemvShapes.front().columnCount, 3);
+      utils::createRandomBuffer(gemvParams.front().columnCount, 3);
 
   const ocltest::GemvBenchmarkResult openClResult =
-      benchmarkOpenClGemvChain(matrices, input, gemvShapes, KERNEL_PATH);
+      benchmarkOpenClGemvChain(matrices, input, gemvParams, KERNEL_PATH);
   const ocltest::GemvBenchmarkResult dnnlResult =
-      benchmarkDnnlGemvChain(matrices, input, gemvShapes);
+      benchmarkDnnlGemvChain(matrices, input, gemvParams);
 
   openClResult.profileResult.print("3-GEMV OpenCL chain");
   dnnlResult.profileResult.print("3-GEMV oneDNN chain");
