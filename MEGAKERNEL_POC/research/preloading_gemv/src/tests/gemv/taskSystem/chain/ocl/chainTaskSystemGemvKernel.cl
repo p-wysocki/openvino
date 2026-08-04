@@ -1,5 +1,8 @@
 #include "taskSystem/shared/taskDesc.h"
 #include "tasks/chainGemvTask.h"
+#include "tasks/gemv1024x2048Task.h"
+#include "tasks/gemv1024x3072Task.h"
+#include "tasks/gemv3072x1024Task.h"
 
 #define GemvBlock_MATRIX_ROWS 1024
 #define GemvBlock_MATRIX_COLUMNS 2048
@@ -25,7 +28,7 @@
 #define GemvBlock_SUFFIX _layer2
 #include "gemvOpt/gemvBlock.hcl"
 
-inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
+inline void ExecuteChainGemvTask(TaskDesc task, __local char* slmBuffer) {
   const ChainGemvTask* gemvTask = (const ChainGemvTask*)task.payload;
   WaitForGemvInput_block(gemvTask);
   switch (task.type) {
@@ -45,7 +48,44 @@ inline void ExecuteTask(TaskDesc task, __local char* slmBuffer) {
   SignalGemvOutput_block(gemvTask);
 }
 
-#define WorkerMainLoop_block_EXEC_FUN ExecuteTask
+inline void ExecuteTasks(TaskDesc task, __local char* slmBuffer) {
+  switch (task.type) {
+    case 0: {
+      ExecuteChainGemvTask(task, slmBuffer);
+      break;
+    }
+    case 1: {
+      ExecuteChainGemvTask(task, slmBuffer);
+      break;
+    }
+    case 2: {
+      ExecuteChainGemvTask(task, slmBuffer);
+      break;
+    }
+    case 3: {
+      const Gemv1024x2048Task* gemv1024x2048Task =
+          (const Gemv1024x2048Task*)task.payload;
+      ExecuteGemv1024x2048Task(gemv1024x2048Task, slmBuffer);
+      break;
+    }
+    case 4: {
+      const Gemv3072x1024Task* gemv3072x1024Task =
+          (const Gemv3072x1024Task*)task.payload;
+      ExecuteGemv3072x1024Task(gemv3072x1024Task, slmBuffer);
+      break;
+    }
+    case 5: {
+      const Gemv1024x3072Task* gemv1024x3072Task =
+          (const Gemv1024x3072Task*)task.payload;
+      ExecuteGemv1024x3072Task(gemv1024x3072Task, slmBuffer);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+#define WorkerMainLoop_block_EXEC_FUN ExecuteTasks
 #include "taskSystem/device/workerMainLoop_template.hcl"
 
 __attribute__((reqd_work_group_size(512, 1, 1)))
