@@ -24,8 +24,9 @@ inline void WaitForSemaphore_block(int warpID,
   if (syncMemory != NULL && get_sub_group_id() == warpID &&
       get_sub_group_local_id() == 0) {
     // TODO: memory_order_relaxed should be sufficient here.
-    while (atomic_load_explicit(syncMemory, memory_order_acquire,
-                                memory_scope_device) != wantedSyncVal) {
+    while ((atomic_load_explicit(syncMemory, memory_order_acquire,
+                                 memory_scope_device) %
+            wantedSyncVal) != 0) {
     }
   }
   barrier(CLK_GLOBAL_MEM_FENCE);

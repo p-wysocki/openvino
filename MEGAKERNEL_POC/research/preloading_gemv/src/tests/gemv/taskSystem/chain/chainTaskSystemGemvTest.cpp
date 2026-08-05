@@ -86,7 +86,8 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
       TASK_SYSTEM_GEMV_KERNEL_PATH + "chainTaskSystemGemvKernel.cl",
       "chainTaskSystemGemvKernel",
       "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
-          TASK_SYSTEM_GEMV_KERNEL_PATH);
+          TASK_SYSTEM_GEMV_KERNEL_PATH +
+          " -igc_opts 'VISAOptions=-hybridRAWithSpill -fastCompileRA'");
 
   cl_int status = CL_SUCCESS;
   cl_platform_id platform = nullptr;
@@ -205,12 +206,8 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   std::cout << "Benchmarking three-GEMV task-system chain...\n";
   const ocltest::ProfileResult taskSystemProfile =
       ocltest::ProfileOpenCL<ocltest::CLEAR_CACHE_BEFORE_BENCHMARK>(
+
           [&]() {
-            ASSERT_OCL_SUCCESS(
-                enqueueMemcpy(queue(), CL_FALSE, completionCountsGpu,
-                              clearedCompletionCounts.data(),
-                              clearedCompletionCounts.size() * sizeof(int), 0,
-                              nullptr, nullptr));
             ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(
                 queue(), binary.kernel, 1, nullptr, &globalWorkSize,
                 &WORK_GROUP_SIZE, 0, nullptr, nullptr));
