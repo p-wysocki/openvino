@@ -151,6 +151,7 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
     const ocltest::GemvParams& params = GEMV_PARAMS[layer];
     const size_t taskCount = params.rowCount / params.rowsPerBlock;
+    std::cout << "Layer " << layer << ": " << taskCount << " tasks\n";
     for (size_t tileId = 0; tileId < taskCount; ++tileId) {
       const int inputTaskCount =
           layer == 0 ? 0
@@ -200,8 +201,21 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   ASSERT_OCL_SUCCESS(clSetKernelExecInfo(
       binary.kernel, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL,
       indirectPointers.size() * sizeof(void*), indirectPointers.data()));
-  const size_t globalWorkSize =
-      std::min(WORKERS, totalTaskCount) * WORK_GROUP_SIZE;
+  const auto selectedWorkers = std::min(WORKERS, totalTaskCount);
+  const size_t globalWorkSize = selectedWorkers * WORK_GROUP_SIZE;
+
+  std::cout << "Total task count: " << totalTaskCount
+            << ", workers: " << selectedWorkers << "\n";
+
+  // Get initial output to check correctness after benchmarking:
+  ASSERT_OCL_SUCCESS(clEnqueueNDRangeKernel(queue(), binary.kernel, 1, nullptr,
+                                            &globalWorkSize, &WORK_GROUP_SIZE,
+                                            0, nullptr, nullptr));
+
+  std::vector<cl_half> outputHalf(GEMV_PARAMS.back().rowCount);
+  ASSERT_OCL_SUCCESS(
+      enqueueMemcpy(queue(), CL_TRUE, outputHalf.data(), vectorsGpu.back(),
+                    outputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
 
   std::cout << "Benchmarking three-GEMV task-system chain...\n";
   const ocltest::ProfileResult taskSystemProfile =
@@ -214,10 +228,6 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
           },
           queue(), ocltest::WARMUP_ITERATIONS, ocltest::BENCHMARK_ITERATIONS);
 
-  std::vector<cl_half> outputHalf(GEMV_PARAMS.back().rowCount);
-  ASSERT_OCL_SUCCESS(
-      enqueueMemcpy(queue(), CL_TRUE, outputHalf.data(), vectorsGpu.back(),
-                    outputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
   const ocltest::GemvBenchmarkResult taskSystemResult = {
       taskSystemProfile, ConvertToFloat(outputHalf)};
 
