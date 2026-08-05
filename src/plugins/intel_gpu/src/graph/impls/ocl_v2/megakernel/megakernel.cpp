@@ -1,12 +1,16 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// MegaKernel plugin implementation — single monokernel decoder.
-// The entire Qwen3 decoder (all layers) runs in ONE kernel launch per token: a
-// persistent grid walks every layer, synchronising between per-layer stages with
-// a grid-wide software barrier. Decode is one launch; prefill loops it per token.
-// Key techniques: intel_sub_group_block_read, fused RMSNorm, fused RoPE,
-// workgroup-cooperative flash-decoding attention, split-K GEMV.
+// MegaKernel plugin implementation — task-system-scheduled decoder.
+// The entire Qwen3 decoder (all layers) runs in ONE kernel launch per token, but
+// instead of a persistent grid + grid-wide software barrier, the work is driven
+// by the fine-tuned GPU task system (MEGAKERNEL_POC/research/preloading_gemv):
+// a pool of persistent worker work-groups pulls topologically-sorted tasks FIFO
+// from a shared work queue; each layer stage is a set of per-workgroup tiles, and
+// inter-stage ordering (the old grid barrier) is expressed as global atomic
+// sync-flag dependencies resolved by the tasks themselves. Decode is one launch;
+// prefill loops it per token. Key techniques: intel_sub_group_block_read, fused
+// RMSNorm, fused RoPE, workgroup-cooperative flash-decoding attention, split-K GEMV.
 
 #include "megakernel.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
@@ -19,8 +23,10 @@
 #include "ocl/ocl_memory.hpp"
 #include "ocl/ocl_event.hpp"
 #include <CL/cl.h>
+#include <CL/cl_ext.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -91,19 +97,6 @@ inline void sg_gemv_rms(const __global float* h, const __global half* wn, float 
 
 #define NPL (HD/SG)   // head-dim elements handled per subgroup lane (attention)
 
-// ===========================================================================
-// MONOKERNEL: the entire 28-layer decoder in a SINGLE kernel launch, per token.
-// A persistent grid of MONO_WG workgroups (sized to the device's co-resident
-// capacity so a software global barrier cannot deadlock) walks all layers,
-// synchronising between the per-layer stages with a sense-reversing global
-// barrier. Work within each stage is distributed over the grid's subgroups
-// with a grid-stride loop. Reuses sg_rms / sg_gemv_rms from above.
-//
-// Decode runs one launch (S==1). Prefill launches the same kernel once per
-// token (tok_off selects the token's slice of hs/h), so the whole plugin uses
-// only this kernel. tok_off is the element offset (t*H) into hs and h.
-// ===========================================================================
-
 // Plain subgroup GEMV over an fp16 activation (no fused RMS, no split-K):
 // each subgroup fully reduces RPS output rows. Used for o-proj / down-proj.
 inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
@@ -125,262 +118,434 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
     for (int r=0; r<RPS; r++) out[r]=sub_group_reduce_add(acc[r]);
 }
 
-// Sense-reversing global (grid-wide) barrier. Safe ONLY because the host launches
-// exactly MONO_WG workgroups, all guaranteed co-resident on the device (see the
-// occupancy probe). gbar[0]=arrival counter, gbar[1]=sense flag. The leader
-// (local id 0) of each workgroup participates; the whole workgroup converges via
-// the surrounding work-group barriers, which also publish this WG's global stores.
-inline void grid_barrier(volatile __global atomic_int* gc,
-                         volatile __global atomic_int* gs, uint lid, int WG) {
-    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
-    if (lid==0) {
-        int gen = atomic_load_explicit(gs, memory_order_relaxed, memory_scope_device);
-        if (atomic_fetch_add_explicit(gc, 1, memory_order_acq_rel, memory_scope_device) == WG-1) {
-            atomic_store_explicit(gc, 0, memory_order_relaxed, memory_scope_device);
-            atomic_store_explicit(gs, gen^1, memory_order_release, memory_scope_device);
-        } else {
-            while (atomic_load_explicit(gs, memory_order_acquire, memory_scope_device) == gen) {}
+// ===========================================================================
+// TASK SYSTEM (verbatim logic from MEGAKERNEL_POC/research/preloading_gemv/src/
+// ocl/taskSystem). Embedded here because the GPU plugin cannot include the
+// research-tree headers; the scheduling logic, barriers and atomics are kept
+// identical to the original taskManager.hcl / workerMainLoop_template.hcl.
+// Workers (workgroups) pull topologically-sorted tasks FIFO from a shared work
+// queue and execute them cooperatively; inter-task data dependencies are
+// resolved by the tasks themselves through global atomic sync flags.
+// ===========================================================================
+#define PAYLOAD_SIZE (64 - sizeof(int))
+typedef struct TaskDesc {
+    int  type;
+    char payload[PAYLOAD_SIZE];
+} TaskDesc;
+
+typedef struct TaskManager {
+    __global const TaskDesc* workQueue;
+    __global int*            processedTaskCount;
+    int                      workQueueSize;
+} TaskManager;
+
+// GetNext task to execute (thread-level): atomically claim the next slot.
+inline __global const TaskDesc* GetNextTask_thread(
+    __constant const TaskManager* taskManager) {
+    const int slotId = atomic_inc(taskManager->processedTaskCount);
+    if (slotId >= taskManager->workQueueSize) {
+        return NULL;
+    }
+    return taskManager->workQueue + slotId;
+}
+
+// GetNext task to execute (block-level): claim on thread 0 and broadcast the
+// task pointer to the whole work-group through SLM.
+inline __global const TaskDesc* GetNextTask_block(
+    __constant const TaskManager* taskManager, __local char* slmBuffer) {
+    __global const TaskDesc* task = NULL;
+    __local ulong* taskAddress = (__local ulong*)slmBuffer;
+
+    if (get_local_id(0) == 0) {
+        task = GetNextTask_thread(taskManager);
+        *taskAddress = (ulong)task;
+    }
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+    task = (__global const TaskDesc*)(*taskAddress);
+    return task;
+}
+
+inline void ClearTaskManagerState_thread(
+    __constant const TaskManager* taskManager) {
+    atomic_xchg(taskManager->processedTaskCount, 0);
+}
+
+// Last executing worker restores the task manager state so the same queue can
+// be re-launched (e.g. for the next token) without a host-side reset.
+inline void LastWorkerClearTaskManagerState_block(
+    __constant const TaskManager* taskManager) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (get_local_id(0) == 0) {
+        volatile __global atomic_int* syncBuffer =
+            (volatile __global atomic_int*)(taskManager->processedTaskCount);
+        const int processed = atomic_load_explicit(syncBuffer, memory_order_acquire,
+                                                    memory_scope_device);
+        const int workers =
+            get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
+        if (processed == workers + taskManager->workQueueSize) {
+            ClearTaskManagerState_thread(taskManager);
         }
+    }
+}
+
+// ===========================================================================
+// MEGAKERNEL TASKS: the 28-layer decoder expressed as task-system tasks.
+// The persistent grid_barrier monokernel is replaced by a pool of task workers.
+// Each layer stage is decomposed into per-workgroup tiles (tasks); a stage's
+// tasks all wait (via a global atomic counter) for the previous stage to finish,
+// exactly replicating the grid-barrier ordering, and signal their own counter on
+// completion. The GEMV / RMSNorm / RoPE / flash-attention math is unchanged.
+// ===========================================================================
+#define SGN 16                                 // sub-groups per work-group (LWS 256 / SG 16)
+#define TF  2                                  // GEMV tile coarsening (RPS-groups per lane per task)
+#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 32
+#define NT_BC (NH+KVH)                          // Stage BC (attn) task count    = 24
+#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 8
+#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 24
+#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 8
+#define EMBED_IDX (NUM_L*5)                     // sync slot for the embedding stage
+#define SLM_BYTES ((2*SGN + SGN*NPL*SG)*4)      // flash-decoding partials (lsm_m/lsm_l/lsm_a)
+
+// Per-token context shared by every task: all base pointers plus the scalars
+// (pos, cache stride, token offset) that vary per launch. Lives in USM device
+// memory; each task carries a pointer to it in its payload.
+typedef struct MonoCtx {
+    __global const half*  hs;
+    __global float*       h;
+    __global const half*  wn; __global const half* pn;
+    __global const half*  qw; __global const half* kw; __global const half* vw;
+    __global const half*  ow; __global const half* gw; __global const half* uw;
+    __global const half*  dw;
+    __global const half*  qn; __global const half* kn; __global const half* rf;
+    __global float*       qb; __global float* kb; __global float* vb;
+    __global half*        xn; __global half* gbuf;
+    __global half*        kc; __global half* vc;
+    __global int*         sync;
+    int  pos; uint CS; uint tok_off;
+} MonoCtx;
+
+typedef struct MkTask {
+    __global const MonoCtx* ctx;
+    int layer;
+    int tile;
+} MkTask;
+
+// Barrier-equivalent dependency wait: the whole work-group blocks until the
+// producer stage's counter reaches `cnt` (all its tiles signalled). Mirrors the
+// producer store-release / consumer load-acquire pattern of the task system.
+inline void mk_wait(__global int* sync, int idx, int cnt) {
+    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
+    if (get_local_id(0) == 0) {
+        volatile __global atomic_int* p = (volatile __global atomic_int*)(sync + idx);
+        while (atomic_load_explicit(p, memory_order_acquire, memory_scope_device) < cnt) {}
     }
     barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
 }
 
-__attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void mk_mono(
-    const __global half* hs, __global float* h,
-    const __global half* wn, const __global half* pn,
-    const __global half* qw, const __global half* kw, const __global half* vw,
-    const __global half* ow, const __global half* gw, const __global half* uw,
-    const __global half* dw,
-    const __global half* qn, const __global half* kn, const __global half* rf,
-    __global float* qb, __global float* kb, __global float* vb,
-    __global half* xn, __global half* gbuf,
-    __global half* kc, __global half* vc,
-    volatile __global atomic_int* gbar,
-    int pos, int WG, uint CS, uint tok_off)
-{
-    // Select this token's slice of the input embedding / residual stream. For
-    // decode tok_off==0; for prefill token t it is t*H.
-    hs += tok_off;
-    h  += tok_off;
+// Signal completion of one tile of a stage (publishes this WG's global stores).
+inline void mk_signal(__global int* sync, int idx) {
+    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
+    if (get_local_id(0) == 0) {
+        atomic_fetch_add_explicit((volatile __global atomic_int*)(sync + idx), 1,
+                                  memory_order_release, memory_scope_device);
+    }
+}
 
-    uint lid = get_local_id(0);
-    uint l   = get_sub_group_local_id();
-    uint nsg = get_num_sub_groups();
-    uint gsg = get_group_id(0)*nsg + get_sub_group_id();   // global subgroup id
-    uint NSG = (uint)WG * nsg;                              // total subgroups in grid
-    volatile __global atomic_int* gc = gbar;
-    volatile __global atomic_int* gs = gbar + 1;
+// Stage 0: input embedding fp16 -> fp32 residual stream (single task).
+inline void mk_embed(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    __global const half* hs = c->hs + c->tok_off;
+    __global float*      h  = c->h  + c->tok_off;
+    for (uint i = get_local_id(0); i < H; i += get_local_size(0))
+        h[i] = convert_float(hs[i]);
+    mk_signal(c->sync, EMBED_IDX);
+}
 
-    // SLM for stage-BC flash-decoding: per-subgroup partial softmax state
-    // (max, sum, accumulator) merged by subgroup 0. Sized for LWS=256 -> 16 subgroups.
-    __local float lsm_m[16], lsm_l[16];
-    __local float lsm_a[16][NPL][SG];
+// Stage A: fused input RMSNorm + Q/K/V projection (one tile of QKV rows).
+inline void mk_stageA(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    int layer = t->layer, tile = t->tile;
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    int dep    = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
+    int depcnt = (layer == 0) ? 1         : NT_F;
+    mk_wait(c->sync, dep, depcnt);
+
+    uint wn_off=layer*H, qw_off=layer*QDIM*H, kw_off=layer*KVDIM*H, vw_off=layer*KVDIM*H;
+    __global float* h = c->h + c->tok_off;
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint gr = gi*RPS;
+        float rms = sg_rms(h, l), o[RPS];
+        if (gr < QDIM) {
+            sg_gemv_rms(h, c->wn+wn_off, rms, c->qw+qw_off, gr, l, o);
+            if (l==0) for (int r=0;r<RPS;r++) c->qb[gr+r]=o[r];
+        } else if (gr < QDIM+KVDIM) {
+            uint n=gr-QDIM;
+            sg_gemv_rms(h, c->wn+wn_off, rms, c->kw+kw_off, n, l, o);
+            if (l==0) for (int r=0;r<RPS;r++) c->kb[n+r]=o[r];
+        } else {
+            uint n=gr-QDIM-KVDIM;
+            sg_gemv_rms(h, c->wn+wn_off, rms, c->vw+vw_off, n, l, o);
+            if (l==0) for (int r=0;r<RPS;r++) c->vb[n+r]=o[r];
+        }
+    }
+    mk_signal(c->sync, layer*5 + 0);
+}
+
+// Stage BC: fused RoPE + flash-decoding attention. tile in [0,NH) is a query
+// head; tile in [NH,NH+KVH) writes the current token's K/V to the cache.
+inline void mk_stageBC(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    int layer = t->layer; uint wg = (uint)t->tile;
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
+    mk_wait(c->sync, layer*5 + 0, NT_A);
 
     const float scl = rsqrt((float)HD);
+    uint CS = c->CS; int pos = c->pos;
+    uint qn_off=layer*HD, kn_off=layer*HD;
+    __local float* lsm_m = (__local float*)slm;
+    __local float* lsm_l = lsm_m + SGN;
+    __local float (*lsm_a)[NPL][SG] = (__local float(*)[NPL][SG])(lsm_l + SGN);
 
-    // Stage 0: input embedding fp16 -> fp32 residual stream.
-    for (uint i = get_global_id(0); i < H; i += get_global_size(0))
-        h[i] = convert_float(hs[i]);
-    grid_barrier(gc, gs, lid, WG);
-
-    for (uint layer = 0; layer < NUM_L; layer++) {
-        uint wn_off=layer*H,       pn_off=layer*H;
-        uint qw_off=layer*QDIM*H,  kw_off=layer*KVDIM*H, vw_off=layer*KVDIM*H;
-        uint ow_off=layer*H*QDIM,  gw_off=layer*IM*H,    uw_off=layer*IM*H, dw_off=layer*H*IM;
-        uint qn_off=layer*HD,      kn_off=layer*HD;
-
-        // Stage A: fused input RMSNorm + Q/K/V projection.
-        for (uint gi = gsg; gi < (QDIM+2*KVDIM)/RPS; gi += NSG) {
-            uint gr = gi*RPS;
-            float rms = sg_rms(h, l), o[RPS];
-            if (gr < QDIM) {
-                sg_gemv_rms(h, wn+wn_off, rms, qw+qw_off, gr, l, o);
-                if (l==0) for (int r=0;r<RPS;r++) qb[gr+r]=o[r];
-            } else if (gr < QDIM+KVDIM) {
-                uint n=gr-QDIM;
-                sg_gemv_rms(h, wn+wn_off, rms, kw+kw_off, n, l, o);
-                if (l==0) for (int r=0;r<RPS;r++) kb[n+r]=o[r];
-            } else {
-                uint n=gr-QDIM-KVDIM;
-                sg_gemv_rms(h, wn+wn_off, rms, vw+vw_off, n, l, o);
-                if (l==0) for (int r=0;r<RPS;r++) vb[n+r]=o[r];
+    if (wg < NH) {
+        uint hq=wg, kv=hq/GQA;
+        __global float* qhs = c->qb + hq*HD;
+        float sq=0, qv[8];
+        for (int j=0;j<8;j++){ float x=qhs[l+SG*j]; qv[j]=x; sq+=x*x; }
+        float iq=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
+        for (int j=0;j<8;j++) qv[j]=qv[j]*iq*convert_float(c->qn[qn_off+l+SG*j]);
+        float qr[NPL];
+        for (int j=0;j<4;j++){
+            uint d=l+SG*j;
+            float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
+            float x0=qv[j], x1=qv[j+4];
+            qr[j]=x0*cc-x1*sn; qr[j+4]=x1*cc+x0*sn;
+        }
+        ulong base=((ulong)layer*KVH+kv)*(ulong)CS*HD;
+        uint tile=((uint)pos + nsgl - 1)/nsgl;
+        uint s0=sgl*tile, s1=min(s0+tile,(uint)pos);
+        float acc[NPL]; for (int j=0;j<NPL;j++) acc[j]=0;
+        float m=-INFINITY, ls=0;
+        for (uint s=s0;s<s1;s++){
+            float pa=0;
+            for (int j=0;j<NPL;j++) pa+=qr[j]*convert_float(c->kc[base+(ulong)s*HD+l+SG*j]);
+            float sc=sub_group_reduce_add(pa)*scl;
+            float mn=fmax(m,sc), cr=native_exp(m-mn), p=native_exp(sc-mn);
+            ls=ls*cr+p;
+            for (int j=0;j<NPL;j++) acc[j]=acc[j]*cr+p*convert_float(c->vc[base+(ulong)s*HD+l+SG*j]);
+            m=mn;
+        }
+        if (sgl==0){
+            __global float* khs = c->kb + kv*HD;
+            float sk=0, kvv[8];
+            for (int j=0;j<8;j++){ float x=khs[l+SG*j]; kvv[j]=x; sk+=x*x; }
+            float ik=rsqrt(sub_group_reduce_add(sk)/HD+EPS);
+            for (int j=0;j<8;j++) kvv[j]=kvv[j]*ik*convert_float(c->kn[kn_off+l+SG*j]);
+            float kr[NPL];
+            for (int j=0;j<4;j++){
+                uint d=l+SG*j;
+                float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
+                float x0=kvv[j], x1=kvv[j+4];
+                kr[j]=x0*cc-x1*sn; kr[j+4]=x1*cc+x0*sn;
+            }
+            float pa=0;
+            for (int j=0;j<NPL;j++) pa+=qr[j]*kr[j];
+            float sc=sub_group_reduce_add(pa)*scl;
+            float mn=fmax(m,sc), cr=native_exp(m-mn), p=native_exp(sc-mn);
+            ls=ls*cr+p;
+            for (int j=0;j<NPL;j++) acc[j]=acc[j]*cr+p*convert_float(c->vb[kv*HD+l+SG*j]);
+            m=mn;
+        }
+        if (l==0){ lsm_m[sgl]=m; lsm_l[sgl]=ls; }
+        for (int j=0;j<NPL;j++) lsm_a[sgl][j][l]=acc[j];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (sgl==0){
+            float M=lsm_m[0], L=lsm_l[0], ac[NPL];
+            for (int j=0;j<NPL;j++) ac[j]=lsm_a[0][j][l];
+            for (uint tt=1;tt<nsgl;tt++){
+                float mn=fmax(M,lsm_m[tt]), cr=native_exp(M-mn), p=native_exp(lsm_m[tt]-mn);
+                L=L*cr+lsm_l[tt]*p;
+                for (int j=0;j<NPL;j++) ac[j]=ac[j]*cr+lsm_a[tt][j][l]*p;
+                M=mn;
+            }
+            float il=1.0f/L;
+            for (int j=0;j<NPL;j++) c->xn[hq*HD+l+SG*j]=convert_half(ac[j]*il);
+        }
+    } else if (wg < NH+KVH) {
+        uint kvh=wg-NH;
+        if (sgl==0) {
+            __global float* kh = c->kb + kvh*HD;
+            float sq=0, kv2[8];
+            for (int j=0;j<8;j++){ float x=kh[l+SG*j]; kv2[j]=x; sq+=x*x; }
+            float iv=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
+            for (int j=0;j<8;j++) kv2[j]=kv2[j]*iv*convert_float(c->kn[kn_off+l+SG*j]);
+            float ko[8];
+            for (int j=0;j<8;j++) ko[j]=kv2[j];
+            for (int j=0;j<4;j++){
+                uint d=l+SG*j;
+                float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
+                float x0=kv2[j], x1=kv2[j+4];
+                ko[j]=x0*cc-x1*sn; ko[j+4]=x1*cc+x0*sn;
+            }
+            ulong cbase=((ulong)layer*KVH+kvh)*(ulong)CS*HD + (ulong)pos*HD;
+            for (int j=0;j<8;j++){
+                uint e=l+SG*j;
+                c->kc[cbase+e]=convert_half(ko[j]);
+                c->vc[cbase+e]=convert_half(c->vb[kvh*HD+e]);
             }
         }
-        grid_barrier(gc, gs, lid, WG);
-
-        // Stage BC (fused RoPE + flash-decoding attention, single barrier).
-        //   * Workgroup wg<NH owns query head wg; its subgroups split the KV scan
-        //     and merge partials via SLM (flash-decoding), so attention runs in
-        //     parallel across the sequence instead of serially per head. Past
-        //     positions come from the KV cache (visible after stage A's barrier);
-        //     the current position's K/V are rotated on the fly by subgroup 0.
-        //   * Workgroups NH..NH+KVH-1 (idle for attention) write the current token's
-        //     K/V to the cache for future steps; that target (cache[pos]) is disjoint
-        //     from the past positions attention reads, so there is no race, and it
-        //     only has to be visible next step (guaranteed by that step's barrier).
-        //   * Workgroups >= NH+KVH idle. All reach the same trailing barrier.
-        {
-            uint wg = get_group_id(0);
-            uint sgl = get_sub_group_id();
-            uint nsgl = get_num_sub_groups();
-            if (wg < NH) {
-                uint hq=wg, kv=hq/GQA;
-                // RMSNorm + RoPE of this query head (recomputed per subgroup, cheap;
-                // qr[j] holds the rotated q at element l+SG*j).
-                __global float* qhs = qb + hq*HD;
-                float sq=0, qv[8];
-                for (int j=0;j<8;j++){ float x=qhs[l+SG*j]; qv[j]=x; sq+=x*x; }
-                float iq=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
-                for (int j=0;j<8;j++) qv[j]=qv[j]*iq*convert_float(qn[qn_off+l+SG*j]);
-                float qr[NPL];
-                for (int j=0;j<4;j++){
-                    uint d=l+SG*j;
-                    float a=(float)pos*convert_float(rf[d]), c=native_cos(a), sn=native_sin(a);
-                    float x0=qv[j], x1=qv[j+4];
-                    qr[j]=x0*c-x1*sn; qr[j+4]=x1*c+x0*sn;
-                }
-                ulong base=((ulong)layer*KVH+kv)*(ulong)CS*HD;
-                // Split past positions [0,pos) across the workgroup's subgroups.
-                uint tile=((uint)pos + nsgl - 1)/nsgl;
-                uint s0=sgl*tile, s1=min(s0+tile,(uint)pos);
-                float acc[NPL]; for (int j=0;j<NPL;j++) acc[j]=0;
-                float m=-INFINITY, ls=0;
-                for (uint s=s0;s<s1;s++){
-                    float pa=0;
-                    for (int j=0;j<NPL;j++) pa+=qr[j]*convert_float(kc[base+(ulong)s*HD+l+SG*j]);
-                    float sc=sub_group_reduce_add(pa)*scl;
-                    float mn=fmax(m,sc), cr=native_exp(m-mn), p=native_exp(sc-mn);
-                    ls=ls*cr+p;
-                    for (int j=0;j<NPL;j++) acc[j]=acc[j]*cr+p*convert_float(vc[base+(ulong)s*HD+l+SG*j]);
-                    m=mn;
-                }
-                if (sgl==0){   // current position handled by subgroup 0 (on-the-fly K/V)
-                    __global float* khs = kb + kv*HD;
-                    float sk=0, kvv[8];
-                    for (int j=0;j<8;j++){ float x=khs[l+SG*j]; kvv[j]=x; sk+=x*x; }
-                    float ik=rsqrt(sub_group_reduce_add(sk)/HD+EPS);
-                    for (int j=0;j<8;j++) kvv[j]=kvv[j]*ik*convert_float(kn[kn_off+l+SG*j]);
-                    float kr[NPL];
-                    for (int j=0;j<4;j++){
-                        uint d=l+SG*j;
-                        float a=(float)pos*convert_float(rf[d]), c=native_cos(a), sn=native_sin(a);
-                        float x0=kvv[j], x1=kvv[j+4];
-                        kr[j]=x0*c-x1*sn; kr[j+4]=x1*c+x0*sn;
-                    }
-                    float pa=0;
-                    for (int j=0;j<NPL;j++) pa+=qr[j]*kr[j];
-                    float sc=sub_group_reduce_add(pa)*scl;
-                    float mn=fmax(m,sc), cr=native_exp(m-mn), p=native_exp(sc-mn);
-                    ls=ls*cr+p;
-                    for (int j=0;j<NPL;j++) acc[j]=acc[j]*cr+p*convert_float(vb[kv*HD+l+SG*j]);
-                    m=mn;
-                }
-                // Publish partials to SLM, merge in subgroup 0.
-                if (l==0){ lsm_m[sgl]=m; lsm_l[sgl]=ls; }
-                for (int j=0;j<NPL;j++) lsm_a[sgl][j][l]=acc[j];
-                barrier(CLK_LOCAL_MEM_FENCE);
-                if (sgl==0){
-                    float M=lsm_m[0], L=lsm_l[0], ac[NPL];
-                    for (int j=0;j<NPL;j++) ac[j]=lsm_a[0][j][l];
-                    for (uint t=1;t<nsgl;t++){
-                        float mn=fmax(M,lsm_m[t]), cr=native_exp(M-mn), p=native_exp(lsm_m[t]-mn);
-                        L=L*cr+lsm_l[t]*p;
-                        for (int j=0;j<NPL;j++) ac[j]=ac[j]*cr+lsm_a[t][j][l]*p;
-                        M=mn;
-                    }
-                    float il=1.0f/L;
-                    for (int j=0;j<NPL;j++) xn[hq*HD+l+SG*j]=convert_half(ac[j]*il);
-                }
-            } else if (wg < NH+KVH) {
-                // KV head: RMSNorm + RoPE current K, write K/V to cache for future steps.
-                uint kvh=wg-NH;
-                if (sgl==0) {
-                    __global float* kh = kb + kvh*HD;
-                    float sq=0, kv2[8];
-                    for (int j=0;j<8;j++){ float x=kh[l+SG*j]; kv2[j]=x; sq+=x*x; }
-                    float iv=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
-                    for (int j=0;j<8;j++) kv2[j]=kv2[j]*iv*convert_float(kn[kn_off+l+SG*j]);
-                    float ko[8];
-                    for (int j=0;j<8;j++) ko[j]=kv2[j];
-                    for (int j=0;j<4;j++){
-                        uint d=l+SG*j;
-                        float a=(float)pos*convert_float(rf[d]), c=native_cos(a), sn=native_sin(a);
-                        float x0=kv2[j], x1=kv2[j+4];
-                        ko[j]=x0*c-x1*sn; ko[j+4]=x1*c+x0*sn;
-                    }
-                    ulong cbase=((ulong)layer*KVH+kvh)*(ulong)CS*HD + (ulong)pos*HD;
-                    for (int j=0;j<8;j++){
-                        uint e=l+SG*j;
-                        kc[cbase+e]=convert_half(ko[j]);
-                        vc[cbase+e]=convert_half(vb[kvh*HD+e]);
-                    }
-                }
-            }
-        }
-        grid_barrier(gc, gs, lid, WG);
-
-        // Stage D: O-projection with residual add (h += xn . Wo). Each subgroup
-        // owns disjoint output rows, so the residual RMW needs no atomics.
-        for (uint gi=gsg; gi<H/RPS; gi+=NSG){
-            uint n=gi*RPS; float o[RPS];
-            sg_gemv_f16(xn, ow+ow_off, QDIM, n, l, o);
-            if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
-        }
-        grid_barrier(gc, gs, lid, WG);
-
-        // Stage E: fused post-attn RMSNorm + gate/up + SiLU.
-        for (uint gi=gsg; gi<IM/RPS; gi+=NSG){
-            uint n=gi*RPS;
-            float rms=sg_rms(h,l), a[RPS], b[RPS];
-            sg_gemv_rms(h, pn+pn_off, rms, gw+gw_off, n, l, a);
-            sg_gemv_rms(h, pn+pn_off, rms, uw+uw_off, n, l, b);
-            if (l==0) for (int r=0;r<RPS;r++)
-                gbuf[n+r]=convert_half((a[r]/(1.0f+native_exp(-a[r])))*b[r]);
-        }
-        grid_barrier(gc, gs, lid, WG);
-
-        // Stage F: down-projection with residual add (h += g . Wdown).
-        for (uint gi=gsg; gi<H/RPS; gi+=NSG){
-            uint n=gi*RPS; float o[RPS];
-            sg_gemv_f16(gbuf, dw+dw_off, IM, n, l, o);
-            if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
-        }
-        grid_barrier(gc, gs, lid, WG);
     }
+    mk_signal(c->sync, layer*5 + 1);
+}
+
+// Stage D: O-projection with residual add (h += xn . Wo).
+inline void mk_stageD(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    int layer = t->layer, tile = t->tile;
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    mk_wait(c->sync, layer*5 + 1, NT_BC);
+    uint ow_off=layer*H*QDIM;
+    __global float* h = c->h + c->tok_off;
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint n = gi*RPS; float o[RPS];
+        sg_gemv_f16(c->xn, c->ow+ow_off, QDIM, n, l, o);
+        if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
+    }
+    mk_signal(c->sync, layer*5 + 2);
+}
+
+// Stage E: fused post-attn RMSNorm + gate/up + SiLU.
+inline void mk_stageE(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    int layer = t->layer, tile = t->tile;
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    mk_wait(c->sync, layer*5 + 2, NT_D);
+    uint pn_off=layer*H, gw_off=layer*IM*H, uw_off=layer*IM*H;
+    __global float* h = c->h + c->tok_off;
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint n = gi*RPS;
+        float rms=sg_rms(h,l), a[RPS], b[RPS];
+        sg_gemv_rms(h, c->pn+pn_off, rms, c->gw+gw_off, n, l, a);
+        sg_gemv_rms(h, c->pn+pn_off, rms, c->uw+uw_off, n, l, b);
+        if (l==0) for (int r=0;r<RPS;r++)
+            c->gbuf[n+r]=convert_half((a[r]/(1.0f+native_exp(-a[r])))*b[r]);
+    }
+    mk_signal(c->sync, layer*5 + 3);
+}
+
+// Stage F: down-projection with residual add (h += g . Wdown).
+inline void mk_stageF(const MkTask* t, __local char* slm) {
+    __global const MonoCtx* c = t->ctx;
+    int layer = t->layer, tile = t->tile;
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    mk_wait(c->sync, layer*5 + 3, NT_E);
+    uint dw_off=layer*H*IM;
+    __global float* h = c->h + c->tok_off;
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint n = gi*RPS; float o[RPS];
+        sg_gemv_f16(c->gbuf, c->dw+dw_off, IM, n, l, o);
+        if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
+    }
+    mk_signal(c->sync, layer*5 + 4);
+}
+
+// Task dispatch: `type` selects the stage.
+inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
+    const MkTask* t = (const MkTask*)task.payload;
+    switch (task.type) {
+        case 0: mk_embed (t, slm); break;
+        case 1: mk_stageA(t, slm); break;
+        case 2: mk_stageBC(t, slm); break;
+        case 3: mk_stageD(t, slm); break;
+        case 4: mk_stageE(t, slm); break;
+        case 5: mk_stageF(t, slm); break;
+        default: break;
+    }
+}
+
+// Worker main loop (verbatim logic from workerMainLoop_template.hcl): each
+// work-group pulls tasks FIFO until the queue is drained, then the last worker
+// clears the task-manager state so the queue can be re-launched next token.
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void mk_task(__constant const TaskManager* taskManager) {
+    __local char slm[SLM_BYTES];
+    __global const TaskDesc* taskPtr = GetNextTask_block(taskManager, slm);
+    while (taskPtr != NULL) {
+        TaskDesc task = *taskPtr;
+        ExecuteMkTask(task, slm);
+        taskPtr = GetNextTask_block(taskManager, slm);
+    }
+    LastWorkerClearTaskManagerState_block(taskManager);
 }
 )CL";
 
 // ---------------------------------------------------------------------------
-// Dispatch constants (tuned on Intel Arc Pro B60)
+// Dispatch constants (tuned on Intel Arc Pro B60) — must mirror the kernel #defines
 // ---------------------------------------------------------------------------
 static constexpr int  NUM_L = 28, H_DIM = 1024, KVH = 8, HD = 128;
 static constexpr int  NH = 16, IM_DIM = 3072;
 static constexpr int  QDIM = NH * HD, KVDIM = KVH * HD;
-static constexpr int  SG = 16, RPS = 4;
+static constexpr int  RPS = 4;
 static constexpr int  MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
-// Monokernel launch geometry. The persistent grid must be small enough that all
-// MONO_WG workgroups are co-resident on the device, otherwise the grid-wide
-// software barrier deadlocks (Intel gives no cross-workgroup forward-progress
-// guarantee). The co-resident cap is kernel-specific: this register- and
-// SLM-heavy kernel builds in large-GRF mode, so at LWS=256 only a couple of
-// workgroups fit per Xe-core. Sweeping (with the SLM flash-decoding attention)
-// showed WG=32 is the sweet spot: enough parallelism for the GEMV stages while
-// keeping the ~141 grid barriers cheap; more workgroups only add barrier cost
-// (and eventually deadlock past the co-residency cap). Tunable via
-// OV_MEGAKERNEL_MONO_WG. Attention needs at least NH+KVH=24 workgroups.
-static constexpr int  MONO_WG = 32, MONO_LWS = 256;
+
+// Task-system tiling — mirror of the kernel macros (SGN=16, TF=2).
+static constexpr int  SGN = 16, TF = 2;
+static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 32
+static constexpr int  NT_BC = NH + KVH;                                // 24
+static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 8
+static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 24
+static constexpr int  NT_F  = H_DIM / (RPS * SGN * TF);                // 8
+static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(layer,stage) counters + embed
+
+// Task-worker launch geometry. Like the old monokernel grid, the worker pool
+// must be co-resident on the device: a consumer task spin-waits on its producer
+// stage's counter, so if a pulled task's producers are not actually scheduled the
+// wait would never complete. The safe worker count depends on this (register- and
+// SLM-heavy) kernel's occupancy, not the device max, so it is tunable via
+// OV_MEGAKERNEL_MONO_WG (default). More workers add parallelism to the GEMV
+// stages up to the co-residency cap; attention has NH+KVH=24 independent tasks.
+// 24 measured best on the B60 (24 Xe-cores): one worker per core keeps every
+// worker co-resident and minimises atomic_inc contention on the shared cursor.
+static constexpr int  MONO_WG = 24, MONO_LWS = 256;
+
+// Host mirrors of the device task-system structs (identical memory layout).
+struct TaskDescH {
+    int  type;
+    char payload[64 - sizeof(int)];
+};
+struct TaskManagerH {
+    const void* workQueue;
+    void*       processedTaskCount;
+    int         workQueueSize;
+};
+struct MonoCtxH {
+    void* hs; void* h;
+    void* wn; void* pn;
+    void* qw; void* kw; void* vw;
+    void* ow; void* gw; void* uw;
+    void* dw;
+    void* qn; void* kn; void* rf;
+    void* qb; void* kb; void* vb;
+    void* xn; void* gbuf;
+    void* kc; void* vc;
+    void* sync;
+    int   pos; unsigned CS; unsigned tok_off;
+};
+struct MkTaskH {
+    void* ctx;
+    int   layer;
+    int   tile;
+};
 
 // ---------------------------------------------------------------------------
 // MegaKernelFastImpl
 // ---------------------------------------------------------------------------
-
-// Kernel memory argument descriptor: a device allocation that is either a
-// classic OpenCL cl_mem buffer (usm == false) or an Intel USM pointer.
-struct KArg {
-    const void* ptr = nullptr;
-    bool usm = false;
-};
 
 class MegaKernelFastImpl : public cldnn::primitive_impl {
 public:
@@ -415,6 +580,19 @@ public:
         ctx_ = eng.get_cl_context().get();
         dev_ = eng.get_cl_device().get();
 
+        cl_platform_id platform = nullptr;
+        clGetDeviceInfo(dev_, CL_DEVICE_PLATFORM, sizeof(platform), &platform, nullptr);
+        usmAlloc_   = reinterpret_cast<clDeviceMemAllocINTEL_fn>(
+            clGetExtensionFunctionAddressForPlatform(platform, "clDeviceMemAllocINTEL"));
+        usmFree_    = reinterpret_cast<clMemFreeINTEL_fn>(
+            clGetExtensionFunctionAddressForPlatform(platform, "clMemFreeINTEL"));
+        usmMemcpy_  = reinterpret_cast<clEnqueueMemcpyINTEL_fn>(
+            clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemcpyINTEL"));
+        usmMemFill_ = reinterpret_cast<clEnqueueMemFillINTEL_fn>(
+            clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemFillINTEL"));
+        OPENVINO_ASSERT(usmAlloc_ && usmFree_ && usmMemcpy_ && usmMemFill_,
+                        "[MegaKernel] Intel USM extension functions are unavailable");
+
         cl_int err;
         prog_ = clCreateProgramWithSource(ctx_, 1, &kKernelSrc, nullptr, &err);
         OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
@@ -428,31 +606,84 @@ public:
                            std::string(log.begin(), log.end()));
         }
 
-        kMono_ = clCreateKernel(prog_, "mk_mono", &err);
-        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(mk_mono): ", err);
+        kTask_ = clCreateKernel(prog_, "mk_task", &err);
+        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(mk_task): ", err);
 
-        auto alloc = [&](size_t bytes) {
-            cl_mem m = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, bytes, nullptr, &err);
-            OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer: ", err);
-            return m;
+        auto ualloc = [&](size_t bytes) -> void* {
+            cl_int st = CL_SUCCESS;
+            void* p = usmAlloc_(ctx_, dev_, nullptr, bytes, 0, &st);
+            OPENVINO_ASSERT(st == CL_SUCCESS && p, "[MegaKernel] USM device alloc: ", st);
+            return p;
         };
-        mQb_ = alloc(QDIM   * 4);
-        mKb_ = alloc(KVDIM  * 4);
-        mVb_ = alloc(KVDIM  * 4);
-        mGb_ = alloc(IM_DIM * 2);
-        mXn_ = alloc(QDIM   * 2);
+        // Per-token scratch (reused across tokens; tokens are serialised).
+        mQb_ = ualloc(QDIM   * 4);
+        mKb_ = ualloc(KVDIM  * 4);
+        mVb_ = ualloc(KVDIM  * 4);
+        mGb_ = ualloc(IM_DIM * 2);
+        mXn_ = ualloc(QDIM   * 2);
         // Persistent internal KV cache: [NUM_L, KVH, MAX_SEQ, HD] half, K and V.
-        // Owned by the megakernel and reused across decode steps, so attention
-        // never touches OpenVINO's KV-variable buffers (which are padded/pooled).
-        mKC_ = alloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
-        mVC_ = alloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
-        // Grid-barrier state for the monokernel: [0]=arrival counter, [1]=sense
-        // flag, both zero-initialised. The barrier restores the counter to 0 at
-        // every release, so it stays valid across decode launches.
-        int bar_init[2] = {0, 0};
-        mBar_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                               sizeof(bar_init), bar_init, &err);
-        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(bar): ", err);
+        mKC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
+        mVC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
+        // Per-(layer,stage) completion counters (+ embedding). Reset each launch.
+        mSync_ = ualloc(SYNC_N * sizeof(int));
+        // Shared per-token context.
+        mCtx_ = ualloc(sizeof(MonoCtxH));
+
+        // Build the topologically-sorted task queue once. Each task carries the
+        // context pointer plus its (layer, tile); the task `type` selects the stage.
+        std::vector<TaskDescH> queue;
+        auto push = [&](int type, int layer, int tile) {
+            TaskDescH d{};
+            d.type = type;
+            MkTaskH t{};
+            t.ctx = mCtx_;
+            t.layer = layer;
+            t.tile = tile;
+            static_assert(sizeof(MkTaskH) <= sizeof(d.payload), "MkTask exceeds payload");
+            std::memcpy(d.payload, &t, sizeof(t));
+            queue.push_back(d);
+        };
+        push(0, 0, 0);                                  // embedding
+        for (int L = 0; L < NUM_L; L++) {
+            for (int i = 0; i < NT_A;  i++) push(1, L, i);   // Stage A  (QKV)
+            for (int i = 0; i < NT_BC; i++) push(2, L, i);   // Stage BC (attention)
+            for (int i = 0; i < NT_D;  i++) push(3, L, i);   // Stage D  (o-proj)
+            for (int i = 0; i < NT_E;  i++) push(4, L, i);   // Stage E  (gate/up)
+            for (int i = 0; i < NT_F;  i++) push(5, L, i);   // Stage F  (down)
+        }
+        workQueueSize_ = static_cast<int>(queue.size());
+
+        auto& strm = instance.get_network().get_stream();
+        cl_command_queue q = downcast<ocl_stream>(strm).get_cl_queue().get();
+        mQueue_   = ualloc(queue.size() * sizeof(TaskDescH));
+        mCounter_ = ualloc(sizeof(int));
+        int zero = 0;
+        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mQueue_, queue.data(),
+                                   queue.size() * sizeof(TaskDescH), 0, nullptr, nullptr) == CL_SUCCESS,
+                        "[MegaKernel] queue upload failed");
+        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCounter_, &zero, sizeof(int), 0, nullptr, nullptr) == CL_SUCCESS,
+                        "[MegaKernel] counter init failed");
+
+        // TaskManager descriptor consumed by the kernel as a __constant buffer.
+        TaskManagerH tm{};
+        tm.workQueue = mQueue_;
+        tm.processedTaskCount = mCounter_;
+        tm.workQueueSize = workQueueSize_;
+        mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(tm), &tm, &err);
+        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
+
+        OPENVINO_ASSERT(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS,
+                        "[MegaKernel] set taskManager arg failed");
+        // The tasks reach every data buffer through USM pointers held in the
+        // context, so allow the kernel to indirectly access any USM allocation
+        // (device / host / shared) regardless of how OpenVINO allocated the weights.
+        cl_bool enable = CL_TRUE;
+        clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL,
+                            sizeof(enable), &enable);
+        clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL,
+                            sizeof(enable), &enable);
+        clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL,
+                            sizeof(enable), &enable);
         ready_ = true;
     }
 
@@ -460,72 +691,52 @@ public:
                               cldnn::primitive_inst& instance) override {
         ensure_ready(instance);
 
-        auto& eng = downcast<ocl_engine>(instance.get_network().get_engine());
-        const auto& usm_helper = eng.get_usm_helper();
         auto& strm = instance.get_network().get_stream();
         auto& ocls = downcast<ocl_stream>(strm);
         cl_command_queue q = ocls.get_cl_queue().get();
 
-        // A kernel memory argument that may be backed either by a classic
-        // OpenCL cl_mem buffer or by an Intel USM allocation. buffer_ptr()
-        // returns the cl_mem handle for gpu_buffer and the raw device pointer
-        // for gpu_usm; the two require different clSetKernelArg* calls.
-        auto marg = [](cldnn::memory& m) -> KArg {
+        for (auto& e : events) strm.wait_for_events({e});   // inputs ready before we read them
+
+        // Resolve the raw USM device pointers for every model input/output. The
+        // task-system tasks dereference these directly out of the context struct,
+        // which requires genuine USM device allocations (asserted below).
+        auto usm_raw = [](cldnn::memory& m, const char* name) -> void* {
             auto at = m.get_allocation_type();
             bool usm = at == cldnn::allocation_type::usm_device ||
                        at == cldnn::allocation_type::usm_host ||
                        at == cldnn::allocation_type::usm_shared;
-            return KArg{m.buffer_ptr(), usm};
+            OPENVINO_ASSERT(usm, "[MegaKernel] input/output '", name,
+                            "' must be a USM allocation for the task-system path");
+            return m.buffer_ptr();
         };
 
-        KArg hs = marg(instance.input_memory(0));
-        KArg qw = marg(instance.input_memory(5));
-        KArg kw = marg(instance.input_memory(6));
-        KArg vw = marg(instance.input_memory(7));
-        KArg ow = marg(instance.input_memory(8));
-        KArg gw = marg(instance.input_memory(9));
-        KArg uw = marg(instance.input_memory(10));
-        KArg dw = marg(instance.input_memory(11));
-        KArg il = marg(instance.input_memory(12));
-        KArg pl = marg(instance.input_memory(13));
-        KArg qn = marg(instance.input_memory(14));
-        KArg kn = marg(instance.input_memory(15));
-        KArg rf = marg(instance.input_memory(16));
-        KArg oh = marg(instance.output_memory(0));
-        // Internal scratch + persistent KV cache (plain cl_mem from ensure_ready).
-        KArg aQb{static_cast<void*>(mQb_), false};
-        KArg aKb{static_cast<void*>(mKb_), false};
-        KArg aVb{static_cast<void*>(mVb_), false};
-        KArg aGb{static_cast<void*>(mGb_), false};
-        KArg aXn{static_cast<void*>(mXn_), false};
-        KArg aKC{static_cast<void*>(mKC_), false};
-        KArg aVC{static_cast<void*>(mVC_), false};
+        MonoCtxH ctx{};
+        ctx.hs = usm_raw(instance.input_memory(0),  "hidden_states");
+        ctx.h  = usm_raw(instance.output_memory(0), "hidden_states_out");
+        ctx.qw = usm_raw(instance.input_memory(5),  "q_proj_w");
+        ctx.kw = usm_raw(instance.input_memory(6),  "k_proj_w");
+        ctx.vw = usm_raw(instance.input_memory(7),  "v_proj_w");
+        ctx.ow = usm_raw(instance.input_memory(8),  "o_proj_w");
+        ctx.gw = usm_raw(instance.input_memory(9),  "gate_proj_w");
+        ctx.uw = usm_raw(instance.input_memory(10), "up_proj_w");
+        ctx.dw = usm_raw(instance.input_memory(11), "down_proj_w");
+        ctx.wn = usm_raw(instance.input_memory(12), "input_ln_w");
+        ctx.pn = usm_raw(instance.input_memory(13), "post_attn_ln_w");
+        ctx.qn = usm_raw(instance.input_memory(14), "q_norm_w");
+        ctx.kn = usm_raw(instance.input_memory(15), "k_norm_w");
+        ctx.rf = usm_raw(instance.input_memory(16), "rope_inv_freq");
+        ctx.qb = mQb_; ctx.kb = mKb_; ctx.vb = mVb_;
+        ctx.xn = mXn_; ctx.gbuf = mGb_;
+        ctx.kc = mKC_; ctx.vc = mVC_;
+        ctx.sync = mSync_;
+        ctx.CS = (unsigned)MAX_SEQ;
 
         // Number of new tokens this step (dim 1 of hidden_states).
         auto hs_ps = instance.input_memory(0).get_layout().get<ov::PartialShape>();
         uint S_new = (uint)hs_ps[1].get_length();
 
-        // Length bookkeeping. The authoritative sequence position is the first
-        // new token's position_ids value (input port 1): 0 at the start of every
-        // sequence and P for a decode step at absolute position P. The MegaKernel
-        // is deliberately stateless with respect to sequence position — it derives
-        // S_past solely from position_ids, exactly like the baseline model, so that
-        // enabling the MegaKernel never changes how the model responds to a given
-        // set of inputs. A fresh sequence simply arrives with pos==0 and overwrites
-        // the internal KV slots from the start; no internal length counter is kept.
-        //
-        // NOTE / KNOWN LIMITATION (not implemented): the MegaKernel keeps its own
-        // internal KV cache (mKC_/mVC_) instead of reading the past_key/past_value
-        // inputs (ports 3/4). That internal cache is a PoC kernel-design choice and
-        // is not wired to OpenVINO's KV state; correctness relies on every slot
-        // being (re)written by this sequence before it is read, which position_ids
-        // guarantees. Sharing OpenVINO's KV buffers is left unimplemented.
-        for (auto& e : events) strm.wait_for_events({e});   // inputs ready before we read them
-        // DIAGNOSTIC TOGGLE: OV_MEGAKERNEL_POSREAD=0 disables the per-token blocking
-        // read of position_ids and falls back to an internal accumulator (correct
-        // only within a single sequence). Used to isolate whether the per-token
-        // host<->device sync of the position read is what serialises execution under
-        // framework decode loops. Default (unset) reads position_ids every step.
+        // Sequence position derived solely from position_ids (input 1), exactly
+        // like the original monokernel — the MegaKernel is stateless w.r.t. it.
         static const bool pos_read = [] {
             const char* v = std::getenv("OV_MEGAKERNEL_POSREAD");
             return !(v && v[0] == '0');
@@ -552,69 +763,34 @@ public:
         }
         acc_len = S_past + S_new;
 
-        auto set_arg = [](cl_kernel k, cl_uint i, size_t sz, const void* p) {
-            cl_int r = clSetKernelArg(k, i, sz, p);
-            OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] clSetKernelArg: ", r);
-        };
-        auto set_mem = [&](cl_kernel k, cl_uint i, const KArg& a) {
-            cl_int r;
-            if (a.usm) {
-                r = usm_helper.set_kernel_arg_mem_pointer(cl::Kernel(k, true), i, a.ptr);
-            } else {
-                cl_mem m = static_cast<cl_mem>(const_cast<void*>(a.ptr));
-                r = clSetKernelArg(k, i, sizeof(cl_mem), &m);
-            }
-            OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] set mem arg: ", r);
-        };
-#define SM(k,i,m)  set_mem(k,i,(m))
-#define SU(k,i,v)  { cl_uint _vv=(cl_uint)(v); set_arg(k,i,sizeof(cl_uint),&_vv); }
-#define SI(k,i,v)  { cl_int  _vi=(cl_int)(v);  set_arg(k,i,sizeof(cl_int), &_vi); }
-        auto enq = [&](cl_kernel k, size_t g, size_t l) {
-            cl_int r = clEnqueueNDRangeKernel(q, k, 1, nullptr, &g, &l, 0, nullptr, nullptr);
-            OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
-        };
-
-        // ===== Monokernel path: the whole 28-layer model in ONE launch per token.
-        // A single persistent grid runs every stage of every layer, using a
-        // grid-wide software barrier for inter-stage synchronisation. Decode
-        // (S_new==1) is a single launch; prefill loops the same kernel once per
-        // token so the plugin uses only this kernel.
-        //
-        // The grid MUST NOT oversubscribe: all mono_wg workgroups have to be
-        // co-resident or the global barrier deadlocks. The safe count depends on
-        // this (register- and SLM-heavy) kernel's occupancy, not the device max,
-        // so it is tunable via OV_MEGAKERNEL_MONO_WG (default MONO_WG).
-        static const int mono_wg = [] {
+        // Co-resident worker count (see MONO_WG note). Tunable via env.
+        static const int workers = [] {
             const char* v = std::getenv("OV_MEGAKERNEL_MONO_WG");
             int w = v ? atoi(v) : MONO_WG;
             if (w < 1) w = 1;
             if (w > 160) w = 160;
             return w;
         }();
-        cl_kernel k = kMono_;
-        SM(k,0,hs);  SM(k,1,oh);
-        SM(k,2,il);  SM(k,3,pl);
-        SM(k,4,qw);  SM(k,5,kw);  SM(k,6,vw);
-        SM(k,7,ow);  SM(k,8,gw);  SM(k,9,uw);  SM(k,10,dw);
-        SM(k,11,qn); SM(k,12,kn); SM(k,13,rf);
-        SM(k,14,aQb); SM(k,15,aKb); SM(k,16,aVb);
-        SM(k,17,aXn); SM(k,18,aGb);
-        SM(k,19,aKC); SM(k,20,aVC);
-        { cl_mem m = mBar_;
-          cl_int r = clSetKernelArg(k, 21, sizeof(cl_mem), &m);
-          OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] set bar arg: ", r); }
-        SI(k,23,mono_wg); SU(k,24,MAX_SEQ);
-        // One launch per new token; the in-order queue serialises them so token
-        // t+1 sees the KV cache written by token t. tok_off selects the token's
-        // slice of hs/h (t*H). For decode this loop runs exactly once.
+
+        // ===== Task-system path: the whole 28-layer model as one queue of tasks,
+        // launched once per new token. The in-order queue serialises tokens so
+        // token t+1 sees the KV cache written by token t. For each token we refresh
+        // the shared context (pos / token offset) and reset the sync counters, then
+        // launch the worker pool which drains the queue.
+        const char pat = 0;
         for (uint t = 0; t < S_new; t++) {
-            SI(k,22,(int)(S_past + t));
-            SU(k,25,t * H_DIM);
-            enq(k, (size_t)mono_wg*MONO_LWS, (size_t)MONO_LWS);
+            ctx.pos     = (int)(S_past + t);
+            ctx.tok_off = t * (unsigned)H_DIM;
+            OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCtx_, &ctx, sizeof(ctx), 0, nullptr, nullptr) == CL_SUCCESS,
+                            "[MegaKernel] context update failed");
+            // Zero the stage counters and the FIFO cursor before the workers start.
+            usmMemFill_(q, mSync_,    &pat, 1, SYNC_N * sizeof(int), 0, nullptr, nullptr);
+            usmMemFill_(q, mCounter_, &pat, 1, sizeof(int),          0, nullptr, nullptr);
+            size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
+            cl_int r = clEnqueueNDRangeKernel(q, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
+            OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
         }
-#undef SM
-#undef SU
-#undef SI
+
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
         return std::make_shared<ocl_event>(cl::Event(marker, false), 0ULL);
@@ -626,10 +802,20 @@ private:
     cl_context    ctx_  = nullptr;
     cl_device_id  dev_  = nullptr;
     cl_program    prog_ = nullptr;
-    cl_kernel kMono_=nullptr;            // single-launch monokernel (whole model)
-    cl_mem mQb_=nullptr, mKb_=nullptr, mVb_=nullptr, mGb_=nullptr, mXn_=nullptr;
-    cl_mem mKC_=nullptr, mVC_=nullptr;   // persistent internal KV cache (K, V)
-    cl_mem mBar_=nullptr;                // monokernel grid-barrier state
+    cl_kernel     kTask_ = nullptr;      // task-system worker kernel (whole model)
+    // Intel USM extension entry points (resolved in ensure_ready).
+    clDeviceMemAllocINTEL_fn  usmAlloc_   = nullptr;
+    clMemFreeINTEL_fn         usmFree_    = nullptr;
+    clEnqueueMemcpyINTEL_fn   usmMemcpy_  = nullptr;
+    clEnqueueMemFillINTEL_fn  usmMemFill_ = nullptr;
+    // USM device allocations: per-token scratch, KV cache, sync counters, context.
+    void* mQb_=nullptr; void* mKb_=nullptr; void* mVb_=nullptr; void* mGb_=nullptr; void* mXn_=nullptr;
+    void* mKC_=nullptr; void* mVC_=nullptr;
+    void* mSync_=nullptr; void* mCtx_=nullptr;
+    // Task-system state: work queue, FIFO cursor and the __constant descriptor.
+    void*  mQueue_=nullptr; void* mCounter_=nullptr;
+    cl_mem mTaskMgr_=nullptr;
+    int    workQueueSize_ = 0;
 };
 
 }  // namespace
