@@ -61,6 +61,7 @@ static const char* kKernelSrc = R"CL(
 #define RPS   4
 #define NUM_L 28
 
+// ---------------------------------------------------------------------------
 // Barrier-free RMS: sub_group_reduce_add over each lane's strided H/SG slice
 inline float sg_rms(const __global float* h, uint lane) {
     float ss = 0;
@@ -199,12 +200,12 @@ inline void LastWorkerClearTaskManagerState_block(
 // completion. The GEMV / RMSNorm / RoPE / flash-attention math is unchanged.
 // ===========================================================================
 #define SGN 16                                 // sub-groups per work-group (LWS 256 / SG 16)
-#define TF  2                                  // GEMV tile coarsening (RPS-groups per lane per task)
-#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 32
+#define TF  1                                  // GEMV tile coarsening (RPS-groups per lane per task)
+#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 64
 #define NT_BC (NH+KVH)                          // Stage BC (attn) task count    = 24
-#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 8
-#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 24
-#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 8
+#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 16
+#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 48
+#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 16
 #define EMBED_IDX (NUM_L*5)                     // sync slot for the embedding stage
 #define SLM_BYTES ((2*SGN + SGN*NPL*SG)*4)      // flash-decoding partials (lsm_m/lsm_l/lsm_a)
 
@@ -236,10 +237,20 @@ typedef struct MkTask {
 // producer stage's counter reaches `cnt` (all its tiles signalled). Mirrors the
 // producer store-release / consumer load-acquire pattern of the task system.
 inline void mk_wait(__global int* sync, int idx, int cnt) {
-    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
+    // Entry barrier is LOCAL-only: at stage entry there is no producer global data
+    // to make visible yet (that is the exit barrier's job, paired with the acquire
+    // below), so a device-scope global fence + L1 flush here is pure overhead. A
+    // local fence still orders the SLM task-pointer handoff from GetNextTask_block.
+    barrier(CLK_LOCAL_MEM_FENCE);
     if (get_local_id(0) == 0) {
         volatile __global atomic_int* p = (volatile __global atomic_int*)(sync + idx);
-        while (atomic_load_explicit(p, memory_order_acquire, memory_scope_device) < cnt) {}
+        // Poll with a RELAXED load so idle spinners do not force a device-scope
+        // coherency transaction on every iteration (that traffic steals memory
+        // bandwidth from the workers actually doing the stage). Once the counter
+        // is observed to reach `cnt`, a single ACQUIRE load synchronizes-with the
+        // producers' release stores so their data writes are visible.
+        while (atomic_load_explicit(p, memory_order_relaxed, memory_scope_device) < cnt) {}
+        atomic_load_explicit(p, memory_order_acquire, memory_scope_device);
     }
     barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
 }
@@ -494,13 +505,13 @@ static constexpr int  QDIM = NH * HD, KVDIM = KVH * HD;
 static constexpr int  RPS = 4;
 static constexpr int  MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
 
-// Task-system tiling — mirror of the kernel macros (SGN=16, TF=2).
-static constexpr int  SGN = 16, TF = 2;
-static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 32
+// Task-system tiling — mirror of the kernel macros (SGN=16, TF=1).
+static constexpr int  SGN = 16, TF = 1;
+static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 64
 static constexpr int  NT_BC = NH + KVH;                                // 24
-static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 8
-static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 24
-static constexpr int  NT_F  = H_DIM / (RPS * SGN * TF);                // 8
+static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 16
+static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 48
+static constexpr int  NT_F  = H_DIM / (RPS * SGN * TF);                // 16
 static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(layer,stage) counters + embed
 
 // Task-worker launch geometry. Like the old monokernel grid, the worker pool
@@ -510,9 +521,11 @@ static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(l
 // SLM-heavy) kernel's occupancy, not the device max, so it is tunable via
 // OV_MEGAKERNEL_MONO_WG (default). More workers add parallelism to the GEMV
 // stages up to the co-residency cap; attention has NH+KVH=24 independent tasks.
-// 24 measured best on the B60 (24 Xe-cores): one worker per core keeps every
-// worker co-resident and minimises atomic_inc contention on the shared cursor.
-static constexpr int  MONO_WG = 24, MONO_LWS = 256;
+// Tuned on the B60 (24 Xe-cores): with the lighter LWS=256 (SGN=16) work-group,
+// two work-groups fit per Xe-core, so 32 workers maximise co-resident GEMV
+// parallelism (more outstanding weight loads => higher HBM utilisation) while
+// staying below the point where shared-cursor atomic_inc contention dominates.
+static constexpr int  MONO_WG = 32, MONO_LWS = 256;
 
 // Host mirrors of the device task-system structs (identical memory layout).
 struct TaskDescH {
