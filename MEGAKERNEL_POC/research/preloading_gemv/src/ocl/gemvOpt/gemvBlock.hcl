@@ -127,7 +127,8 @@ inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
           loadBufferPtr_local, matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
-  WaitForSemaphore_block(0, syncMemory, wantedSyncVal);
+  IN_KERNEL_PROFILE(WaitForSemaphore_block(0, syncMemory, wantedSyncVal),
+                    "WaitForSemaphore_block");
 
   // The way that preloading of vector dara is implemented should be
   // parametrized by 'policy' design, which is hard to achive wihouth templates.
