@@ -103,23 +103,22 @@ TaskDesc CreateGemvTaskDesc(int type, const cl_half* matrix,
   return taskDesc;
 }
 
-class ChainTaskSystemGemvTest : public ocltest::GemvTestFixture {};
+class ChainTaskSystemGemvTest : public ocltest::GemvTestFixture {
+ protected:
+  ocltest::GemvBenchmarkResult benchmarkTaskSystemChain(
+      const std::vector<std::vector<float>>& matrices,
+      const std::vector<float>& input,
+      const std::vector<ocltest::GemvParams>& params);
+};
 
-TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
-  std::vector<std::vector<float>> matrices(GEMV_PARAMS.size());
-  std::vector<std::vector<cl_half>> matricesHalf(GEMV_PARAMS.size());
-  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
-    matrices[layer] = utils::createRandomBuffer(
-        GEMV_PARAMS[layer].rowCount * GEMV_PARAMS[layer].columnCount, layer);
-    const float scale =
-        1.0f / std::sqrt(static_cast<float>(GEMV_PARAMS[layer].columnCount));
-    for (float& value : matrices[layer]) {
-      value *= scale;
-    }
+ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
+    const std::vector<std::vector<float>>& matrices,
+    const std::vector<float>& input,
+    const std::vector<ocltest::GemvParams>& params) {
+  std::vector<std::vector<cl_half>> matricesHalf(params.size());
+  for (size_t layer = 0; layer < params.size(); ++layer) {
     matricesHalf[layer] = ConvertToHalf(matrices[layer]);
   }
-  const std::vector<float> input =
-      utils::createRandomBuffer(GEMV_PARAMS.front().columnCount, 3);
   const std::vector<cl_half> inputHalf = ConvertToHalf(input);
 
   const OCLBinary binary = createProgramAndKernel(
@@ -141,12 +140,14 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
                                                "clEnqueueMemcpyINTEL"));
   const auto memFree = reinterpret_cast<clMemFreeINTEL_fn>(
       clGetExtensionFunctionAddressForPlatform(platform, "clMemFreeINTEL"));
-  ASSERT_NE(deviceMemAlloc, nullptr);
-  ASSERT_NE(enqueueMemcpy, nullptr);
-  ASSERT_NE(memFree, nullptr);
+  if (deviceMemAlloc == nullptr || enqueueMemcpy == nullptr ||
+      memFree == nullptr) {
+    ADD_FAILURE() << "Required Intel USM extension functions are unavailable";
+    return {};
+  }
 
-  std::vector<cl_half*> matrixGpu(GEMV_PARAMS.size());
-  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
+  std::vector<cl_half*> matrixGpu(params.size());
+  for (size_t layer = 0; layer < params.size(); ++layer) {
     matrixGpu[layer] = static_cast<cl_half*>(
         deviceMemAlloc(context(), deviceId(), nullptr,
                        matricesHalf[layer].size() * sizeof(cl_half),
@@ -157,7 +158,7 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
         matricesHalf[layer].size() * sizeof(cl_half), 0, nullptr, nullptr));
   }
 
-  std::vector<cl_half*> vectorsGpu(GEMV_PARAMS.size() + 1);
+  std::vector<cl_half*> vectorsGpu(params.size() + 1);
   vectorsGpu.front() = static_cast<cl_half*>(deviceMemAlloc(
       context(), deviceId(), nullptr, inputHalf.size() * sizeof(cl_half),
       alignof(cl_half), &status));
@@ -165,15 +166,14 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   ASSERT_OCL_SUCCESS(
       enqueueMemcpy(queue(), CL_TRUE, vectorsGpu.front(), inputHalf.data(),
                     inputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
-  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
-    vectorsGpu[layer + 1] = static_cast<cl_half*>(
-        deviceMemAlloc(context(), deviceId(), nullptr,
-                       GEMV_PARAMS[layer].rowCount * sizeof(cl_half),
-                       alignof(cl_half), &status));
+  for (size_t layer = 0; layer < params.size(); ++layer) {
+    vectorsGpu[layer + 1] = static_cast<cl_half*>(deviceMemAlloc(
+        context(), deviceId(), nullptr,
+        params[layer].rowCount * sizeof(cl_half), alignof(cl_half), &status));
     ASSERT_OCL_SUCCESS(status);
   }
 
-  const std::vector<int> clearedCompletionCounts(GEMV_PARAMS.size(), 0);
+  const std::vector<int> clearedCompletionCounts(params.size(), 0);
   int* completionCountsGpu = static_cast<int*>(deviceMemAlloc(
       context(), deviceId(), nullptr,
       clearedCompletionCounts.size() * sizeof(int), alignof(int), &status));
@@ -183,15 +183,15 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
       clearedCompletionCounts.size() * sizeof(int), 0, nullptr, nullptr));
 
   size_t totalTaskCount = 0;
-  for (const ocltest::GemvParams& params : GEMV_PARAMS) {
-    totalTaskCount += params.rowCount / params.rowsPerBlock;
+  for (const ocltest::GemvParams& layerParams : params) {
+    totalTaskCount += layerParams.rowCount / layerParams.rowsPerBlock;
   }
   std::vector<TaskDesc> tasks;
   tasks.reserve(totalTaskCount);
   size_t prevLayerOutputTiles = 0;
-  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
-    const ocltest::GemvParams& params = GEMV_PARAMS[layer];
-    const size_t taskCount = params.rowCount / params.rowsPerBlock;
+  for (size_t layer = 0; layer < params.size(); ++layer) {
+    const ocltest::GemvParams& layerParams = params[layer];
+    const size_t taskCount = layerParams.rowCount / layerParams.rowsPerBlock;
     std::cout << "Layer " << layer << ": " << taskCount << " tasks\n";
     for (size_t tileId = 0; tileId < taskCount; ++tileId) {
       switch (layer) {
@@ -248,10 +248,10 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
                                             &globalWorkSize, &WORK_GROUP_SIZE,
                                             0, nullptr, nullptr));
 
-  std::vector<cl_half> outputHalf(GEMV_PARAMS.back().rowCount);
-  ASSERT_OCL_SUCCESS(
-      enqueueMemcpy(queue(), CL_TRUE, outputHalf.data(), vectorsGpu.back(),
-                    outputHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
+  std::vector<cl_half> outputBeforeHalf(params.back().rowCount);
+  ASSERT_OCL_SUCCESS(enqueueMemcpy(
+      queue(), CL_TRUE, outputBeforeHalf.data(), vectorsGpu.back(),
+      outputBeforeHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
 
   std::cout << "Benchmarking three-GEMV task-system chain...\n";
   const ocltest::ProfileResult taskSystemProfile =
@@ -264,8 +264,10 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
           },
           queue(), ocltest::WARMUP_ITERATIONS, ocltest::BENCHMARK_ITERATIONS);
 
-  const ocltest::GemvBenchmarkResult taskSystemResult = {
-      taskSystemProfile, ConvertToFloat(outputHalf)};
+  std::vector<cl_half> outputAfterHalf(params.back().rowCount);
+  ASSERT_OCL_SUCCESS(enqueueMemcpy(
+      queue(), CL_TRUE, outputAfterHalf.data(), vectorsGpu.back(),
+      outputAfterHalf.size() * sizeof(cl_half), 0, nullptr, nullptr));
 
   ASSERT_OCL_SUCCESS(clReleaseMemObject(taskManagerBuffer));
   ASSERT_OCL_SUCCESS(HostReleaseTaskSystem(taskManager, deviceId(), context()));
@@ -278,6 +280,33 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   }
   releaseOCLBinary(binary);
 
+  // Compare output before and after benchmarking to ensure correctness:
+  const auto beforeFloat = ConvertToFloat(outputBeforeHalf);
+  const auto afterFloat = ConvertToFloat(outputAfterHalf);
+  for (size_t index = 0; index < beforeFloat.size(); ++index) {
+    EXPECT_NEAR(beforeFloat[index], afterFloat[index], ocltest::ABS_ERROR)
+        << "Output mismatch at index " << index;
+  }
+
+  return {taskSystemProfile, ConvertToFloat(outputAfterHalf)};
+}
+
+TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
+  std::vector<std::vector<float>> matrices(GEMV_PARAMS.size());
+  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
+    matrices[layer] = utils::createRandomBuffer(
+        GEMV_PARAMS[layer].rowCount * GEMV_PARAMS[layer].columnCount, layer);
+    const float scale =
+        1.0f / std::sqrt(static_cast<float>(GEMV_PARAMS[layer].columnCount));
+    for (float& value : matrices[layer]) {
+      value *= scale;
+    }
+  }
+  const std::vector<float> input =
+      utils::createRandomBuffer(GEMV_PARAMS.front().columnCount, 3);
+
+  const ocltest::GemvBenchmarkResult taskSystemResult =
+      benchmarkTaskSystemChain(matrices, input, GEMV_PARAMS);
   const ocltest::GemvBenchmarkResult openClResult =
       benchmarkOpenClGemvChain(matrices, input, GEMV_PARAMS, GEMV_KERNEL_PATH);
   const ocltest::GemvBenchmarkResult dnnlResult =
