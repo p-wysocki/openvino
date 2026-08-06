@@ -47,6 +47,46 @@ std::vector<float> ConvertToFloat(const std::vector<cl_half>& input) {
   return output;
 }
 
+void PrintTaskQueue(const std::vector<TaskDesc>& tasks) {
+  // Print tasks for debugging:
+  for (size_t taskIndex = 0; taskIndex < tasks.size(); ++taskIndex) {
+    const TaskDesc& task = tasks[taskIndex];
+    std::cout << "Task " << taskIndex << ": type=" << task.type
+              << ", payloadSize=" << sizeof(task.payload) << "\n";
+    // Print payload casted to the appropriate GEMV task struct based on the
+    // task type
+    switch (task.type) {
+      case 3: {
+        const Gemv1024x2048Task* gemvTask =
+            reinterpret_cast<const Gemv1024x2048Task*>(task.payload);
+        std::cout << "  Gemv1024x2048Task: tileId=" << gemvTask->tileId
+                  << ", wantedInputSyncValue=" << gemvTask->wantedInputSyncValue
+                  << "\n";
+        break;
+      }
+      case 4: {
+        const Gemv3072x1024Task* gemvTask =
+            reinterpret_cast<const Gemv3072x1024Task*>(task.payload);
+        std::cout << "  Gemv3072x1024Task: tileId=" << gemvTask->tileId
+                  << ", wantedInputSyncValue=" << gemvTask->wantedInputSyncValue
+                  << "\n";
+        break;
+      }
+      case 5: {
+        const Gemv1024x3072Task* gemvTask =
+            reinterpret_cast<const Gemv1024x3072Task*>(task.payload);
+        std::cout << "  Gemv1024x3072Task: tileId=" << gemvTask->tileId
+                  << ", wantedInputSyncValue=" << gemvTask->wantedInputSyncValue
+                  << "\n";
+        break;
+      }
+      default:
+        std::cerr << "Unknown task type: " << task.type << "\n";
+        break;
+    }
+  }
+}
+
 template <typename GemvTask>
 TaskDesc CreateGemvTaskDesc(int type, const cl_half* matrix,
                             const cl_half* vector, cl_half* output,
@@ -148,38 +188,34 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   }
   std::vector<TaskDesc> tasks;
   tasks.reserve(totalTaskCount);
+  size_t prevLayerOutputTiles = 0;
   for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
     const ocltest::GemvParams& params = GEMV_PARAMS[layer];
     const size_t taskCount = params.rowCount / params.rowsPerBlock;
     std::cout << "Layer " << layer << ": " << taskCount << " tasks\n";
     for (size_t tileId = 0; tileId < taskCount; ++tileId) {
-      const int inputTaskCount =
-          layer == 0 ? 0
-                     : static_cast<int>(GEMV_PARAMS[layer - 1].rowCount /
-                                        GEMV_PARAMS[layer - 1].rowsPerBlock);
-      int* inputSemaphore =
-          layer == 0 ? nullptr : completionCountsGpu + layer - 1;
       switch (layer) {
         case 0:
           tasks.push_back(CreateGemvTaskDesc<Gemv1024x2048Task>(
               3, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
-              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
-              static_cast<int>(tileId)));
+              nullptr, completionCountsGpu, 0, static_cast<int>(tileId)));
           break;
         case 1:
           tasks.push_back(CreateGemvTaskDesc<Gemv3072x1024Task>(
               4, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
-              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
-              static_cast<int>(tileId)));
+              &completionCountsGpu[0], &completionCountsGpu[1],
+              prevLayerOutputTiles, static_cast<int>(tileId)));
           break;
         case 2:
           tasks.push_back(CreateGemvTaskDesc<Gemv1024x3072Task>(
               5, matrixGpu[layer], vectorsGpu[layer], vectorsGpu[layer + 1],
-              inputSemaphore, completionCountsGpu + layer, inputTaskCount,
+              &completionCountsGpu[1], nullptr, prevLayerOutputTiles,
               static_cast<int>(tileId)));
           break;
       }
     }
+
+    prevLayerOutputTiles = taskCount;
   }
 
   TaskManager taskManager;
@@ -262,12 +298,12 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   ASSERT_EQ(taskSystemResult.output.size(), dnnlResult.output.size());
   ASSERT_EQ(taskSystemResult.output.size(), openClResult.output.size());
   for (size_t index = 0; index < taskSystemResult.output.size(); ++index) {
-    ASSERT_NEAR(taskSystemResult.output[index], dnnlResult.output[index],
-                ocltest::ABS_ERROR)
-        << "Task-system GEMV chain differs from oneDNN at index " << index;
     ASSERT_NEAR(taskSystemResult.output[index], openClResult.output[index],
                 ocltest::ABS_ERROR)
         << "Task-system GEMV chain differs from OpenCL at index " << index;
+    ASSERT_NEAR(taskSystemResult.output[index], dnnlResult.output[index],
+                ocltest::ABS_ERROR)
+        << "Task-system GEMV chain differs from oneDNN at index " << index;
   }
 }
 
