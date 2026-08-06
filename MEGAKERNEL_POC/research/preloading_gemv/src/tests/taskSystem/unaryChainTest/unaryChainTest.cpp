@@ -94,7 +94,6 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
     topologicallySortedTaskQueue[index].type = 0;
     Pow2Task task;
     task.size = THREADS;
-    task.syncValue = 326;
     task.outputReady = syncGPU + index;
     task.input = inputGPU + index * THREADS;
     task.output = intermediateGPU + index * THREADS;
@@ -106,7 +105,7 @@ TEST_F(TaskSystemTests, UnaryChainTest) {
     topologicallySortedTaskQueue[TILE_COUNT + index].type = 1;
     SiluTask siluTask;
     siluTask.size = THREADS;
-    siluTask.syncValue = 326;
+    siluTask.syncValue = 1;
     siluTask.inputReady = syncGPU + index;
     siluTask.input = intermediateGPU + index * THREADS;
     siluTask.output = outputGPU + index * THREADS;

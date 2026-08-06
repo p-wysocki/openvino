@@ -5,11 +5,11 @@ typedef struct Pow2Task {
   GLOBAL_DEVICE_PTR float* input;
   GLOBAL_DEVICE_PTR float* output;
   GLOBAL_DEVICE_PTR int* outputReady;
-  int syncValue;
   int size;
 } Pow2Task;
 
 #ifdef DEVICE_COMPILATION
+#include "common/semaphore.hcl"
 inline void ExecuteTestTask(const Pow2Task* task, __local char* slmBuffer) {
   __local float* input_local = (__local float*)slmBuffer;
   for (int i = get_local_id(0); i < task->size; i += get_local_size(0)) {
@@ -21,11 +21,6 @@ inline void ExecuteTestTask(const Pow2Task* task, __local char* slmBuffer) {
     task->output[i] = input_local[i] * input_local[i];
   }
 
-  barrier(CLK_GLOBAL_MEM_FENCE);
-  if (get_local_id(0) == 0) {
-    atomic_store_explicit((volatile __global atomic_int*)(task->outputReady),
-                          task->syncValue, memory_order_release,
-                          memory_scope_device);
-  }
+  SignalSemaphore_block(0, (volatile __global atomic_int*)task->outputReady);
 }
 #endif

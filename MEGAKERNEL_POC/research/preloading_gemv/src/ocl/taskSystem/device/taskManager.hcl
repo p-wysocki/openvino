@@ -7,10 +7,6 @@
 __global const TaskDesc* GetNextTask_block(
     __constant const TaskManager* taskManager, __local char* slmBuffer);
 
-// Global barrier for all work-groups in the kernel.
-// All threads in all blocks has to call this function to synchronize.
-void GlobalBarrier_block(__constant const TaskManager* taskManager);
-
 // Clear the state of the task manager.
 void ClearTaskManagerState_thread(__constant const TaskManager* taskManager);
 
