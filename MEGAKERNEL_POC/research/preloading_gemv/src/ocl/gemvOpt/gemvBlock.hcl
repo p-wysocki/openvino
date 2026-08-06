@@ -1,5 +1,6 @@
 #include "common/commonConstants.hcl"
 #include "common/inkernelProfile.hcl"
+#include "common/semaphore.hcl"
 #include "common/template.hcl"
 #include "gemvOpt/detail/utils.hcl"
 
@@ -23,12 +24,11 @@
 
 // Optional parameter to give unique name of template instantiation.
 // #define GemvBlock_SUFFIX
-inline void TEMPLATE(GemvBlock,
-                     GemvBlock_SUFFIX)(int tileId,
-                                       __global const half* restrict matrix,
-                                       __global const half* restrict vector,
-                                       __global half* restrict output,
-                                       __local char* restrict buff_local);
+inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
+    int tileId, __global const half* restrict matrix,
+    __global const half* restrict vector, __global half* restrict output,
+    __local char* restrict buff_local, volatile __global atomic_int* syncMemory,
+    int wantedSyncVal);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -98,12 +98,11 @@ enum {
 #include "gemvOpt/detail/loadDataTile_template.hcl"
 
 ////////////////////////////////////////////////////////////////
-inline void TEMPLATE(GemvBlock,
-                     GemvBlock_SUFFIX)(int tileId,
-                                       __global const half* restrict matrix,
-                                       __global const half* restrict vector,
-                                       __global half* restrict output,
-                                       __local char* restrict buff_local) {
+inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
+    int tileId, __global const half* restrict matrix,
+    __global const half* restrict vector, __global half* restrict output,
+    __local char* restrict buff_local, volatile __global atomic_int* syncMemory,
+    int wantedSyncVal) {
   __global half* restrict outputBlockTilePtr_global =
       output + tileId * GemvBlock_BLOCK_TILE_ROWS;
 
@@ -127,6 +126,8 @@ inline void TEMPLATE(GemvBlock,
       TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _allWarps))(
           loadBufferPtr_local, matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
+
+  WaitForSemaphore_block(0, syncMemory, wantedSyncVal);
 
   // The way that preloading of vector dara is implemented should be
   // parametrized by 'policy' design, which is hard to achive wihouth templates.

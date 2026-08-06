@@ -26,6 +26,7 @@ typedef struct GemvTask {
 #include "gemvOpt/gemvBlock.hcl"
 
 inline void ExecuteGemvTask(const GemvTask* task, __local char* slmBuffer) {
-  GemvBlock(task->tileId, task->matrix, task->vector, task->output, slmBuffer);
+  GemvBlock(task->tileId, task->matrix, task->vector, task->output, slmBuffer,
+            NULL, 0);
 }
 #endif

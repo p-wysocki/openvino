@@ -23,10 +23,10 @@ typedef struct Gemv3072x1024Task {
 
 inline void ExecuteGemv3072x1024Task(const Gemv3072x1024Task* task,
                                      __local char* slmBuffer) {
-  WaitForSemaphore_block(0, (volatile __global atomic_int*)task->inputSemaphore,
-                         task->wantedInputSyncValue);
   GemvBlock_3072x1024(task->tileId, task->matrix, task->vector, task->output,
-                      slmBuffer);
+                      slmBuffer,
+                      (volatile __global atomic_int*)task->inputSemaphore,
+                      task->wantedInputSyncValue);
   SignalSemaphore_block(0,
                         (volatile __global atomic_int*)task->outputSemaphore);
 }
