@@ -18,6 +18,9 @@ namespace {
 
 constexpr size_t WORKERS = 80;
 constexpr size_t WORK_GROUP_SIZE = 512;
+constexpr cl_kernel_work_group_info KERNEL_REGISTER_COUNT_INTEL = 0x425B;
+constexpr cl_uint DEFAULT_GRF_COUNT = 128;
+constexpr cl_uint LARGE_GRF_COUNT = 256;
 
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
@@ -30,6 +33,42 @@ const std::vector<ocltest::GemvParams> GEMV_PARAMS = {
     {3072, 1024, 32},
     {1024, 3072, 32, 2, 2},
 };
+
+void PrintKernelResourceUsage(cl_kernel kernel, cl_device_id device) {
+  cl_uint grfCount = 0;
+  const cl_int grfStatus =
+      clGetKernelWorkGroupInfo(kernel, device, KERNEL_REGISTER_COUNT_INTEL,
+                               sizeof(grfCount), &grfCount, nullptr);
+
+  cl_ulong privateMemBytes = 0;
+  ASSERT_OCL_SUCCESS(clGetKernelWorkGroupInfo(
+      kernel, device, CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(privateMemBytes),
+      &privateMemBytes, nullptr));
+
+  cl_ulong spillMemBytes = 0;
+  ASSERT_OCL_SUCCESS(
+      clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_SPILL_MEM_SIZE_INTEL,
+                               sizeof(spillMemBytes), &spillMemBytes, nullptr));
+
+  std::cout << "Task-system kernel resources:\n";
+  if (grfStatus == CL_SUCCESS) {
+    const cl_uint occupancyModeLimit =
+        grfCount <= DEFAULT_GRF_COUNT ? DEFAULT_GRF_COUNT : LARGE_GRF_COUNT;
+    std::cout << "  GRFs per hardware thread: " << grfCount << " / "
+              << occupancyModeLimit << " (selected occupancy mode limit)\n";
+  } else {
+    std::cout << "  GRFs per hardware thread: unavailable (OpenCL status "
+              << grfStatus << ")\n";
+  }
+  std::cout << "  Private memory per hardware thread: " << privateMemBytes
+            << " bytes\n";
+  if (spillMemBytes == 0) {
+    std::cout << "  Register spills: 0\n";
+  } else {
+    std::cout << "  Register spills: count unavailable; spill storage: "
+              << spillMemBytes << " bytes\n";
+  }
+}
 
 std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {
   std::vector<cl_half> output(input.size());
@@ -127,6 +166,7 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
       "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
           TASK_SYSTEM_GEMV_KERNEL_PATH +
           " -igc_opts 'VISAOptions=-hybridRAWithSpill -fastCompileRA'");
+  PrintKernelResourceUsage(binary.kernel, deviceId());
 
   cl_int status = CL_SUCCESS;
   cl_platform_id platform = nullptr;
