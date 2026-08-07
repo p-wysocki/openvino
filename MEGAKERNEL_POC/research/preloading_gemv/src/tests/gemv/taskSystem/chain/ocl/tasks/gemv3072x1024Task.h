@@ -21,13 +21,13 @@ typedef struct Gemv3072x1024Task {
 #define GemvBlock_SUFFIX _3072x1024
 #include "gemvOpt/gemvBlock.hcl"
 
-inline void ExecuteGemv3072x1024Task(const Gemv3072x1024Task* task,
+inline void ExecuteGemv3072x1024Task(const Gemv3072x1024Task task,
                                      __local char* slmBuffer) {
-  GemvBlock_3072x1024(task->tileId, task->matrix, task->vector, task->output,
+  GemvBlock_3072x1024(task.tileId, task.matrix, task.vector, task.output,
                       slmBuffer,
-                      (volatile __global atomic_int*)task->inputSemaphore,
-                      task->wantedInputSyncValue);
+                      (volatile __global atomic_int*)task.inputSemaphore,
+                      task.wantedInputSyncValue);
   SignalSemaphore_block(0,
-                        (volatile __global atomic_int*)task->outputSemaphore);
+                        (volatile __global atomic_int*)task.outputSemaphore);
 }
 #endif

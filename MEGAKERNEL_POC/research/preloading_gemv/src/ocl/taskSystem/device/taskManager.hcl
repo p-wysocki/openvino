@@ -4,11 +4,11 @@
 
 // GetNext task to execute.
 // Returns invalid task(NULL) if no more tasks are available.
-__global const TaskDesc* GetNextTask_block(
-    __constant const TaskManager* taskManager, __local char* slmBuffer);
+__global const TaskDesc* GetNextTask_block(TaskManager taskManager,
+                                           __local char* slmBuffer);
 
 // Clear the state of the task manager.
-void ClearTaskManagerState_thread(__constant const TaskManager* taskManager);
+void LastWorkerClearTaskManagerState_block(TaskManager taskManager);
 
 ///////////////////////////////////////////////////////////////
 //
@@ -17,18 +17,17 @@ void ClearTaskManagerState_thread(__constant const TaskManager* taskManager);
 /////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////////
-inline __global const TaskDesc* GetNextTask_thread(
-    __constant const TaskManager* taskManager) {
-  const int slotId = atomic_inc(taskManager->processedTaskCount);
-  if (slotId >= taskManager->workQueueSize) {
+inline __global const TaskDesc* GetNextTask_thread(TaskManager taskManager) {
+  const int slotId = atomic_inc(taskManager.processedTaskCount);
+  if (slotId >= taskManager.workQueueSize) {
     return NULL;
   }
-  return taskManager->workQueue + slotId;
+  return taskManager.workQueue + slotId;
 }
 
 /////////////////////////////////////////////////////////////
-inline __global const TaskDesc* GetNextTask_block(
-    __constant const TaskManager* taskManager, __local char* slmBuffer) {
+inline __global const TaskDesc* GetNextTask_block(TaskManager taskManager,
+                                                  __local char* slmBuffer) {
   __global const TaskDesc* task = NULL;
   __local ulong* taskAddress = (__local ulong*)slmBuffer;
 
@@ -47,19 +46,17 @@ inline __global const TaskDesc* GetNextTask_block(
 }
 
 /////////////////////////////////////////////////////////////
-inline void ClearTaskManagerState_thread(
-    __constant const TaskManager* taskManager) {
-  atomic_xchg(taskManager->processedTaskCount, 0);
+inline void ClearTaskManagerState_thread(TaskManager taskManager) {
+  atomic_xchg(taskManager.processedTaskCount, 0);
 }
 
 /////////////////////////////////////////////////////////////
-inline void LastWorkerClearTaskManagerState_block(
-    __constant const TaskManager* taskManager) {
+inline void LastWorkerClearTaskManagerState_block(TaskManager taskManager) {
   barrier(CLK_LOCAL_MEM_FENCE);
 
   if (get_local_id(0) == 0) {
     volatile __global atomic_int* syncBuffer =
-        (volatile __global atomic_int*)(taskManager->processedTaskCount);
+        (volatile __global atomic_int*)(taskManager.processedTaskCount);
     const int processed = atomic_load_explicit(syncBuffer, memory_order_acquire,
                                                memory_scope_device);
 
@@ -67,7 +64,7 @@ inline void LastWorkerClearTaskManagerState_block(
         get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
 
     // Last executing worker clears the task manager state.
-    if (processed == workers + taskManager->workQueueSize) {
+    if (processed == workers + taskManager.workQueueSize) {
       ClearTaskManagerState_thread(taskManager);
     }
   }
