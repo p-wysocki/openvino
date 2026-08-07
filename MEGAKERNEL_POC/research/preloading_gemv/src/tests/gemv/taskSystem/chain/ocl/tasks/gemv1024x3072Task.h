@@ -15,9 +15,9 @@ typedef struct Gemv1024x3072Task {
 
 #define GemvBlock_MATRIX_ROWS 1024
 #define GemvBlock_MATRIX_COLUMNS 3072
-#define GemvBlock_BLOCK_TILE_ROWS 32
-#define GemvBlock_PHASE_TILE_ROWS 2
-#define GemvBlock_COMPUTE_WARPS 2
+#define GemvBlock_BLOCK_TILE_ROWS BLOCK_TILE_ROWS_1024x3072
+#define GemvBlock_PHASE_TILE_ROWS PHASE_TILE_ROWS_1024x3072
+#define GemvBlock_COMPUTE_WARPS COMPUTE_WARPS_1024x3072
 #define GemvBlock_SUFFIX _1024x3072
 #include "gemvOpt/gemvBlock.hcl"
 

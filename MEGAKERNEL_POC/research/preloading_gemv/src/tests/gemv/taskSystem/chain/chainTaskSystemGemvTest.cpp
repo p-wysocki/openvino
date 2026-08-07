@@ -18,7 +18,6 @@ namespace {
 
 constexpr size_t WORKERS = 80;
 constexpr size_t WORK_GROUP_SIZE = 512;
-constexpr cl_kernel_work_group_info KERNEL_REGISTER_COUNT_INTEL = 0x425B;
 constexpr cl_uint DEFAULT_GRF_COUNT = 128;
 constexpr cl_uint LARGE_GRF_COUNT = 256;
 
@@ -28,10 +27,16 @@ const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) +
     "../tests/gemv/taskSystem/chain/ocl/";
 
-const std::vector<ocltest::GemvParams> GEMV_PARAMS = {
-    {1024, 2048, 64},
-    {3072, 1024, 64},
+const std::vector<ocltest::GemvParams> TASK_SYSTEM_GEMV_PARAMS = {
+    {1024, 2048, 64, 4, 4},
+    {3072, 1024, 64, 4, 4},
     {1024, 3072, 64, 2, 2},
+};
+
+const std::vector<ocltest::GemvParams> GEMV_OPT_PARAMS = {
+    {1024, 2048, 32, 4, 4},
+    {3072, 1024, 32, 4, 4},
+    {1024, 3072, 32, 2, 2},
 };
 
 std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {
@@ -124,12 +129,42 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
   }
   const std::vector<cl_half> inputHalf = ConvertToHalf(input);
 
+  int BLOCK_TILE_ROWS_1024x2048 = params[0].rowsPerBlock;
+  int PHASE_TILE_ROWS_1024x2048 = params[0].gemvPhaseTileRows;
+  int COMPUTE_WARPS_1024x2048 = params[0].gemvComputeWarps;
+
+  int BLOCK_TILE_ROWS_3072x1024 = params[1].rowsPerBlock;
+  int PHASE_TILE_ROWS_3072x1024 = params[1].gemvPhaseTileRows;
+  int COMPUTE_WARPS_3072x1024 = params[1].gemvComputeWarps;
+
+  int BLOCK_TILE_ROWS_1024x3072 = params[2].rowsPerBlock;
+  int PHASE_TILE_ROWS_1024x3072 = params[2].gemvPhaseTileRows;
+  int COMPUTE_WARPS_1024x3072 = params[2].gemvComputeWarps;
+
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_GEMV_KERNEL_PATH + "chainTaskSystemGemvKernel.cl",
       "chainTaskSystemGemvKernel",
       "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
           TASK_SYSTEM_GEMV_KERNEL_PATH +
-          " -igc_opts 'VISAOptions=-hybridRAWithSpill -fastCompileRA'");
+          " -igc_opts 'VISAOptions=-hybridRAWithSpill -fastCompileRA'" +
+          " -DBLOCK_TILE_ROWS_3072x1024=" +
+          std::to_string(BLOCK_TILE_ROWS_3072x1024) +
+          " -DPHASE_TILE_ROWS_3072x1024=" +
+          std::to_string(PHASE_TILE_ROWS_3072x1024) +
+          " -DCOMPUTE_WARPS_3072x1024=" +
+          std::to_string(COMPUTE_WARPS_3072x1024) +
+          " -DBLOCK_TILE_ROWS_1024x3072=" +
+          std::to_string(BLOCK_TILE_ROWS_1024x3072) +
+          " -DPHASE_TILE_ROWS_1024x3072=" +
+          std::to_string(PHASE_TILE_ROWS_1024x3072) +
+          " -DCOMPUTE_WARPS_1024x3072=" +
+          std::to_string(COMPUTE_WARPS_1024x3072) +
+          " -DBLOCK_TILE_ROWS_1024x2048=" +
+          std::to_string(BLOCK_TILE_ROWS_1024x2048) +
+          " -DPHASE_TILE_ROWS_1024x2048=" +
+          std::to_string(PHASE_TILE_ROWS_1024x2048) +
+          " -DCOMPUTE_WARPS_1024x2048=" +
+          std::to_string(COMPUTE_WARPS_1024x2048));
 
   cl_int status = CL_SUCCESS;
   cl_platform_id platform = nullptr;
@@ -295,25 +330,27 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
 }
 
 TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
-  std::vector<std::vector<float>> matrices(GEMV_PARAMS.size());
-  for (size_t layer = 0; layer < GEMV_PARAMS.size(); ++layer) {
+  std::vector<std::vector<float>> matrices(GEMV_OPT_PARAMS.size());
+  for (size_t layer = 0; layer < GEMV_OPT_PARAMS.size(); ++layer) {
     matrices[layer] = utils::createRandomBuffer(
-        GEMV_PARAMS[layer].rowCount * GEMV_PARAMS[layer].columnCount, layer);
+        GEMV_OPT_PARAMS[layer].rowCount * GEMV_OPT_PARAMS[layer].columnCount,
+        layer);
     const float scale =
-        1.0f / std::sqrt(static_cast<float>(GEMV_PARAMS[layer].columnCount));
+        1.0f /
+        std::sqrt(static_cast<float>(GEMV_OPT_PARAMS[layer].columnCount));
     for (float& value : matrices[layer]) {
       value *= scale;
     }
   }
   const std::vector<float> input =
-      utils::createRandomBuffer(GEMV_PARAMS.front().columnCount, 3);
+      utils::createRandomBuffer(GEMV_OPT_PARAMS.front().columnCount, 3);
 
   const ocltest::GemvBenchmarkResult taskSystemResult =
-      benchmarkTaskSystemChain(matrices, input, GEMV_PARAMS);
-  const ocltest::GemvBenchmarkResult openClResult =
-      benchmarkOpenClGemvChain(matrices, input, GEMV_PARAMS, GEMV_KERNEL_PATH);
+      benchmarkTaskSystemChain(matrices, input, TASK_SYSTEM_GEMV_PARAMS);
+  const ocltest::GemvBenchmarkResult openClResult = benchmarkOpenClGemvChain(
+      matrices, input, GEMV_OPT_PARAMS, GEMV_KERNEL_PATH);
   const ocltest::GemvBenchmarkResult dnnlResult =
-      benchmarkDnnlGemvChain(matrices, input, GEMV_PARAMS);
+      benchmarkDnnlGemvChain(matrices, input, GEMV_OPT_PARAMS);
 
   taskSystemResult.profileResult.print("3-GEMV task-system chain");
   openClResult.profileResult.print("3-GEMV OpenCL chain");
