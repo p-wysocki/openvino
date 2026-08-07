@@ -133,13 +133,19 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
   int PHASE_TILE_ROWS_1024x2048 = params[0].gemvPhaseTileRows;
   int COMPUTE_WARPS_1024x2048 = params[0].gemvComputeWarps;
 
-  int BLOCK_TILE_ROWS_3072x1024 = params[1].rowsPerBlock;
-  int PHASE_TILE_ROWS_3072x1024 = params[1].gemvPhaseTileRows;
-  int COMPUTE_WARPS_3072x1024 = params[1].gemvComputeWarps;
+  int BLOCK_TILE_ROWS_3072x1024 =
+      params.size() > 1 ? params[1].rowsPerBlock : 32;
+  int PHASE_TILE_ROWS_3072x1024 =
+      params.size() > 1 ? params[1].gemvPhaseTileRows : 4;
+  int COMPUTE_WARPS_3072x1024 =
+      params.size() > 1 ? params[1].gemvComputeWarps : 4;
 
-  int BLOCK_TILE_ROWS_1024x3072 = params[2].rowsPerBlock;
-  int PHASE_TILE_ROWS_1024x3072 = params[2].gemvPhaseTileRows;
-  int COMPUTE_WARPS_1024x3072 = params[2].gemvComputeWarps;
+  int BLOCK_TILE_ROWS_1024x3072 =
+      params.size() > 2 ? params[2].rowsPerBlock : 32;
+  int PHASE_TILE_ROWS_1024x3072 =
+      params.size() > 2 ? params[2].gemvPhaseTileRows : 2;
+  int COMPUTE_WARPS_1024x3072 =
+      params.size() > 2 ? params[2].gemvComputeWarps : 2;
 
   const OCLBinary binary = createProgramAndKernel(
       TASK_SYSTEM_GEMV_KERNEL_PATH + "chainTaskSystemGemvKernel.cl",
