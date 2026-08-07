@@ -29,9 +29,9 @@ const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
     "../tests/gemv/taskSystem/chain/ocl/";
 
 const std::vector<ocltest::GemvParams> GEMV_PARAMS = {
-    {1024, 2048, 32},
-    {3072, 1024, 32},
-    {1024, 3072, 32, 2, 2},
+    {1024, 2048, 64},
+    {3072, 1024, 64},
+    {1024, 3072, 64, 2, 2},
 };
 
 std::vector<cl_half> ConvertToHalf(const std::vector<float>& input) {

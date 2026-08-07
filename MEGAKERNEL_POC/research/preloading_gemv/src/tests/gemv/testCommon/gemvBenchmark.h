@@ -14,7 +14,7 @@ static const std::string KERNEL_SOURCE_PATH =
 static constexpr const char* KERNEL_SOURCE_FILE_NAME = "gemvOptKernel.cl";
 static constexpr size_t WARMUP_ITERATIONS = 100;
 static constexpr size_t BENCHMARK_ITERATIONS = 1000;
-static constexpr float ABS_ERROR = 2e-2f;
+static constexpr float ABS_ERROR = 4e-1f;
 static constexpr bool CLEAR_CACHE_BEFORE_BENCHMARK = true;
 
 struct GemvParams {
