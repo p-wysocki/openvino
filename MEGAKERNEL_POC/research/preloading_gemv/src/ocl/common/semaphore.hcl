@@ -23,10 +23,9 @@ inline void WaitForSemaphore_block(int warpID,
                                    int wantedSyncVal) {
   if (syncMemory != NULL && get_sub_group_id() == warpID &&
       get_sub_group_local_id() == 0) {
-    // TODO: memory_order_relaxed should be sufficient here.
     int val = 0;
     do {
-      val = atomic_load_explicit(syncMemory, memory_order_acquire,
+      val = atomic_load_explicit(syncMemory, memory_order_relaxed,
                                  memory_scope_device);
     } while (val == 0 || (val % wantedSyncVal) != 0);
   }
@@ -39,8 +38,7 @@ inline void SignalSemaphore_block(int warpID,
   barrier(CLK_GLOBAL_MEM_FENCE);
   if (syncMemory != NULL && get_sub_group_id() == warpID &&
       get_sub_group_local_id() == 0) {
-    // TODO: memory_order_relaxed should be sufficient here.
-    atomic_fetch_add_explicit(syncMemory, 1, memory_order_release,
+    atomic_fetch_add_explicit(syncMemory, 1, memory_order_relaxed,
                               memory_scope_device);
   }
 }

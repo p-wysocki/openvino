@@ -28,8 +28,9 @@ inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
 #endif
 
 inline void TEMPLATE(WorkerMainLoop_block, WorkerMainLoop_block_SUFFIX)(
-    __constant const TaskManager* taskManager, __local char* slmBuffer) {
+    __constant const TaskManager* taskManagerPtr, __local char* slmBuffer) {
   __global const TaskDesc* taskPtr = NULL;
+  TaskManager taskManager = *taskManagerPtr;
   taskPtr = GetNextTask_block(taskManager, slmBuffer);
 
   while (taskPtr != NULL) {
