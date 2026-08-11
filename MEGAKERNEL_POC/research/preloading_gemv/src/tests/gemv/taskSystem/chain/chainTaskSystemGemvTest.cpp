@@ -16,6 +16,8 @@
 
 namespace {
 
+static constexpr float ABS_ERROR = 1e-5f;
+
 constexpr size_t WORKERS = 40;
 constexpr size_t WORK_GROUP_SIZE = 1024;
 
@@ -327,7 +329,7 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
   const auto beforeFloat = ConvertToFloat(outputBeforeHalf);
   const auto afterFloat = ConvertToFloat(outputAfterHalf);
   for (size_t index = 0; index < beforeFloat.size(); ++index) {
-    EXPECT_NEAR(beforeFloat[index], afterFloat[index], ocltest::ABS_ERROR)
+    EXPECT_NEAR(beforeFloat[index], afterFloat[index], ABS_ERROR)
         << "Output mismatch at index " << index;
   }
 
@@ -373,10 +375,10 @@ TEST_F(ChainTaskSystemGemvTest, ThreeGemvChain) {
   ASSERT_EQ(taskSystemResult.output.size(), openClResult.output.size());
   for (size_t index = 0; index < taskSystemResult.output.size(); ++index) {
     ASSERT_NEAR(taskSystemResult.output[index], openClResult.output[index],
-                ocltest::ABS_ERROR)
+                ABS_ERROR)
         << "Task-system GEMV chain differs from OpenCL at index " << index;
     ASSERT_NEAR(taskSystemResult.output[index], dnnlResult.output[index],
-                ocltest::ABS_ERROR)
+                ABS_ERROR)
         << "Task-system GEMV chain differs from oneDNN at index " << index;
   }
 }
