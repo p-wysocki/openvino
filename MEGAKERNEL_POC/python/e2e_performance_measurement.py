@@ -749,26 +749,7 @@ def main() -> None:
             name = base["prompt"]  # short | medium | long
             bd = float(base["decode"]["mean"])
             md = float(mega["decode"]["mean"])
-            bpf = float(base.get("prefill_ms", float("nan")))
-            mpf = float(mega.get("prefill_ms", float("nan")))
-            b_n_tok = int(base.get("n_tok", base["decode"]["count"]))
-            m_n_tok = int(mega.get("n_tok", mega["decode"]["count"]))
-            b_dec_ms = max(b_n_tok - 1, 0) * bd
-            m_dec_ms = max(m_n_tok - 1, 0) * md
-            base_tot = bpf + b_dec_ms
-            mega_tot = mpf + m_dec_ms
-            metrics[f"in_tok_{name}"] = float(base["prompt_len"])
-            metrics[f"ttft_ms_{name}_baseline"] = bpf
-            metrics[f"ms_per_tok_{name}_baseline"] = bd
-            metrics[f"decode_ms_{name}_baseline"] = b_dec_ms
-            metrics[f"total_ms_{name}_baseline"] = base_tot
-            metrics[f"ttft_ms_{name}_megakernel"] = mpf
-            metrics[f"ms_per_tok_{name}_megakernel"] = md
-            metrics[f"decode_ms_{name}_megakernel"] = m_dec_ms
-            metrics[f"total_ms_{name}_megakernel"] = mega_tot
             metrics[f"decode_x_{name}"] = bd / md if md else 0.0
-            metrics[f"prefill_x_{name}"] = bpf / mpf if mpf else 0.0
-            metrics[f"e2e_x_{name}"] = base_tot / mega_tot if mega_tot else 0.0
         results_path.write_text(
             json.dumps(metrics, indent=2) + "\n",
             encoding="utf-8",
