@@ -17,7 +17,7 @@
 namespace {
 
 constexpr size_t WORKERS = 40;
-constexpr size_t WORK_GROUP_SIZE = 512;
+constexpr size_t WORK_GROUP_SIZE = 1024;
 
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
@@ -26,9 +26,9 @@ const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
     "../tests/gemv/taskSystem/chain/ocl/";
 
 const std::vector<ocltest::GemvParams> TASK_SYSTEM_GEMV_PARAMS = {
-    {1024, 2048, 32, 8, 4},
-    {3072, 1024, 64, 16, 4},
-    {1024, 3072, 32, 4, 2},
+    {1024, 2048, 32, 8, 8},
+    {3072, 1024, 64, 16, 8},
+    {1024, 3072, 32, 4, 4},
 };
 
 const std::vector<ocltest::GemvParams> GEMV_OPT_PARAMS = {
@@ -151,6 +151,7 @@ ocltest::GemvBenchmarkResult ChainTaskSystemGemvTest::benchmarkTaskSystemChain(
       "-I " + std::string(OPENCL_KERNEL_SOURCE_PATH) + " -I " +
           TASK_SYSTEM_GEMV_KERNEL_PATH +
           " -igc_opts 'VISAOptions=-hybridRAWithSpill -fastCompileRA'" +
+          " -DTOTAL_WARPS=" + std::to_string(WORK_GROUP_SIZE / 32) +
           " -DBLOCK_TILE_ROWS_3072x1024=" +
           std::to_string(BLOCK_TILE_ROWS_3072x1024) +
           " -DPHASE_TILE_ROWS_3072x1024=" +
