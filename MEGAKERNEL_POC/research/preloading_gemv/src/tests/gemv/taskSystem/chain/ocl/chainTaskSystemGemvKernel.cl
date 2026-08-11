@@ -1,3 +1,4 @@
+#include "common/inkernelProfile.hcl"
 #include "taskSystem/shared/taskDesc.h"
 #include "tasks/gemv1024x2048Task.h"
 #include "tasks/gemv1024x3072Task.h"
@@ -8,19 +9,25 @@ inline void ExecuteTasks(TaskDesc task, __local char* slmBuffer) {
     case 3: {
       const Gemv1024x2048Task gemv1024x2048Task =
           *(const Gemv1024x2048Task*)task.payload;
-      ExecuteGemv1024x2048Task(gemv1024x2048Task, slmBuffer);
+      IN_KERNEL_PROFILE_BLOCK(
+          ExecuteGemv1024x2048Task(gemv1024x2048Task, slmBuffer),
+          "ExecuteGemv1024x2048Task");
       break;
     }
     case 4: {
       const Gemv3072x1024Task gemv3072x1024Task =
           *(const Gemv3072x1024Task*)task.payload;
-      ExecuteGemv3072x1024Task(gemv3072x1024Task, slmBuffer);
+      IN_KERNEL_PROFILE_BLOCK(
+          ExecuteGemv3072x1024Task(gemv3072x1024Task, slmBuffer),
+          "ExecuteGemv3072x1024Task");
       break;
     }
     case 5: {
       const Gemv1024x3072Task gemv1024x3072Task =
           *(const Gemv1024x3072Task*)task.payload;
-      ExecuteGemv1024x3072Task(gemv1024x3072Task, slmBuffer);
+      IN_KERNEL_PROFILE_BLOCK(
+          ExecuteGemv1024x3072Task(gemv1024x3072Task, slmBuffer),
+          "ExecuteGemv1024x3072Task");
       break;
     }
     default:
