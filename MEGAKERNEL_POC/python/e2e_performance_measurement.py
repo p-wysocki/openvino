@@ -238,6 +238,71 @@ def _native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
     return tokenizer.decode(gen_ids, skip_special_tokens=True)
 
 
+def native_worker(args) -> list[dict]:
+    """OV native API: timed prefill + timed decode for each prompt."""
+    import openvino as ov
+
+    core = ov.Core()
+    dev_name = core.get_property(args.device, "FULL_DEVICE_NAME")
+    model = core.read_model(str(Path(args.model_dir) / "openvino_model.xml"))
+    t0 = time.perf_counter()
+    compiled = core.compile_model(model, args.device)
+    compile_s = time.perf_counter() - t0
+
+    tokenizer = load_tokenizer(Path(args.model_dir))
+
+    warm = compiled.create_infer_request()
+    warm.infer(prefill_inputs(np.ones((BATCH, 8), np.int64)))
+    for pos in range(8, 12):
+        warm.infer(single_token_inputs(1, pos))
+
+    results = []
+    for prompt in get_prompts(args):
+        ids = prompt_token_ids(tokenizer, prompt["text"])
+        prompt_len = int(ids.shape[1])
+        req = compiled.create_infer_request()
+
+        t = time.perf_counter()
+        res = req.infer(prefill_inputs(ids))
+        prefill_ms = (time.perf_counter() - t) * 1e3
+
+        logits = np.array(res[0])[0, -1, :].astype(np.float32)
+        next_id = int(logits.argmax())
+
+        past = prompt_len
+        target_ctx = max(args.decode_ctx, prompt_len)
+        while past < target_ctx:
+            req.infer(single_token_inputs(next_id, past))
+            past += 1
+
+        decode_pos = past
+        decode_input = single_token_inputs(next_id, decode_pos)
+        for _ in range(args.warmup):
+            req.infer(decode_input)
+        lat = []
+        for _ in range(args.tokens):
+            t = time.perf_counter()
+            req.infer(decode_input)
+            lat.append((time.perf_counter() - t) * 1e3)
+
+        text_out = _native_generate_text(compiled, tokenizer, ids, prompt_len, args.tokens)
+
+        results.append({
+            "prompt": prompt["name"],
+            "prompt_len": prompt_len,
+            "prefill_ms": prefill_ms,
+            "n_tok": args.tokens,
+            "decode": stats(lat),
+            "decode_ctx": decode_pos,
+            "argmax": next_id,
+            "logits": logits.tolist(),
+            "device": dev_name,
+            "compile_s": compile_s,
+            "text": text_out,
+        })
+    return results
+
+
 def optimum_worker(args) -> list[dict]:
     import torch
     from optimum.intel import OVModelForCausalLM
@@ -391,6 +456,7 @@ def genai_worker(args) -> list[dict]:
 
 WORKERS = {
     "decode_only": decode_only_worker,
+    "native": native_worker,
     "optimum": optimum_worker,
     "genai": genai_worker,
 }
@@ -484,6 +550,42 @@ def print_decode_only_table(base: list[dict], mega: list[dict]) -> None:
               f"{bd:>11.3f}  {b_toks:>10.1f} | "
               f"{md:>9.3f}  {m_toks:>8.1f} | "
               f"{dec_x:>7.2f}x{extra}")
+
+    _maybe_print_text(base, mega)
+
+
+def print_native_table(base: list[dict], mega: list[dict], n_tokens: int) -> None:
+    W = 98
+    print()
+    print("=" * W)
+    print(" NATIVE  (OV native API, timed prefill + timed decode)")
+    print("=" * W)
+    print(" How it works:")
+    print("   Prefill is timed once per prompt.  Then N identical single-token decode")
+    print("   steps are timed at a fixed KV-cache position.  decode_x is the primary")
+    print("   speedup metric; pf_x and e2e_x are reference figures.")
+    print()
+
+    hdr = (f"  {'prompt':<8}  {'in_tok':>6} | "
+           f"{'base ttft':>9}  {'mk ttft':>7} | "
+           f"{'base ms/tok':>11}  {'mk ms/tok':>9} | "
+           f"{'decode_x':>8}  {'pf_x':>5}  {f'e2e_x@{n_tokens}':>10}")
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    for b, m in zip(base, mega):
+        bd = b["decode"]["mean"]
+        md = m["decode"]["mean"]
+        bpf = b.get("prefill_ms", float("nan"))
+        mpf = m.get("prefill_ms", float("nan"))
+        dec_x = bd / md if md else float("nan")
+        pf_x = bpf / mpf if mpf else float("nan")
+        n_dec = max(n_tokens - 1, 0)
+        e2e = (bpf + n_dec * bd) / (mpf + n_dec * md) if mpf and md else float("nan")
+        print(f"  {b['prompt']:<8}  {b['prompt_len']:>6} | "
+              f"{bpf:>9.3f}  {mpf:>7.3f} | "
+              f"{bd:>11.3f}  {md:>9.3f} | "
+              f"{dec_x:>7.2f}x  {pf_x:>4.2f}x  {e2e:>9.2f}x")
 
     _maybe_print_text(base, mega)
 
@@ -607,6 +709,10 @@ def main() -> None:
         print(json.dumps(results))
         return
 
+    # Artemis reads metrics from this file in the benchmark's working directory.
+    results_path = Path("artemis_results.json")
+    results_path.unlink(missing_ok=True)
+
     frameworks = [args.only_framework] if args.only_framework else args.frameworks
     print(f"Device: {args.device}   frameworks: {frameworks}")
     print(f"tokens={args.tokens}   decode_only warmup={args.warmup}   "
@@ -624,10 +730,49 @@ def main() -> None:
         mega = all_results[fw]["megakernel"]
         if fw == "decode_only":
             print_decode_only_table(base, mega)
+        elif fw == "native":
+            print_native_table(base, mega, args.tokens)
         elif fw == "optimum":
             print_optimum_table(base, mega, args.tokens)
         elif fw == "genai":
             print_genai_table(base, mega, args.tokens)
+
+    if "native" in all_results:
+        # Artemis metrics must be a flat JSON object whose values are numbers.
+        # One observation per SUMMARY-table cell for the native framework.
+        metrics: dict[str, float] = {}
+        for base, mega in zip(
+            all_results["native"]["baseline"],
+            all_results["native"]["megakernel"],
+            strict=True,
+        ):
+            name = base["prompt"]  # short | medium | long
+            bd = float(base["decode"]["mean"])
+            md = float(mega["decode"]["mean"])
+            bpf = float(base.get("prefill_ms", float("nan")))
+            mpf = float(mega.get("prefill_ms", float("nan")))
+            b_n_tok = int(base.get("n_tok", base["decode"]["count"]))
+            m_n_tok = int(mega.get("n_tok", mega["decode"]["count"]))
+            b_dec_ms = max(b_n_tok - 1, 0) * bd
+            m_dec_ms = max(m_n_tok - 1, 0) * md
+            base_tot = bpf + b_dec_ms
+            mega_tot = mpf + m_dec_ms
+            metrics[f"in_tok_{name}"] = float(base["prompt_len"])
+            metrics[f"ttft_ms_{name}_baseline"] = bpf
+            metrics[f"ms_per_tok_{name}_baseline"] = bd
+            metrics[f"decode_ms_{name}_baseline"] = b_dec_ms
+            metrics[f"total_ms_{name}_baseline"] = base_tot
+            metrics[f"ttft_ms_{name}_megakernel"] = mpf
+            metrics[f"ms_per_tok_{name}_megakernel"] = md
+            metrics[f"decode_ms_{name}_megakernel"] = m_dec_ms
+            metrics[f"total_ms_{name}_megakernel"] = mega_tot
+            metrics[f"decode_x_{name}"] = bd / md if md else 0.0
+            metrics[f"prefill_x_{name}"] = bpf / mpf if mpf else 0.0
+            metrics[f"e2e_x_{name}"] = base_tot / mega_tot if mega_tot else 0.0
+        results_path.write_text(
+            json.dumps(metrics, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     print()
 
