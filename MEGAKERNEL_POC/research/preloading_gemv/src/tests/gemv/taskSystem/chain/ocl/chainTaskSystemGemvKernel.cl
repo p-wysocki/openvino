@@ -41,6 +41,6 @@ inline void ExecuteTasks(TaskDesc task, __local char* slmBuffer) {
 __attribute__((reqd_work_group_size(512, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(32))) __kernel void
 chainTaskSystemGemvKernel(__constant const TaskManager* taskManager) {
-  __local char slmBuffer[32 * 1024];
+  __local char slmBuffer[64 * 1024];
   WorkerMainLoop_block(taskManager, slmBuffer);
 }

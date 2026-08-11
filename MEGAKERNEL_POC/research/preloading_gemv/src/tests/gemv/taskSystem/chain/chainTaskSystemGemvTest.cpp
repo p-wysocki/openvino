@@ -16,10 +16,8 @@
 
 namespace {
 
-constexpr size_t WORKERS = 80;
+constexpr size_t WORKERS = 40;
 constexpr size_t WORK_GROUP_SIZE = 512;
-constexpr cl_uint DEFAULT_GRF_COUNT = 128;
-constexpr cl_uint LARGE_GRF_COUNT = 256;
 
 const std::string GEMV_KERNEL_PATH =
     std::string(OPENCL_KERNEL_SOURCE_PATH) + "../tests/gemv/static/ocl/";
@@ -28,9 +26,9 @@ const std::string TASK_SYSTEM_GEMV_KERNEL_PATH =
     "../tests/gemv/taskSystem/chain/ocl/";
 
 const std::vector<ocltest::GemvParams> TASK_SYSTEM_GEMV_PARAMS = {
-    {1024, 2048, 64, 4, 4},
-    {3072, 1024, 64, 4, 4},
-    {1024, 3072, 64, 2, 2},
+    {1024, 2048, 32, 8, 4},
+    {3072, 1024, 64, 16, 4},
+    {1024, 3072, 32, 4, 2},
 };
 
 const std::vector<ocltest::GemvParams> GEMV_OPT_PARAMS = {
