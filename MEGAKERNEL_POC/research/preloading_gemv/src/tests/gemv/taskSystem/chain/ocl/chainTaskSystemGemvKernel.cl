@@ -38,7 +38,7 @@ inline void ExecuteTasks(TaskDesc task, __local char* slmBuffer) {
 #define WorkerMainLoop_block_EXEC_FUN ExecuteTasks
 #include "taskSystem/device/workerMainLoop_template.hcl"
 
-__attribute__((reqd_work_group_size(32 * WARP_SIZE, 1, 1)))
+__attribute__((reqd_work_group_size(TOTAL_WARPS * WARP_SIZE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(WARP_SIZE))) __kernel void
 chainTaskSystemGemvKernel(__constant const TaskManager* taskManager) {
   __local char slmBuffer[SINGLE_WORKER_B60_MAX_SLM_SIZE_IN_BYTES];
