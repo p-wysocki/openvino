@@ -63,6 +63,7 @@ static const char* kKernelSrc = R"CL(
 #define NUM_L 28
 
 #include "taskSystem/shared/taskDesc.h"
+#include "common/semaphore.hcl"
 
 // ---------------------------------------------------------------------------
 // Barrier-free RMS: sub_group_reduce_add over each lane's strided H/SG slice
@@ -164,37 +165,6 @@ typedef struct MkTask {
     int tile;
 } MkTask;
 
-// Barrier-equivalent dependency wait: the whole work-group blocks until the
-// producer stage's counter reaches `cnt` (all its tiles signalled). Mirrors the
-// producer store-release / consumer load-acquire pattern of the task system.
-inline void mk_wait(__global int* sync, int idx, int cnt) {
-    // Entry barrier is LOCAL-only: at stage entry there is no producer global data
-    // to make visible yet (that is the exit barrier's job, paired with the acquire
-    // below), so a device-scope global fence + L1 flush here is pure overhead. A
-    // local fence still orders the SLM task-pointer handoff from GetNextTask_block.
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (get_local_id(0) == 0) {
-        volatile __global atomic_int* p = (volatile __global atomic_int*)(sync + idx);
-        // Poll with a RELAXED load so idle spinners do not force a device-scope
-        // coherency transaction on every iteration (that traffic steals memory
-        // bandwidth from the workers actually doing the stage). Once the counter
-        // is observed to reach `cnt`, a single ACQUIRE load synchronizes-with the
-        // producers' release stores so their data writes are visible.
-        while (atomic_load_explicit(p, memory_order_relaxed, memory_scope_device) < cnt) {}
-        atomic_load_explicit(p, memory_order_acquire, memory_scope_device);
-    }
-    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
-}
-
-// Signal completion of one tile of a stage (publishes this WG's global stores).
-inline void mk_signal(__global int* sync, int idx) {
-    barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);
-    if (get_local_id(0) == 0) {
-        atomic_fetch_add_explicit((volatile __global atomic_int*)(sync + idx), 1,
-                                  memory_order_release, memory_scope_device);
-    }
-}
-
 // Stage 0: input embedding fp16 -> fp32 residual stream (single task).
 inline void mk_embed(const MkTask* t, __local char* slm) {
     __global const MonoCtx* c = t->ctx;
@@ -202,7 +172,7 @@ inline void mk_embed(const MkTask* t, __local char* slm) {
     __global float*      h  = c->h  + c->tok_off;
     for (uint i = get_local_id(0); i < H; i += get_local_size(0))
         h[i] = convert_float(hs[i]);
-    mk_signal(c->sync, EMBED_IDX);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + EMBED_IDX));
 }
 
 // Stage A: fused input RMSNorm + Q/K/V projection (one tile of QKV rows).
@@ -212,7 +182,7 @@ inline void mk_stageA(const MkTask* t, __local char* slm) {
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
     int dep    = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
     int depcnt = (layer == 0) ? 1         : NT_F;
-    mk_wait(c->sync, dep, depcnt);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
 
     uint wn_off=layer*H, qw_off=layer*QDIM*H, kw_off=layer*KVDIM*H, vw_off=layer*KVDIM*H;
     __global float* h = c->h + c->tok_off;
@@ -233,7 +203,7 @@ inline void mk_stageA(const MkTask* t, __local char* slm) {
             if (l==0) for (int r=0;r<RPS;r++) c->vb[n+r]=o[r];
         }
     }
-    mk_signal(c->sync, layer*5 + 0);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0));
 }
 
 // Stage BC: fused RoPE + flash-decoding attention. tile in [0,NH) is a query
@@ -242,7 +212,7 @@ inline void mk_stageBC(const MkTask* t, __local char* slm) {
     __global const MonoCtx* c = t->ctx;
     int layer = t->layer; uint wg = (uint)t->tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
-    mk_wait(c->sync, layer*5 + 0, NT_A);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
 
     const float scl = rsqrt((float)HD);
     uint CS = c->CS; int pos = c->pos;
@@ -339,7 +309,7 @@ inline void mk_stageBC(const MkTask* t, __local char* slm) {
             }
         }
     }
-    mk_signal(c->sync, layer*5 + 1);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 1));
 }
 
 // Stage D: O-projection with residual add (h += xn . Wo).
@@ -347,7 +317,7 @@ inline void mk_stageD(const MkTask* t, __local char* slm) {
     __global const MonoCtx* c = t->ctx;
     int layer = t->layer, tile = t->tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    mk_wait(c->sync, layer*5 + 1, NT_BC);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 1), NT_BC);
     uint ow_off=layer*H*QDIM;
     __global float* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
@@ -356,7 +326,7 @@ inline void mk_stageD(const MkTask* t, __local char* slm) {
         sg_gemv_f16(c->xn, c->ow+ow_off, QDIM, n, l, o);
         if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
     }
-    mk_signal(c->sync, layer*5 + 2);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2));
 }
 
 // Stage E: fused post-attn RMSNorm + gate/up + SiLU.
@@ -364,7 +334,7 @@ inline void mk_stageE(const MkTask* t, __local char* slm) {
     __global const MonoCtx* c = t->ctx;
     int layer = t->layer, tile = t->tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    mk_wait(c->sync, layer*5 + 2, NT_D);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2), NT_D);
     uint pn_off=layer*H, gw_off=layer*IM*H, uw_off=layer*IM*H;
     __global float* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
@@ -376,7 +346,7 @@ inline void mk_stageE(const MkTask* t, __local char* slm) {
         if (l==0) for (int r=0;r<RPS;r++)
             c->gbuf[n+r]=convert_half((a[r]/(1.0f+native_exp(-a[r])))*b[r]);
     }
-    mk_signal(c->sync, layer*5 + 3);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 3));
 }
 
 // Stage F: down-projection with residual add (h += g . Wdown).
@@ -384,7 +354,7 @@ inline void mk_stageF(const MkTask* t, __local char* slm) {
     __global const MonoCtx* c = t->ctx;
     int layer = t->layer, tile = t->tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    mk_wait(c->sync, layer*5 + 3, NT_E);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 3), NT_E);
     uint dw_off=layer*H*IM;
     __global float* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
@@ -393,7 +363,7 @@ inline void mk_stageF(const MkTask* t, __local char* slm) {
         sg_gemv_f16(c->gbuf, c->dw+dw_off, IM, n, l, o);
         if (l==0) for (int r=0;r<RPS;r++) h[n+r]+=o[r];
     }
-    mk_signal(c->sync, layer*5 + 4);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 4));
 }
 
 // Task dispatch: `type` selects the stage.
