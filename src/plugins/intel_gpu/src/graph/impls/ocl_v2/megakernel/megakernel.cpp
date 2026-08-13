@@ -22,6 +22,7 @@
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_memory.hpp"
 #include "ocl/ocl_event.hpp"
+#include "taskSystem/host/taskManagerHost.h"
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <cstdio>
@@ -60,6 +61,8 @@ static const char* kKernelSrc = R"CL(
 #define SG    16
 #define RPS   4
 #define NUM_L 28
+
+#include "taskSystem/shared/taskDesc.h"
 
 // ---------------------------------------------------------------------------
 // Barrier-free RMS: sub_group_reduce_add over each lane's strided H/SG slice
@@ -117,78 +120,6 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
         }
     }
     for (int r=0; r<RPS; r++) out[r]=sub_group_reduce_add(acc[r]);
-}
-
-// ===========================================================================
-// TASK SYSTEM (verbatim logic from MEGAKERNEL_POC/research/preloading_gemv/src/
-// ocl/taskSystem). Embedded here because the GPU plugin cannot include the
-// research-tree headers; the scheduling logic, barriers and atomics are kept
-// identical to the original taskManager.hcl / workerMainLoop_template.hcl.
-// Workers (workgroups) pull topologically-sorted tasks FIFO from a shared work
-// queue and execute them cooperatively; inter-task data dependencies are
-// resolved by the tasks themselves through global atomic sync flags.
-// ===========================================================================
-#define PAYLOAD_SIZE (64 - sizeof(int))
-typedef struct TaskDesc {
-    int  type;
-    char payload[PAYLOAD_SIZE];
-} TaskDesc;
-
-typedef struct TaskManager {
-    __global const TaskDesc* workQueue;
-    __global int*            processedTaskCount;
-    int                      workQueueSize;
-} TaskManager;
-
-// GetNext task to execute (thread-level): atomically claim the next slot.
-inline __global const TaskDesc* GetNextTask_thread(
-    __constant const TaskManager* taskManager) {
-    const int slotId = atomic_inc(taskManager->processedTaskCount);
-    if (slotId >= taskManager->workQueueSize) {
-        return NULL;
-    }
-    return taskManager->workQueue + slotId;
-}
-
-// GetNext task to execute (block-level): claim on thread 0 and broadcast the
-// task pointer to the whole work-group through SLM.
-inline __global const TaskDesc* GetNextTask_block(
-    __constant const TaskManager* taskManager, __local char* slmBuffer) {
-    __global const TaskDesc* task = NULL;
-    __local ulong* taskAddress = (__local ulong*)slmBuffer;
-
-    if (get_local_id(0) == 0) {
-        task = GetNextTask_thread(taskManager);
-        *taskAddress = (ulong)task;
-    }
-
-    barrier(CLK_LOCAL_MEM_FENCE);
-    task = (__global const TaskDesc*)(*taskAddress);
-    return task;
-}
-
-inline void ClearTaskManagerState_thread(
-    __constant const TaskManager* taskManager) {
-    atomic_xchg(taskManager->processedTaskCount, 0);
-}
-
-// Last executing worker restores the task manager state so the same queue can
-// be re-launched (e.g. for the next token) without a host-side reset.
-inline void LastWorkerClearTaskManagerState_block(
-    __constant const TaskManager* taskManager) {
-    barrier(CLK_LOCAL_MEM_FENCE);
-
-    if (get_local_id(0) == 0) {
-        volatile __global atomic_int* syncBuffer =
-            (volatile __global atomic_int*)(taskManager->processedTaskCount);
-        const int processed = atomic_load_explicit(syncBuffer, memory_order_acquire,
-                                                    memory_scope_device);
-        const int workers =
-            get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
-        if (processed == workers + taskManager->workQueueSize) {
-            ClearTaskManagerState_thread(taskManager);
-        }
-    }
 }
 
 // ===========================================================================
@@ -479,20 +410,14 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
     }
 }
 
-// Worker main loop (verbatim logic from workerMainLoop_template.hcl): each
-// work-group pulls tasks FIFO until the queue is drained, then the last worker
-// clears the task-manager state so the queue can be re-launched next token.
+#define WorkerMainLoop_block_EXEC_FUN ExecuteMkTask
+#include "taskSystem/device/workerMainLoop_template.hcl"
+
 __attribute__((reqd_work_group_size(256, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void mk_task(__constant const TaskManager* taskManager) {
     __local char slm[SLM_BYTES];
-    __global const TaskDesc* taskPtr = GetNextTask_block(taskManager, slm);
-    while (taskPtr != NULL) {
-        TaskDesc task = *taskPtr;
-        ExecuteMkTask(task, slm);
-        taskPtr = GetNextTask_block(taskManager, slm);
-    }
-    LastWorkerClearTaskManagerState_block(taskManager);
+    WorkerMainLoop_block(taskManager, slm);
 }
 )CL";
 
@@ -527,16 +452,6 @@ static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(l
 // staying below the point where shared-cursor atomic_inc contention dominates.
 static constexpr int  MONO_WG = 32, MONO_LWS = 256;
 
-// Host mirrors of the device task-system structs (identical memory layout).
-struct TaskDescH {
-    int  type;
-    char payload[64 - sizeof(int)];
-};
-struct TaskManagerH {
-    const void* workQueue;
-    void*       processedTaskCount;
-    int         workQueueSize;
-};
 struct MonoCtxH {
     void* hs; void* h;
     void* wn; void* pn;
@@ -609,7 +524,9 @@ public:
         cl_int err;
         prog_ = clCreateProgramWithSource(ctx_, 1, &kKernelSrc, nullptr, &err);
         OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
-        err = clBuildProgram(prog_, 1, &dev_, "-cl-std=CL2.0", nullptr, nullptr);
+        const std::string build_options =
+            std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT;
+        err = clBuildProgram(prog_, 1, &dev_, build_options.c_str(), nullptr, nullptr);
         if (err != CL_SUCCESS) {
             size_t n = 0;
             clGetProgramBuildInfo(prog_, dev_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &n);
@@ -644,9 +561,9 @@ public:
 
         // Build the topologically-sorted task queue once. Each task carries the
         // context pointer plus its (layer, tile); the task `type` selects the stage.
-        std::vector<TaskDescH> queue;
+        std::vector<TaskDesc> queue;
         auto push = [&](int type, int layer, int tile) {
-            TaskDescH d{};
+            TaskDesc d{};
             d.type = type;
             MkTaskH t{};
             t.ctx = mCtx_;
@@ -664,25 +581,17 @@ public:
             for (int i = 0; i < NT_E;  i++) push(4, L, i);   // Stage E  (gate/up)
             for (int i = 0; i < NT_F;  i++) push(5, L, i);   // Stage F  (down)
         }
-        workQueueSize_ = static_cast<int>(queue.size());
-
         auto& strm = instance.get_network().get_stream();
         cl_command_queue q = downcast<ocl_stream>(strm).get_cl_queue().get();
-        mQueue_   = ualloc(queue.size() * sizeof(TaskDescH));
-        mCounter_ = ualloc(sizeof(int));
-        int zero = 0;
-        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mQueue_, queue.data(),
-                                   queue.size() * sizeof(TaskDescH), 0, nullptr, nullptr) == CL_SUCCESS,
-                        "[MegaKernel] queue upload failed");
-        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCounter_, &zero, sizeof(int), 0, nullptr, nullptr) == CL_SUCCESS,
-                        "[MegaKernel] counter init failed");
+        err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, q);
+        OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
 
         // TaskManager descriptor consumed by the kernel as a __constant buffer.
-        TaskManagerH tm{};
-        tm.workQueue = mQueue_;
-        tm.processedTaskCount = mCounter_;
-        tm.workQueueSize = workQueueSize_;
-        mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(tm), &tm, &err);
+        mTaskMgr_ = clCreateBuffer(ctx_,
+                       CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                       sizeof(taskManager_),
+                       &taskManager_,
+                       &err);
         OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
 
         OPENVINO_ASSERT(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS,
@@ -790,15 +699,12 @@ public:
         // token t+1 sees the KV cache written by token t. For each token we refresh
         // the shared context (pos / token offset) and reset the sync counters, then
         // launch the worker pool which drains the queue.
-        const char pat = 0;
         for (uint t = 0; t < S_new; t++) {
             ctx.pos     = (int)(S_past + t);
             ctx.tok_off = t * (unsigned)H_DIM;
             OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCtx_, &ctx, sizeof(ctx), 0, nullptr, nullptr) == CL_SUCCESS,
                             "[MegaKernel] context update failed");
             // Zero the stage counters and the FIFO cursor before the workers start.
-            usmMemFill_(q, mSync_,    &pat, 1, SYNC_N * sizeof(int), 0, nullptr, nullptr);
-            usmMemFill_(q, mCounter_, &pat, 1, sizeof(int),          0, nullptr, nullptr);
             size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
             cl_int r = clEnqueueNDRangeKernel(q, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
             OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
@@ -826,9 +732,8 @@ private:
     void* mKC_=nullptr; void* mVC_=nullptr;
     void* mSync_=nullptr; void* mCtx_=nullptr;
     // Task-system state: work queue, FIFO cursor and the __constant descriptor.
-    void*  mQueue_=nullptr; void* mCounter_=nullptr;
+    TaskManager taskManager_{};
     cl_mem mTaskMgr_=nullptr;
-    int    workQueueSize_ = 0;
 };
 
 }  // namespace
