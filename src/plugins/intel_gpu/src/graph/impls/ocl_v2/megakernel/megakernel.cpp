@@ -166,8 +166,8 @@ typedef struct MkTask {
 } MkTask;
 
 // Stage 0: input embedding fp16 -> fp32 residual stream (single task).
-inline void mk_embed(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
+inline void mk_embed(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
     __global const half* hs = c->hs + c->tok_off;
     __global float*      h  = c->h  + c->tok_off;
     for (uint i = get_local_id(0); i < H; i += get_local_size(0))
@@ -176,9 +176,9 @@ inline void mk_embed(const MkTask* t, __local char* slm) {
 }
 
 // Stage A: fused input RMSNorm + Q/K/V projection (one tile of QKV rows).
-inline void mk_stageA(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
-    int layer = t->layer, tile = t->tile;
+inline void mk_stageA(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
     int dep    = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
     int depcnt = (layer == 0) ? 1         : NT_F;
@@ -208,9 +208,9 @@ inline void mk_stageA(const MkTask* t, __local char* slm) {
 
 // Stage BC: fused RoPE + flash-decoding attention. tile in [0,NH) is a query
 // head; tile in [NH,NH+KVH) writes the current token's K/V to the cache.
-inline void mk_stageBC(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
-    int layer = t->layer; uint wg = (uint)t->tile;
+inline void mk_stageBC(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer; uint wg = (uint)t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
 
@@ -313,9 +313,9 @@ inline void mk_stageBC(const MkTask* t, __local char* slm) {
 }
 
 // Stage D: O-projection with residual add (h += xn . Wo).
-inline void mk_stageD(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
-    int layer = t->layer, tile = t->tile;
+inline void mk_stageD(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 1), NT_BC);
     uint ow_off=layer*H*QDIM;
@@ -330,9 +330,9 @@ inline void mk_stageD(const MkTask* t, __local char* slm) {
 }
 
 // Stage E: fused post-attn RMSNorm + gate/up + SiLU.
-inline void mk_stageE(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
-    int layer = t->layer, tile = t->tile;
+inline void mk_stageE(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2), NT_D);
     uint pn_off=layer*H, gw_off=layer*IM*H, uw_off=layer*IM*H;
@@ -350,9 +350,9 @@ inline void mk_stageE(const MkTask* t, __local char* slm) {
 }
 
 // Stage F: down-projection with residual add (h += g . Wdown).
-inline void mk_stageF(const MkTask* t, __local char* slm) {
-    __global const MonoCtx* c = t->ctx;
-    int layer = t->layer, tile = t->tile;
+inline void mk_stageF(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 3), NT_E);
     uint dw_off=layer*H*IM;
@@ -368,9 +368,9 @@ inline void mk_stageF(const MkTask* t, __local char* slm) {
 
 // Task dispatch: `type` selects the stage.
 inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
-    const MkTask* t = (const MkTask*)task.payload;
+    const MkTask t = *(const MkTask*)task.payload;
     switch (task.type) {
-        case 0: mk_embed (t, slm); break;
+        case 0: mk_embed(t, slm); break;
         case 1: mk_stageA(t, slm); break;
         case 2: mk_stageBC(t, slm); break;
         case 3: mk_stageD(t, slm); break;
