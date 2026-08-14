@@ -156,7 +156,8 @@ typedef struct MonoCtx {
     __global half*        xn; __global half* gbuf;
     __global half*        kc; __global half* vc;
     __global int*         sync;
-    int  pos; uint CS; uint tok_off;
+    __global long*        past_pos;
+    int  step; uint CS; uint tok_off;
 } MonoCtx;
 
 typedef struct MkTask {
@@ -215,7 +216,7 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
 
     const float scl = rsqrt((float)HD);
-    uint CS = c->CS; int pos = c->pos;
+    uint CS = c->CS; int pos = (int)c->past_pos[0] + c->step;
     uint qn_off=layer*HD, kn_off=layer*HD;
     __local float* lsm_m = (__local float*)slm;
     __local float* lsm_l = lsm_m + SGN;
@@ -433,7 +434,8 @@ struct MonoCtxH {
     void* xn; void* gbuf;
     void* kc; void* vc;
     void* sync;
-    int   pos; unsigned CS; unsigned tok_off;
+    void* past_pos;
+    int   step; unsigned CS; unsigned tok_off;
 };
 struct MkTaskH {
     void* ctx;
@@ -602,6 +604,9 @@ public:
             return m.buffer_ptr();
         };
 
+        OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64, 
+            "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
+
         MonoCtxH ctx{};
         ctx.hs = usm_raw(instance.input_memory(0),  "hidden_states");
         ctx.h  = usm_raw(instance.output_memory(0), "hidden_states_out");
@@ -617,6 +622,7 @@ public:
         ctx.qn = usm_raw(instance.input_memory(14), "q_norm_w");
         ctx.kn = usm_raw(instance.input_memory(15), "k_norm_w");
         ctx.rf = usm_raw(instance.input_memory(16), "rope_inv_freq");
+        ctx.past_pos = usm_raw(instance.input_memory(1), "position_ids");
         ctx.qb = mQb_; ctx.kb = mKb_; ctx.vb = mVb_;
         ctx.xn = mXn_; ctx.gbuf = mGb_;
         ctx.kc = mKC_; ctx.vc = mVC_;
@@ -626,34 +632,6 @@ public:
         // Number of new tokens this step (dim 1 of hidden_states).
         auto hs_ps = instance.input_memory(0).get_layout().get<ov::PartialShape>();
         uint S_new = (uint)hs_ps[1].get_length();
-
-        // Sequence position derived solely from position_ids (input 1), exactly
-        // like the original monokernel — the MegaKernel is stateless w.r.t. it.
-        static const bool pos_read = [] {
-            const char* v = std::getenv("OV_MEGAKERNEL_POSREAD");
-            return !(v && v[0] == '0');
-        }();
-        static thread_local uint acc_len = 0;   // fallback accumulator (diagnostic path)
-        uint S_past;
-        if (pos_read) {
-            const auto& pos_mem = instance.input_memory(1);
-            const auto pos_dt = pos_mem.get_layout().data_type;
-            int64_t pos0 = -1;
-            if (pos_dt == ov::element::i64) {
-                pos_mem.copy_to(strm, &pos0, 0, 0, sizeof(int64_t), true);
-            } else if (pos_dt == ov::element::i32) {
-                int32_t p32 = -1;
-                pos_mem.copy_to(strm, &p32, 0, 0, sizeof(int32_t), true);
-                pos0 = (int64_t)p32;
-            }
-            OPENVINO_ASSERT(pos0 >= 0,
-                            "[MegaKernel] position_ids (input 1) must be i32/i64 and >= 0; "
-                            "the MegaKernel derives its sequence position solely from it.");
-            S_past = (uint)pos0;
-        } else {
-            S_past = (S_new > 1) ? 0u : acc_len;
-        }
-        acc_len = S_past + S_new;
 
         // Co-resident worker count (see MONO_WG note). Tunable via env.
         static const int workers = [] {
@@ -670,7 +648,7 @@ public:
         // the shared context (pos / token offset) and reset the sync counters, then
         // launch the worker pool which drains the queue.
         for (uint t = 0; t < S_new; t++) {
-            ctx.pos     = (int)(S_past + t);
+            ctx.step    = t;
             ctx.tok_off = t * (unsigned)H_DIM;
             OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCtx_, &ctx, sizeof(ctx), 0, nullptr, nullptr) == CL_SUCCESS,
                             "[MegaKernel] context update failed");
