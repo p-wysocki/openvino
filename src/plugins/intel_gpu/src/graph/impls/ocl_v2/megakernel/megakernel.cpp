@@ -58,23 +58,31 @@ static const char* kKernelSrc = R"CL(
 #define GQA   2
 #define IM    3072
 #define EPS   1e-6f
-#define SG    16
-#define RPS   4
+#define SG    32
+#define RPS   2
 #define NUM_L 28
 
 #include "taskSystem/shared/taskDesc.h"
 #include "common/semaphore.hcl"
 
 // ---------------------------------------------------------------------------
-// Barrier-free RMS: sub_group_reduce_add over each lane's strided H/SG slice
-inline float sg_rms(const __global float* h, uint lane) {
-    float ss = 0;
-    for (uint k = lane * 16; k < H; k += SG * 16) {
-        float16 v = vload16(0, h + k);
-        float8  q = v.lo*v.lo + v.hi*v.hi;
-        ss += q.s0+q.s1+q.s2+q.s3+q.s4+q.s5+q.s6+q.s7;
+// Compute RMS once per work-group; all GEMV subgroups consume the same value.
+inline float wg_rms(const __global float* h, __local char* slm) {
+    uint lid = get_local_id(0), lane = get_sub_group_local_id(), sgl = get_sub_group_id();
+    float2 v = vload2(0, h + lid * 2);
+    float ss = sub_group_reduce_add(dot(v, v));
+    __local float* partial = (__local float*)slm;
+    if (lane == 0)
+        partial[sgl] = ss;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sgl == 0) {
+        ss = lane < get_num_sub_groups() ? partial[lane] : 0.0f;
+        ss = sub_group_reduce_add(ss);
+        if (lane == 0)
+            partial[0] = rsqrt(ss / H + EPS);
     }
-    return rsqrt(sub_group_reduce_add(ss) / H + EPS);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    return partial[0];
 }
 
 // GEMV with fused RMS + block reads (SIMD16 message per 256-element strip)
@@ -133,11 +141,11 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
 // ===========================================================================
 #define SGN 16                                 // sub-groups per work-group (LWS 256 / SG 16)
 #define TF  1                                  // GEMV tile coarsening (RPS-groups per lane per task)
-#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 64
+#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 128
 #define NT_BC (NH+KVH)                          // Stage BC (attn) task count    = 24
-#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 16
-#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 48
-#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 16
+#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 32
+#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 96
+#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 32
 #define EMBED_IDX (NUM_L*5)                     // sync slot for the embedding stage
 #define SLM_BYTES ((2*SGN + SGN*NPL*SG)*4)      // flash-decoding partials (lsm_m/lsm_l/lsm_a)
 
@@ -187,10 +195,11 @@ inline void mk_stageA(const MkTask t, __local char* slm) {
 
     uint wn_off=layer*H, qw_off=layer*QDIM*H, kw_off=layer*KVDIM*H, vw_off=layer*KVDIM*H;
     __global float* h = c->h + c->tok_off;
+    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint gr = gi*RPS;
-        float rms = sg_rms(h, l), o[RPS];
+        float o[RPS];
         if (gr < QDIM) {
             sg_gemv_rms(h, c->wn+wn_off, rms, c->qw+qw_off, gr, l, o);
             if (l==0) for (int r=0;r<RPS;r++) c->qb[gr+r]=o[r];
@@ -225,16 +234,16 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     if (wg < NH) {
         uint hq=wg, kv=hq/GQA;
         __global float* qhs = c->qb + hq*HD;
-        float sq=0, qv[8];
-        for (int j=0;j<8;j++){ float x=qhs[l+SG*j]; qv[j]=x; sq+=x*x; }
+        float sq=0, qv[NPL];
+        for (int j=0;j<NPL;j++){ float x=qhs[l+SG*j]; qv[j]=x; sq+=x*x; }
         float iq=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
-        for (int j=0;j<8;j++) qv[j]=qv[j]*iq*convert_float(c->qn[qn_off+l+SG*j]);
+        for (int j=0;j<NPL;j++) qv[j]=qv[j]*iq*convert_float(c->qn[qn_off+l+SG*j]);
         float qr[NPL];
-        for (int j=0;j<4;j++){
+        for (int j=0;j<NPL/2;j++){
             uint d=l+SG*j;
             float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
-            float x0=qv[j], x1=qv[j+4];
-            qr[j]=x0*cc-x1*sn; qr[j+4]=x1*cc+x0*sn;
+            float x0=qv[j], x1=qv[j+NPL/2];
+            qr[j]=x0*cc-x1*sn; qr[j+NPL/2]=x1*cc+x0*sn;
         }
         ulong base=((ulong)layer*KVH+kv)*(ulong)CS*HD;
         uint tile=((uint)pos + nsgl - 1)/nsgl;
@@ -252,16 +261,16 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
         }
         if (sgl==0){
             __global float* khs = c->kb + kv*HD;
-            float sk=0, kvv[8];
-            for (int j=0;j<8;j++){ float x=khs[l+SG*j]; kvv[j]=x; sk+=x*x; }
+            float sk=0, kvv[NPL];
+            for (int j=0;j<NPL;j++){ float x=khs[l+SG*j]; kvv[j]=x; sk+=x*x; }
             float ik=rsqrt(sub_group_reduce_add(sk)/HD+EPS);
-            for (int j=0;j<8;j++) kvv[j]=kvv[j]*ik*convert_float(c->kn[kn_off+l+SG*j]);
+            for (int j=0;j<NPL;j++) kvv[j]=kvv[j]*ik*convert_float(c->kn[kn_off+l+SG*j]);
             float kr[NPL];
-            for (int j=0;j<4;j++){
+            for (int j=0;j<NPL/2;j++){
                 uint d=l+SG*j;
                 float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
-                float x0=kvv[j], x1=kvv[j+4];
-                kr[j]=x0*cc-x1*sn; kr[j+4]=x1*cc+x0*sn;
+                float x0=kvv[j], x1=kvv[j+NPL/2];
+                kr[j]=x0*cc-x1*sn; kr[j+NPL/2]=x1*cc+x0*sn;
             }
             float pa=0;
             for (int j=0;j<NPL;j++) pa+=qr[j]*kr[j];
@@ -290,20 +299,20 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
         uint kvh=wg-NH;
         if (sgl==0) {
             __global float* kh = c->kb + kvh*HD;
-            float sq=0, kv2[8];
-            for (int j=0;j<8;j++){ float x=kh[l+SG*j]; kv2[j]=x; sq+=x*x; }
+            float sq=0, kv2[NPL];
+            for (int j=0;j<NPL;j++){ float x=kh[l+SG*j]; kv2[j]=x; sq+=x*x; }
             float iv=rsqrt(sub_group_reduce_add(sq)/HD+EPS);
-            for (int j=0;j<8;j++) kv2[j]=kv2[j]*iv*convert_float(c->kn[kn_off+l+SG*j]);
-            float ko[8];
-            for (int j=0;j<8;j++) ko[j]=kv2[j];
-            for (int j=0;j<4;j++){
+            for (int j=0;j<NPL;j++) kv2[j]=kv2[j]*iv*convert_float(c->kn[kn_off+l+SG*j]);
+            float ko[NPL];
+            for (int j=0;j<NPL;j++) ko[j]=kv2[j];
+            for (int j=0;j<NPL/2;j++){
                 uint d=l+SG*j;
                 float a=(float)pos*convert_float(c->rf[d]), cc=native_cos(a), sn=native_sin(a);
-                float x0=kv2[j], x1=kv2[j+4];
-                ko[j]=x0*cc-x1*sn; ko[j+4]=x1*cc+x0*sn;
+                float x0=kv2[j], x1=kv2[j+NPL/2];
+                ko[j]=x0*cc-x1*sn; ko[j+NPL/2]=x1*cc+x0*sn;
             }
             ulong cbase=((ulong)layer*KVH+kvh)*(ulong)CS*HD + (ulong)pos*HD;
-            for (int j=0;j<8;j++){
+            for (int j=0;j<NPL;j++){
                 uint e=l+SG*j;
                 c->kc[cbase+e]=convert_half(ko[j]);
                 c->vc[cbase+e]=convert_half(c->vb[kvh*HD+e]);
@@ -338,10 +347,11 @@ inline void mk_stageE(const MkTask t, __local char* slm) {
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2), NT_D);
     uint pn_off=layer*H, gw_off=layer*IM*H, uw_off=layer*IM*H;
     __global float* h = c->h + c->tok_off;
+    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
-        float rms=sg_rms(h,l), a[RPS], b[RPS];
+        float a[RPS], b[RPS];
         sg_gemv_rms(h, c->pn+pn_off, rms, c->gw+gw_off, n, l, a);
         sg_gemv_rms(h, c->pn+pn_off, rms, c->uw+uw_off, n, l, b);
         if (l==0) for (int r=0;r<RPS;r++)
@@ -384,9 +394,10 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
 #define WorkerMainLoop_block_EXEC_FUN ExecuteMkTask
 #include "taskSystem/device/workerMainLoop_template.hcl"
 
-__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((reqd_work_group_size(512, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void mk_task(__constant const TaskManager* taskManager) {
+    _Static_assert(SLM_BYTES <= 32*1024, "SLM_BYTES exceeds device SLM capacity");
     __local char slm[SLM_BYTES];
     WorkerMainLoop_block(taskManager, slm);
 }
@@ -398,16 +409,16 @@ __kernel void mk_task(__constant const TaskManager* taskManager) {
 static constexpr int  NUM_L = 28, H_DIM = 1024, KVH = 8, HD = 128;
 static constexpr int  NH = 16, IM_DIM = 3072;
 static constexpr int  QDIM = NH * HD, KVDIM = KVH * HD;
-static constexpr int  RPS = 4;
+static constexpr int  RPS = 2;
 static constexpr int  MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
 
 // Task-system tiling — mirror of the kernel macros (SGN=16, TF=1).
 static constexpr int  SGN = 16, TF = 1;
-static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 64
+static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 128
 static constexpr int  NT_BC = NH + KVH;                                // 24
-static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 16
-static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 48
-static constexpr int  NT_F  = H_DIM / (RPS * SGN * TF);                // 16
+static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 32
+static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 96
+static constexpr int  NT_F  = H_DIM / (RPS * SGN * TF);                // 32
 static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(layer,stage) counters + embed
 
 // Task-worker launch geometry. Like the old monokernel grid, the worker pool
@@ -417,11 +428,11 @@ static constexpr int  SYNC_N = NUM_L * 5 + 1;                          // per-(l
 // SLM-heavy) kernel's occupancy, not the device max, so it is tunable via
 // OV_MEGAKERNEL_MONO_WG (default). More workers add parallelism to the GEMV
 // stages up to the co-residency cap; attention has NH+KVH=24 independent tasks.
-// Tuned on the B60 (24 Xe-cores): with the lighter LWS=256 (SGN=16) work-group,
-// two work-groups fit per Xe-core, so 32 workers maximise co-resident GEMV
+// Tuned on the B60 (24 Xe-cores): with the LWS=512 (SGN=16) work-group,
+// worker count controls co-resident GEMV
 // parallelism (more outstanding weight loads => higher HBM utilisation) while
 // staying below the point where shared-cursor atomic_inc contention dominates.
-static constexpr int  MONO_WG = 32, MONO_LWS = 256;
+static constexpr int  MONO_WG = 32, MONO_LWS = 512;
 
 struct MonoCtxH {
     void* hs; void* h;
@@ -641,6 +652,9 @@ public:
             if (w > 160) w = 160;
             return w;
         }();
+
+        // std::cout << "[MegaKernel] WORKERS: " << workers << ", tasks: " << taskManager_.workQueueSize << ", stages: " << SYNC_N
+        //           << ", " <<  std::endl;
 
         // ===== Task-system path: the whole 28-layer model as one queue of tasks,
         // launched once per new token. The in-order queue serialises tokens so
