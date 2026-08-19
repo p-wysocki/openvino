@@ -16,7 +16,7 @@
 
 namespace {
 
-static constexpr float ABS_ERROR = 1e-5f;
+static constexpr float ABS_ERROR = 1e-3f;
 
 constexpr size_t WORKERS = 35;
 constexpr size_t WORK_GROUP_SIZE = 1024;

@@ -4,16 +4,6 @@
 #define ComputeGemvTile_SUFFIX
 #endif
 
-// Preloads vector data into private memory.
-// cached vector is assumed to have size defined by
-// TEMPLATE(ComputeGemvTile_CACHE_SIZE, ComputeGemvTile_SUFFIX).
-
-// Requires template parameters:
-// #define ComputeGemvTile_TILE_COLUMNS
-void TEMPLATE(PreloadVectorData,
-              ComputeGemvTile_SUFFIX)(__private half4* restrict cachedVector,
-                                      __local const half* restrict vector);
-
 // Template function.
 // Computes gemv for given tile. Each warp computes multiple rows of the tile.
 // cachedVector is assumed to be Preloaded into private memory with
@@ -28,9 +18,8 @@ void TEMPLATE(PreloadVectorData,
 // Optional parameter to give unique name of template instantiation.
 // #define ComputeGemvTile_SUFFIX
 void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
-    __local const half4* restrict matrixTile_local,
-    __private const half4* restrict cachedVector,
-    __global half* restrict result);
+    __local const half* restrict matrixTile_local,
+    __global const half* restrict cachedVector, __global half* restrict result);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -57,25 +46,16 @@ _Static_assert(ComputeGemvTile_TILE_ROWS % ComputeGemvTile_COMPUTE_WARPS == 0,
                "ComputeGemvTile_TILE_ROWS must be divisible by "
                "ComputeGemvTile_COMPUTE_WARPS");
 
-#define ComputeGemvTile_DATA_WIDTH 4
-
-enum {
-  TEMPLATE(ComputeGemvTile_CACHE_SIZE, ComputeGemvTile_SUFFIX) =
-      ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH / WARP_SIZE
-};
-
 ////////////////////////////////////////////////////////////////
 inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
-    __local const half4* restrict matrixTile_local,
-    __private const half4* restrict cachedVector,
-    __global half* restrict result) {
+    __local const half* restrict matrixTile_local,
+    __global const half* restrict vector, __global half* restrict result) {
   const int laneLid = get_sub_group_local_id();
-  const int vectorizedNumColumns =
-      ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
   const int startingRowIdxForThisWarp =
       get_sub_group_id() * ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
-  __local const half4* restrict matrixTileForThisWarp_local =
-      matrixTile_local + startingRowIdxForThisWarp * vectorizedNumColumns;
+  __local const half* restrict matrixTileForThisWarp_local =
+      matrixTile_local +
+      startingRowIdxForThisWarp * ComputeGemvTile_TILE_COLUMNS;
   float acc[ComputeGemvTile_ROWS_FOR_COMPUTE_WARP];
 
 #pragma unroll ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
@@ -86,16 +66,29 @@ inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
 
   // Compute dot products for assigned rows.
 #pragma unroll
-  for (int colIdx = laneLid; colIdx < vectorizedNumColumns;
-       colIdx += WARP_SIZE) {
-    const float4 vectorData = convert_float4(cachedVector[colIdx / WARP_SIZE]);
+  for (int thisWarpOffset = 0; thisWarpOffset < ComputeGemvTile_TILE_COLUMNS;
+       thisWarpOffset += WARP_SIZE * 8) {
+    const __global ushort* vector_us =
+        (const __global ushort*)(vector + thisWarpOffset);
+    // NOTE: I have tried a version where vector is cached in registers, but
+    // due to lack of GRF, compiler started to move them to private memory
+    // which was basically slower in some cases then loading vector multiple
+    // times, since vector should be in cache.
+    const float8 vectorData =
+        convert_float8(as_half8(intel_sub_group_block_read_us8(vector_us)));
+
 #pragma unroll
     for (int rowIdx = 0; rowIdx < ComputeGemvTile_ROWS_FOR_COMPUTE_WARP;
          ++rowIdx) {
-      const int rowOffset = rowIdx * vectorizedNumColumns;
-      const float4 matrixData =
-          convert_float4(matrixTileForThisWarp_local[rowOffset + colIdx]);
-      acc[rowIdx] += dot(matrixData, vectorData);
+      const int rowOffset =
+          rowIdx * ComputeGemvTile_TILE_COLUMNS + thisWarpOffset;
+      const __local ushort* matrix_us =
+          (const __local ushort*)(matrixTileForThisWarp_local + rowOffset);
+      const float8 matrixData =
+          convert_float8(as_half8(intel_sub_group_block_read_us8(matrix_us)));
+      const float8 mul = matrixData * vectorData;
+      acc[rowIdx] +=
+          mul.s0 + mul.s1 + mul.s2 + mul.s3 + mul.s4 + mul.s5 + mul.s6 + mul.s7;
     }
   }
 
@@ -118,24 +111,8 @@ inline void TEMPLATE(ComputeGemvTile, ComputeGemvTile_SUFFIX)(
   }
 }
 
-/////////////////////////////////////////////////////////////////////
-inline void TEMPLATE(PreloadVectorData,
-           ComputeGemvTile_SUFFIX)(
-  __private half4* restrict cachedVector,
-  __local const half* restrict vector) {
-  const int laneLid = get_sub_group_local_id();
-  __local const half4* restrict vector4 = (__local const half4* restrict)vector;
-#pragma unroll
-  for (int colIdx = laneLid;
-       colIdx < ComputeGemvTile_TILE_COLUMNS / ComputeGemvTile_DATA_WIDTH;
-       colIdx += WARP_SIZE) {
-    cachedVector[colIdx / WARP_SIZE] = vector4[colIdx];
-  }
-}
-
 #undef ComputeGemvTile_TILE_ROWS
 #undef ComputeGemvTile_TILE_COLUMNS
 #undef ComputeGemvTile_COMPUTE_WARPS
 #undef ComputeGemvTile_ROWS_FOR_COMPUTE_WARP
-#undef ComputeGemvTile_DATA_WIDTH
 #undef ComputeGemvTile_SUFFIX

@@ -53,14 +53,32 @@ inline void TEMPLATE(LoadDataTile, LoadDataTile_SUFFIX)(
   __global half8* restrict dataBlock_global8 =
       (__global half8* restrict)dataBlock_global;
 
+  const int DATA_SIZE8 = LoadDataTile_LOAD_DATA_TILE_SIZE / 8;
+  const int LEFTOWERS_SIZE = DATA_SIZE8 % (LoadDataTile_LOAD_WARPS * WARP_SIZE);
+  const int PROCESSED_SIZE = DATA_SIZE8 - LEFTOWERS_SIZE;
+  if (PROCESSED_SIZE > 0) {
 #pragma unroll
-  for (int i = get_local_id(0) - LoadDataTile_FIRST_LOAD_WARP_ID * WARP_SIZE;
-       i < LoadDataTile_LOAD_DATA_TILE_SIZE / 8;
+    for (int i = 0; i < PROCESSED_SIZE;
        i += LoadDataTile_LOAD_WARPS * WARP_SIZE) {
+      const int thisThread_i =
+        i + get_local_id(0) - LoadDataTile_FIRST_LOAD_WARP_ID * WARP_SIZE;
 #if LoadDataTile_NON_TEMPORAL_LOAD == 0
-    dataTile_local8[i] = dataBlock_global8[i];
+      dataTile_local8[thisThread_i] = dataBlock_global8[thisThread_i];
 #else
-    dataTile_local8[i] = NontemporalLoad(dataBlock_global8 + i);
+      dataTile_local8[thisThread_i] =
+        NontemporalLoad(dataBlock_global8 + thisThread_i);
+#endif
+      }
+  }
+
+  const int threadIdx = get_local_id(0) -
+          LoadDataTile_FIRST_LOAD_WARP_ID * WARP_SIZE +
+          PROCESSED_SIZE;
+  if (threadIdx < DATA_SIZE8) {
+#if LoadDataTile_NON_TEMPORAL_LOAD == 0
+    dataTile_local8[threadIdx] = dataBlock_global8[threadIdx];
+#else
+    dataTile_local8[threadIdx] = NontemporalLoad(dataBlock_global8 + threadIdx);
 #endif
   }
 }
