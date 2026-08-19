@@ -62,6 +62,9 @@ static const char* kKernelSrc = R"CL(
 #define RPS   2
 #define NUM_L 28
 
+#define THREADS 512
+#define TOTAL_WARPS (THREADS/SG)
+
 #include "taskSystem/shared/taskDesc.h"
 #include "common/semaphore.hcl"
 
@@ -83,6 +86,26 @@ inline float wg_rms(const __global half* h, __local char* slm) {
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     return partial[0];
+}
+
+inline void wg_rms2(const __global half* h, const __global half* wn,
+                    __global half* out, __local char* slm) {
+    uint lid = get_local_id(0), lane = get_sub_group_local_id(), sgl = get_sub_group_id();
+    float2 v = convert_float2(vload2(0, h + lid * 2));
+    float ss = sub_group_reduce_add(dot(v, v));
+    __local float* partial = (__local float*)slm;
+    if (lane == 0)
+        partial[sgl] = ss;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sgl == 0) {
+        ss = lane < get_num_sub_groups() ? partial[lane] : 0.0f;
+        ss = sub_group_reduce_add(ss);
+        if (lane == 0)
+            partial[0] = rsqrt(ss / H + EPS);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float2 norm = convert_float2(vload2(0, wn + lid * 2));
+    vstore2(convert_half2(v * partial[0] * norm), 0, out + lid * 2);
 }
 
 // GEMV with fused RMS + block reads (SIMD16 message per 256-element strip)
@@ -141,7 +164,10 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
 // ===========================================================================
 #define SGN 16                                 // sub-groups per work-group (LWS 256 / SG 16)
 #define TF  1                                  // GEMV tile coarsening (RPS-groups per lane per task)
-#define NT_A ((QDIM+2*KVDIM)/(RPS*SGN*TF))     // Stage A (QKV) tile count      = 128
+#define NT_AQ (QDIM/(RPS*SGN*TF))              // Stage AQ (Q) tile count       = 64
+#define NT_AK (KVDIM/(RPS*SGN*TF))             // Stage AK (K) tile count       = 32
+#define NT_AV (KVDIM/(RPS*SGN*TF))             // Stage AV (V) tile count       = 32
+#define NT_A (NT_AQ+NT_AK+NT_AV)               // Stage A total tile count      = 128
 #define NT_BC (NH+KVH)                          // Stage BC (attn) task count    = 24
 #define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 32
 #define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 96
@@ -163,6 +189,7 @@ typedef struct MonoCtx {
     __global const half*  qn; __global const half* kn; __global const half* rf;
     __global half*        qb; __global half* kb; __global half* vb;
     __global half*        xn; __global half* gbuf;
+    __global half*        nbuf;
     __global half*        kc; __global half* vc;
     __global int*         sync;
     __global long*        past_pos;
@@ -185,36 +212,113 @@ inline void mk_embed(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + EMBED_IDX));
 }
 
-// Stage A: fused input RMSNorm + Q/K/V projection (one tile of QKV rows).
-inline void mk_stageA(const MkTask t, __local char* slm) {
+// Materialize the weighted, normalized activation before Stage A.
+inline void mk_normA(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
-    int layer = t.layer, tile = t.tile;
-    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    int layer = t.layer;
     int dep    = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
     int depcnt = (layer == 0) ? 1         : NT_F;
     WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
+    wg_rms2(c->h + c->tok_off, c->wn + layer*H, c->nbuf, slm);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0));
+}
 
-    uint wn_off=layer*H, qw_off=layer*QDIM*H, kw_off=layer*KVDIM*H, vw_off=layer*KVDIM*H;
-    __global half* h = c->h + c->tok_off;
-    float rms = wg_rms(h, slm);
+// #define GemvBlock_MATRIX_ROWS 2048
+// #define GemvBlock_MATRIX_COLUMNS 1024
+// #define GemvBlock_BLOCK_TILE_ROWS 32
+// #define GemvBlock_PHASE_TILE_ROWS 4
+// #define GemvBlock_COMPUTE_WARPS 4
+// #define GemvBlock_SUFFIX _2048x1024
+// #include "gemvOpt/gemvBlock.hcl"
+
+inline void mk_stageAQ(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
+    const uint qw_off=layer*QDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    WaitForSemaphore_block(0, sem, 1);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
-        uint gr = gi*RPS;
+        uint n = gi*RPS;
         float o[RPS];
-        if (gr < QDIM) {
-            sg_gemv_rms(h, c->wn+wn_off, rms, c->qw+qw_off, gr, l, o);
-            if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->qb+gr);
-        } else if (gr < QDIM+KVDIM) {
-            uint n=gr-QDIM;
-            sg_gemv_rms(h, c->wn+wn_off, rms, c->kw+kw_off, n, l, o);
-            if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->kb+n);
-        } else {
-            uint n=gr-QDIM-KVDIM;
-            sg_gemv_rms(h, c->wn+wn_off, rms, c->vw+vw_off, n, l, o);
-            if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->vb+n);
-        }
+        sg_gemv_f16(c->nbuf, c->qw+qw_off, H, n, l, o);
+        if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->qb+n);
     }
-    SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0));
+
+    // const __global half* vector = c->nbuf;
+    // const __global half* matrix = c->qw + qw_off;
+    // __global half* output = c->qb;
+    // GemvBlock_2048x1024(tile, matrix, vector, output,
+    //                 slm,
+    //                 sem,
+    //                 1);
+
+    SignalSemaphore_block(0, sem);
+}
+
+// #define GemvBlock_MATRIX_ROWS 1024
+// #define GemvBlock_MATRIX_COLUMNS 1024
+// #define GemvBlock_BLOCK_TILE_ROWS 32
+// #define GemvBlock_PHASE_TILE_ROWS 8
+// #define GemvBlock_COMPUTE_WARPS 4
+// #define GemvBlock_SUFFIX _1024x1024
+// #include "gemvOpt/gemvBlock.hcl"
+
+inline void mk_stageAK(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
+    uint kw_off=layer*KVDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    WaitForSemaphore_block(0, sem, 1);
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint n = gi*RPS;
+        float o[RPS];
+        sg_gemv_f16(c->nbuf, c->kw+kw_off, H, n, l, o);
+        if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->kb+n);
+    }
+
+    // const __global half* vector = c->nbuf;
+    // const __global half* matrix = c->kw + kw_off;
+    // __global half* output = c->kb;
+    // GemvBlock_1024x1024(tile, matrix, vector, output,
+    //                 slm,
+    //                 sem,
+    //                 1);
+
+    SignalSemaphore_block(0, sem);
+}
+
+inline void mk_stageAV(const MkTask t, __local char* slm) {
+    __global const MonoCtx* c = t.ctx;
+    int layer = t.layer, tile = t.tile;
+    uint vw_off=layer*KVDIM*H;
+    volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+
+    uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
+    WaitForSemaphore_block(0, sem, 1);
+    for (int g = 0; g < TF; g++) {
+        uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
+        uint n = gi*RPS;
+        float o[RPS];
+        sg_gemv_f16(c->nbuf, c->vw+vw_off, H, n, l, o);
+        if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->vb+n);
+    }
+
+    // const __global half* vector = c->nbuf;
+    // const __global half* matrix = c->vw + vw_off;
+    // __global half* output = c->vb;
+
+    // GemvBlock_1024x1024(tile, matrix, vector, output,
+    //                 slm,
+    //                 sem,
+    //                 1);
+
+    SignalSemaphore_block(0, sem);
 }
 
 // Stage BC: fused RoPE + flash-decoding attention. tile in [0,NH) is a query
@@ -223,7 +327,7 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer; uint wg = (uint)t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A + 1);
 
     const float scl = rsqrt((float)HD);
     uint CS = c->CS; int pos = (int)c->past_pos[0] + c->step;
@@ -396,16 +500,21 @@ inline void mk_stageF(const MkTask t, __local char* slm) {
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 4));
 }
 
+#include "common/inkernelProfile.hcl"
+
 // Task dispatch: `type` selects the stage.
 inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
     const MkTask t = *(const MkTask*)task.payload;
     switch (task.type) {
         case 0: mk_embed(t, slm); break;
-        case 1: mk_stageA(t, slm); break;
-        case 2: mk_stageBC(t, slm); break;
-        case 3: mk_stageD(t, slm); break;
-        case 4: mk_stageE(t, slm); break;
-        case 5: mk_stageF(t, slm); break;
+        case 1: mk_normA(t, slm); break;
+        case 2: mk_stageAQ(t, slm); break;
+        case 3: mk_stageAK(t, slm); break;
+        case 4: IN_KERNEL_PROFILE_BLOCK(mk_stageAV(t, slm), "mk_stageAV"); break;
+        case 5: mk_stageBC(t, slm); break;
+        case 6: mk_stageD(t, slm); break;
+        case 7: mk_stageE(t, slm); break;
+        case 8: mk_stageF(t, slm); break;
         default: break;
     }
 }
@@ -413,11 +522,11 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
 #define WorkerMainLoop_block_EXEC_FUN ExecuteMkTask
 #include "taskSystem/device/workerMainLoop_template.hcl"
 
-__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((reqd_work_group_size(THREADS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void mk_task(__constant const TaskManager* taskManager) {
-    _Static_assert(SLM_BYTES <= 32*1024, "SLM_BYTES exceeds device SLM capacity");
-    __local char slm[SLM_BYTES];
+    _Static_assert(SLM_BYTES <= 64*1024, "SLM_BYTES exceeds device SLM capacity");
+    __local char slm[64*1024];
     WorkerMainLoop_block(taskManager, slm);
 }
 )CL";
@@ -433,7 +542,10 @@ static constexpr int  MAX_SEQ = 4096;  // capacity of the internal KV cache (per
 
 // Task-system tiling — mirror of the kernel macros (SGN=16, TF=1).
 static constexpr int  SGN = 16, TF = 1;
-static constexpr int  NT_A  = (QDIM + 2 * KVDIM) / (RPS * SGN * TF);   // 128
+static constexpr int  NT_AQ = QDIM / (RPS * SGN * TF);                 // 64
+static constexpr int  NT_AK = KVDIM / (RPS * SGN * TF);                // 32
+static constexpr int  NT_AV = KVDIM / (RPS * SGN * TF);                // 32
+static constexpr int  NT_A  = NT_AQ + NT_AK + NT_AV;                   // 128
 static constexpr int  NT_BC = NH + KVH;                                // 24
 static constexpr int  NT_D  = H_DIM / (RPS * SGN * TF);                // 32
 static constexpr int  NT_E  = IM_DIM / (RPS * SGN * TF);               // 96
@@ -462,6 +574,7 @@ struct MonoCtxH {
     void* qn; void* kn; void* rf;
     void* qb; void* kb; void* vb;
     void* xn; void* gbuf;
+    void* nbuf;
     void* kc; void* vc;
     void* sync;
     void* past_pos;
@@ -527,7 +640,8 @@ public:
         prog_ = clCreateProgramWithSource(ctx_, 1, &kKernelSrc, nullptr, &err);
         OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
         const std::string build_options =
-            std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT;
+            std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT; //+
+                //" -igc_opts 'VISAOptions=-hybridRAWithSpill'";
         err = clBuildProgram(prog_, 1, &dev_, build_options.c_str(), nullptr, nullptr);
         if (err != CL_SUCCESS) {
             size_t n = 0;
@@ -553,6 +667,7 @@ public:
         mVb_ = ualloc(KVDIM  * 2);
         mGb_ = ualloc(IM_DIM * 2);
         mXn_ = ualloc(QDIM   * 2);
+        mNb_ = ualloc(H_DIM * 2);
         mH_  = ualloc((size_t)MAX_SEQ * H_DIM * 2);
         // Persistent internal KV cache: [NUM_L, KVH, MAX_SEQ, HD] half, K and V.
         mKC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
@@ -578,11 +693,14 @@ public:
         };
         push(0, 0, 0);                                  // embedding
         for (int L = 0; L < NUM_L; L++) {
-            for (int i = 0; i < NT_A;  i++) push(1, L, i);   // Stage A  (QKV)
-            for (int i = 0; i < NT_BC; i++) push(2, L, i);   // Stage BC (attention)
-            for (int i = 0; i < NT_D;  i++) push(3, L, i);   // Stage D  (o-proj)
-            for (int i = 0; i < NT_E;  i++) push(4, L, i);   // Stage E  (gate/up)
-            for (int i = 0; i < NT_F;  i++) push(5, L, i);   // Stage F  (down)
+            push(1, L, 0);                                    // input RMS scale
+            for (int i = 0; i < NT_AQ; i++) push(2, L, i);   // Stage AQ (Q)
+            for (int i = 0; i < NT_AK; i++) push(3, L, i);   // Stage AK (K)
+            for (int i = 0; i < NT_AV; i++) push(4, L, i);   // Stage AV (V)
+            for (int i = 0; i < NT_BC; i++) push(5, L, i);   // Stage BC (attention)
+            for (int i = 0; i < NT_D;  i++) push(6, L, i);   // Stage D  (o-proj)
+            for (int i = 0; i < NT_E;  i++) push(7, L, i);   // Stage E  (gate/up)
+            for (int i = 0; i < NT_F;  i++) push(8, L, i);   // Stage F  (down)
         }
         auto& strm = instance.get_network().get_stream();
         cl_command_queue q = downcast<ocl_stream>(strm).get_cl_queue().get();
@@ -657,6 +775,7 @@ public:
         ctx.past_pos = usm_raw(instance.input_memory(1), "position_ids");
         ctx.qb = mQb_; ctx.kb = mKb_; ctx.vb = mVb_;
         ctx.xn = mXn_; ctx.gbuf = mGb_;
+        ctx.nbuf = mNb_;
         ctx.kc = mKC_; ctx.vc = mVC_;
         ctx.sync = mSync_;
         ctx.CS = (unsigned)MAX_SEQ;
@@ -712,6 +831,7 @@ private:
     clEnqueueMemFillINTEL_fn  usmMemFill_ = nullptr;
     // USM device allocations: per-token scratch, KV cache, sync counters, context.
     void* mQb_=nullptr; void* mKb_=nullptr; void* mVb_=nullptr; void* mGb_=nullptr; void* mXn_=nullptr; void* mH_=nullptr;
+    void* mNb_=nullptr;
     void* mKC_=nullptr; void* mVC_=nullptr;
     void* mSync_=nullptr; void* mCtx_=nullptr;
     // Task-system state: work queue, FIFO cursor and the __constant descriptor.
