@@ -234,16 +234,20 @@ inline void mk_normA(const MkTask t, __local char* slm) {
 inline void mk_stageAQ(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    const uint qw_off=layer*QDIM*H;
+    const uint wn_off=layer*H, qw_off=layer*QDIM*H;
     volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
+    int depcnt = (layer == 0) ? 1 : NT_F;
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, sem, 1);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
+    __global half* h = c->h + c->tok_off;
+    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_f16(c->nbuf, c->qw+qw_off, H, n, l, o);
+        sg_gemv_rms(h, c->wn+wn_off, rms, c->qw+qw_off, n, l, o);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->qb+n);
     }
 
@@ -269,16 +273,20 @@ inline void mk_stageAQ(const MkTask t, __local char* slm) {
 inline void mk_stageAK(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    uint kw_off=layer*KVDIM*H;
+    uint wn_off=layer*H, kw_off=layer*KVDIM*H;
     volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
+    int depcnt = (layer == 0) ? 1 : NT_F;
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, sem, 1);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
+    __global half* h = c->h + c->tok_off;
+    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_f16(c->nbuf, c->kw+kw_off, H, n, l, o);
+        sg_gemv_rms(h, c->wn+wn_off, rms, c->kw+kw_off, n, l, o);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->kb+n);
     }
 
@@ -296,16 +304,20 @@ inline void mk_stageAK(const MkTask t, __local char* slm) {
 inline void mk_stageAV(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer, tile = t.tile;
-    uint vw_off=layer*KVDIM*H;
+    uint wn_off=layer*H, vw_off=layer*KVDIM*H;
     volatile __global atomic_int* sem = (volatile __global atomic_int*)(c->sync + layer*5 + 0);
+    int dep = (layer == 0) ? EMBED_IDX : ((layer-1)*5 + 4);
+    int depcnt = (layer == 0) ? 1 : NT_F;
 
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id();
-    WaitForSemaphore_block(0, sem, 1);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + dep), depcnt);
+    __global half* h = c->h + c->tok_off;
+    float rms = wg_rms(h, slm);
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
         uint n = gi*RPS;
         float o[RPS];
-        sg_gemv_f16(c->nbuf, c->vw+vw_off, H, n, l, o);
+        sg_gemv_rms(h, c->wn+wn_off, rms, c->vw+vw_off, n, l, o);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->vb+n);
     }
 
@@ -327,7 +339,7 @@ inline void mk_stageBC(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
     int layer = t.layer; uint wg = (uint)t.tile;
     uint l = get_sub_group_local_id(), sgl = get_sub_group_id(), nsgl = get_num_sub_groups();
-    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A + 1);
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 0), NT_A);
 
     const float scl = rsqrt((float)HD);
     uint CS = c->CS; int pos = (int)c->past_pos[0] + c->step;
@@ -507,7 +519,7 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
     const MkTask t = *(const MkTask*)task.payload;
     switch (task.type) {
         case 0: mk_embed(t, slm); break;
-        case 1: mk_normA(t, slm); break;
+        // case 1: mk_normA(t, slm); break;
         case 2: mk_stageAQ(t, slm); break;
         case 3: mk_stageAK(t, slm); break;
         case 4: IN_KERNEL_PROFILE_BLOCK(mk_stageAV(t, slm), "mk_stageAV"); break;
@@ -693,7 +705,7 @@ public:
         };
         push(0, 0, 0);                                  // embedding
         for (int L = 0; L < NUM_L; L++) {
-            push(1, L, 0);                                    // input RMS scale
+            // push(1, L, 0);                                 // input RMS scale
             for (int i = 0; i < NT_AQ; i++) push(2, L, i);   // Stage AQ (Q)
             for (int i = 0; i < NT_AK; i++) push(3, L, i);   // Stage AK (K)
             for (int i = 0; i < NT_AV; i++) push(4, L, i);   // Stage AV (V)
