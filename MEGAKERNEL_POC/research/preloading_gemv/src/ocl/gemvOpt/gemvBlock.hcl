@@ -105,10 +105,8 @@ inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
     int wantedSyncVal) {
   __global half* restrict outputBlockTilePtr_global =
       output + tileId * GemvBlock_BLOCK_TILE_ROWS;
-
   __global const half* restrict matrixBlockTilePtr_global =
       matrix + tileId * GemvBlock_BLOCK_TILE_ROWS * GemvBlock_MATRIX_COLUMNS;
-
   __local half* restrict computeBufferPtr_local =
       (__local half* restrict)buff_local;
   __local half* restrict loadBufferPtr_local =
@@ -116,38 +114,15 @@ inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
                                                 GemvBlock_MATRIX_COLUMNS *
                                                 sizeof(half));
 
-  // --------------------------------------------------------
-  // Preload vector data into registers for reuse across dot products.
-  half4 cachedVector_thisWarp[TEMPLATE(ComputeGemvTile_CACHE_SIZE,
-                                       GemvBlock_SUFFIX)];
-  //---------------------------------------------------------
-
   IN_KERNEL_PROFILE(
       TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _allWarps))(
           loadBufferPtr_local, matrixBlockTilePtr_global + 0 * PHASE_TILE_SIZE),
       "INITIAL LoadDataTile_allWarps");
 
-  IN_KERNEL_PROFILE(WaitForSemaphore_block(0, syncMemory, wantedSyncVal),
-                    "WaitForSemaphore_block");
-
-  // The way that preloading of vector dara is implemented should be
-  // parametrized by 'policy' design, which is hard to achive wihouth templates.
-  // Basically that policy will depend on the size of vector.
-  // For now, I just hardcoded this policy as it is the best in avg case.
-  IN_KERNEL_PROFILE(
-      TEMPLATE(LoadDataTile, TEMPLATE(GemvBlock_SUFFIX, _allWarpsCached))(
-          computeBufferPtr_local, vector),
-      "INITIAL VECTOR LOAD LoadDataTile_allWarps");
-
   IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE), "Initial Barrier");
 
-  if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
-    IN_KERNEL_PROFILE(TEMPLATE(PreloadVectorData, GemvBlock_SUFFIX)(
-                          cachedVector_thisWarp, computeBufferPtr_local),
-                      "PreloadVectorData");
-  }
-  IN_KERNEL_PROFILE(barrier(CLK_LOCAL_MEM_FENCE),
-                    "Barrier After PreloadVectorData");
+  IN_KERNEL_PROFILE(WaitForSemaphore_block(0, syncMemory, wantedSyncVal),
+                    "WaitForSemaphore_block");
 
 #pragma unroll
   for (int phase = 0; phase < PHASES_PER_BLOCK - 1; ++phase) {
@@ -156,8 +131,7 @@ inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
     if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
       IN_KERNEL_PROFILE(
           TEMPLATE(ComputeGemvTile, GemvBlock_SUFFIX)(
-              (__local half4* restrict)computeBufferPtr_local,
-              cachedVector_thisWarp,
+              computeBufferPtr_local, vector,
               outputBlockTilePtr_global + phase * GemvBlock_PHASE_TILE_ROWS),
           "ComputeGemvTile");
     } else {
@@ -175,8 +149,8 @@ inline void TEMPLATE(GemvBlock, GemvBlock_SUFFIX)(
   if (get_sub_group_id() < GemvBlock_COMPUTE_WARPS) {
     IN_KERNEL_PROFILE(
         TEMPLATE(ComputeGemvTile, GemvBlock_SUFFIX)(
-            (__local half4* restrict)computeBufferPtr_local,
-            cachedVector_thisWarp,
+            computeBufferPtr_local,
+            vector,
             outputBlockTilePtr_global +
                 (PHASES_PER_BLOCK - 1) * GemvBlock_PHASE_TILE_ROWS),
         "Last ComputeGemvTile");
