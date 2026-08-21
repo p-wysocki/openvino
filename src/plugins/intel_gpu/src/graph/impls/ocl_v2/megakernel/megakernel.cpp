@@ -60,6 +60,8 @@ public:
     MegaKernelFastImpl(const MegaKernelFastImpl& other) : cldnn::primitive_impl(other) {}
 
     [[nodiscard]] std::unique_ptr<cldnn::primitive_impl> clone() const override {
+        OPENVINO_ASSERT(ready_ == false,
+                        "[GPU] MegaKernelFastImpl::clone() should not be called if megakernel runtime is initialized; use create_impl() instead.");
         return std::make_unique<MegaKernelFastImpl>(*this);
     }
     bool is_cpu() const override {
@@ -79,7 +81,37 @@ public:
         if (ready_)
             return;
 
-        runtime_.Init(instance);
+        auto& eng = cldnn::downcast<cldnn::ocl::ocl_engine>(instance.get_network().get_engine());
+        cl_context ctx = eng.get_cl_context().get();
+        cl_device_id dl_device = eng.get_cl_device().get();
+        cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
+
+        // Resolve the raw USM device pointers for every model input/output. The
+        // task-system tasks dereference these directly out of the context struct,
+        // which requires genuine USM device allocations (asserted below).
+        auto usm_raw = [](cldnn::memory& m, const char* name) -> void* {
+            auto at = m.get_allocation_type();
+            bool usm = at == cldnn::allocation_type::usm_device || at == cldnn::allocation_type::usm_host || at == cldnn::allocation_type::usm_shared;
+            OPENVINO_ASSERT(usm, "[MegaKernel] input/output '", name, "' must be a USM allocation for the task-system path");
+            return m.buffer_ptr();
+        };
+
+        mk::Qwen06BWeights weights{};
+
+        weights.q_proj_w = usm_raw(instance.input_memory(5), "q_proj_w");
+        weights.k_proj_w = usm_raw(instance.input_memory(6), "k_proj_w");
+        weights.v_proj_w = usm_raw(instance.input_memory(7), "v_proj_w");
+        weights.o_proj_w = usm_raw(instance.input_memory(8), "o_proj_w");
+        weights.gate_proj_w = usm_raw(instance.input_memory(9), "gate_proj_w");
+        weights.up_proj_w = usm_raw(instance.input_memory(10), "up_proj_w");
+        weights.down_proj_w = usm_raw(instance.input_memory(11), "down_proj_w");
+        weights.input_ln_w = usm_raw(instance.input_memory(12), "input_ln_w");
+        weights.post_attn_ln_w = usm_raw(instance.input_memory(13), "post_attn_ln_w");
+        weights.q_norm_w = usm_raw(instance.input_memory(14), "q_norm_w");
+        weights.k_norm_w = usm_raw(instance.input_memory(15), "k_norm_w");
+        weights.rope_inv_freq = usm_raw(instance.input_memory(16), "rope_inv_freq");
+
+        runtime_.Init(&weights, dl_device, ctx, queue);
         ready_ = true;
     }
 
@@ -93,11 +125,24 @@ public:
         for (auto& e : events)
             strm.wait_for_events({e});  // inputs ready before we read them
 
-        runtime_.Execute(instance);
+        OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
+                        "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
+
+        mk::Qwen06BInputsOutputs io{};
+        io.hidden_states = instance.input_memory(0).buffer_ptr();
+        io.position_ids = instance.input_memory(1).buffer_ptr();
+        io.hidden_states_out = instance.output_memory(0).buffer_ptr();
+        io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
+
+        runtime_.Execute(&io, instance);
 
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
         return std::make_shared<ocl_event>(cl::Event(marker, false), 0ULL);
+    }
+
+    ~MegaKernelFastImpl() override {
+        runtime_.Destroy();
     }
 
 private:

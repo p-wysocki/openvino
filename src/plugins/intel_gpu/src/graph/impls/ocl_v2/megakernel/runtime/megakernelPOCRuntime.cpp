@@ -543,46 +543,16 @@ static constexpr int SYNC_N = NUM_L * 5 + 1;            // per-(layer,stage) cou
 // staying below the point where shared-cursor atomic_inc contention dominates.
 static constexpr int MONO_WG = 32, MONO_LWS = 512;
 
-struct MonoCtxH {
-    void* hs;
-    void* h;
-    void* out;
-    void* wn;
-    void* pn;
-    void* qw;
-    void* kw;
-    void* vw;
-    void* ow;
-    void* gw;
-    void* uw;
-    void* dw;
-    void* qn;
-    void* kn;
-    void* rf;
-    void* qb;
-    void* kb;
-    void* vb;
-    void* xn;
-    void* gbuf;
-    void* nbuf;
-    void* kc;
-    void* vc;
-    void* sync;
-    void* past_pos;
-    int step;
-    unsigned CS;
-    unsigned tok_off;
-};
 struct MkTaskH {
     void* ctx;
     int layer;
     int tile;
 };
 
-void MegaKernelPOCRuntime::Init(cldnn::primitive_inst& instance) {
-    auto& eng = cldnn::downcast<cldnn::ocl::ocl_engine>(instance.get_network().get_engine());
-    ctx_ = eng.get_cl_context().get();
-    dev_ = eng.get_cl_device().get();
+void MegaKernelPOCRuntime::Init(Qwen06BWeights* weights, cl_device_id deviceId, cl_context context, cl_command_queue stream) {
+    ctx_ = context;
+    dev_ = deviceId;
+    stream_ = stream;
 
     cl_platform_id platform = nullptr;
     clGetDeviceInfo(dev_, CL_DEVICE_PLATFORM, sizeof(platform), &platform, nullptr);
@@ -663,9 +633,7 @@ void MegaKernelPOCRuntime::Init(cldnn::primitive_inst& instance) {
         for (int i = 0; i < NT_F; i++)
             push(8, L, i);  // Stage F  (down)
     }
-    auto& strm = instance.get_network().get_stream();
-    cl_command_queue q = cldnn::downcast<cldnn::ocl::ocl_stream>(strm).get_cl_queue().get();
-    err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, q);
+    err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, stream_);
     OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
 
     // TaskManager descriptor consumed by the kernel as a __constant buffer.
@@ -680,57 +648,37 @@ void MegaKernelPOCRuntime::Init(cldnn::primitive_inst& instance) {
     clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL, sizeof(enable), &enable);
     clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL, sizeof(enable), &enable);
     clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL, sizeof(enable), &enable);
+
+    runtimeContext_.h = mH_;
+    runtimeContext_.qb = mQb_;
+    runtimeContext_.kb = mKb_;
+    runtimeContext_.vb = mVb_;
+    runtimeContext_.xn = mXn_;
+    runtimeContext_.gbuf = mGb_;
+    runtimeContext_.nbuf = mNb_;
+    runtimeContext_.kc = mKC_;
+    runtimeContext_.vc = mVC_;
+    runtimeContext_.sync = mSync_;
+    runtimeContext_.CS = (unsigned)MAX_SEQ;
+    runtimeContext_.qw = weights->q_proj_w;
+    runtimeContext_.kw = weights->k_proj_w;
+    runtimeContext_.vw = weights->v_proj_w;
+    runtimeContext_.ow = weights->o_proj_w;
+    runtimeContext_.gw = weights->gate_proj_w;
+    runtimeContext_.uw = weights->up_proj_w;
+    runtimeContext_.dw = weights->down_proj_w;
+    runtimeContext_.wn = weights->input_ln_w;
+    runtimeContext_.pn = weights->post_attn_ln_w;
+    runtimeContext_.qn = weights->q_norm_w;
+    runtimeContext_.kn = weights->k_norm_w;
+    runtimeContext_.rf = weights->rope_inv_freq;
 }
 
-void MegaKernelPOCRuntime::Execute(cldnn::primitive_inst& instance) {
-    auto& strm = instance.get_network().get_stream();
-    auto& ocls = cldnn::downcast<cldnn::ocl::ocl_stream>(strm);
-    cl_command_queue q = ocls.get_cl_queue().get();
-
-    // Resolve the raw USM device pointers for every model input/output. The
-    // task-system tasks dereference these directly out of the context struct,
-    // which requires genuine USM device allocations (asserted below).
-    auto usm_raw = [](cldnn::memory& m, const char* name) -> void* {
-        auto at = m.get_allocation_type();
-        bool usm = at == cldnn::allocation_type::usm_device || at == cldnn::allocation_type::usm_host || at == cldnn::allocation_type::usm_shared;
-        OPENVINO_ASSERT(usm, "[MegaKernel] input/output '", name, "' must be a USM allocation for the task-system path");
-        return m.buffer_ptr();
-    };
-
-    OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
-                    "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
-
-    MonoCtxH ctx{};
-    ctx.hs = usm_raw(instance.input_memory(0), "hidden_states");
-    ctx.h = mH_;
-    ctx.out = usm_raw(instance.output_memory(0), "hidden_states_out");
-    ctx.qw = usm_raw(instance.input_memory(5), "q_proj_w");
-    ctx.kw = usm_raw(instance.input_memory(6), "k_proj_w");
-    ctx.vw = usm_raw(instance.input_memory(7), "v_proj_w");
-    ctx.ow = usm_raw(instance.input_memory(8), "o_proj_w");
-    ctx.gw = usm_raw(instance.input_memory(9), "gate_proj_w");
-    ctx.uw = usm_raw(instance.input_memory(10), "up_proj_w");
-    ctx.dw = usm_raw(instance.input_memory(11), "down_proj_w");
-    ctx.wn = usm_raw(instance.input_memory(12), "input_ln_w");
-    ctx.pn = usm_raw(instance.input_memory(13), "post_attn_ln_w");
-    ctx.qn = usm_raw(instance.input_memory(14), "q_norm_w");
-    ctx.kn = usm_raw(instance.input_memory(15), "k_norm_w");
-    ctx.rf = usm_raw(instance.input_memory(16), "rope_inv_freq");
-    ctx.past_pos = usm_raw(instance.input_memory(1), "position_ids");
-    ctx.qb = mQb_;
-    ctx.kb = mKb_;
-    ctx.vb = mVb_;
-    ctx.xn = mXn_;
-    ctx.gbuf = mGb_;
-    ctx.nbuf = mNb_;
-    ctx.kc = mKC_;
-    ctx.vc = mVC_;
-    ctx.sync = mSync_;
-    ctx.CS = (unsigned)MAX_SEQ;
-
-    // Number of new tokens this step (dim 1 of hidden_states).
-    auto hs_ps = instance.input_memory(0).get_layout().get<ov::PartialShape>();
-    uint S_new = (uint)hs_ps[1].get_length();
+void MegaKernelPOCRuntime::Execute(Qwen06BInputsOutputs* io, cldnn::primitive_inst& instance) {
+    runtimeContext_.hs = io->hidden_states;
+    runtimeContext_.past_pos = io->position_ids;
+    runtimeContext_.out = io->hidden_states_out;
+    const uint newTokens = io->newTokens;
 
     // Co-resident worker count (see MONO_WG note). Tunable via env.
     static const int workers = [] {
@@ -743,27 +691,63 @@ void MegaKernelPOCRuntime::Execute(cldnn::primitive_inst& instance) {
         return w;
     }();
 
-    // std::cout << "[MegaKernel] WORKERS: " << workers << ", tasks: " << taskManager_.workQueueSize << ", stages: " << SYNC_N
-    //           << ", " <<  std::endl;
-
     // ===== Task-system path: the whole 28-layer model as one queue of tasks,
     // launched once per new token. The in-order queue serialises tokens so
     // token t+1 sees the KV cache written by token t. For each token we refresh
     // the shared context (pos / token offset) and reset the sync counters, then
     // launch the worker pool which drains the queue.
-    for (uint t = 0; t < S_new; t++) {
-        ctx.step = t;
-        ctx.tok_off = t * (unsigned)H_DIM;
-        OPENVINO_ASSERT(usmMemcpy_(q, CL_TRUE, mCtx_, &ctx, sizeof(ctx), 0, nullptr, nullptr) == CL_SUCCESS, "[MegaKernel] context update failed");
+    for (uint t = 0; t < newTokens; t++) {
+        runtimeContext_.step = t;
+        runtimeContext_.tok_off = t * (unsigned)H_DIM;
+        OPENVINO_ASSERT(usmMemcpy_(stream_, CL_TRUE, mCtx_, &runtimeContext_, sizeof(runtimeContext_), 0, nullptr, nullptr) == CL_SUCCESS,
+                        "[MegaKernel] context update failed");
         // Zero the stage counters and the FIFO cursor before the workers start.
         size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
-        cl_int r = clEnqueueNDRangeKernel(q, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
+        cl_int r = clEnqueueNDRangeKernel(stream_, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
         OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
     }
 }
 
-void MegaKernelPOCRuntime::Deinit() {
-    // Implementation here
+void MegaKernelPOCRuntime::Destroy() {
+    if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
+        HostReleaseTaskSystem(taskManager_, dev_, ctx_);
+        taskManager_ = {};
+    }
+
+    if (kTask_) {
+        clReleaseKernel(kTask_);
+        kTask_ = nullptr;
+    }
+    if (mTaskMgr_) {
+        clReleaseMemObject(mTaskMgr_);
+        mTaskMgr_ = nullptr;
+    }
+    if (prog_) {
+        clReleaseProgram(prog_);
+        prog_ = nullptr;
+    }
+
+    auto free_usm = [&](void*& allocation) {
+        if (allocation && ctx_ && usmFree_) {
+            usmFree_(ctx_, allocation);
+            allocation = nullptr;
+        }
+    };
+
+    free_usm(mQb_);
+    free_usm(mKb_);
+    free_usm(mVb_);
+    free_usm(mGb_);
+    free_usm(mXn_);
+    free_usm(mH_);
+    free_usm(mNb_);
+    free_usm(mKC_);
+    free_usm(mVC_);
+    free_usm(mSync_);
+    free_usm(mCtx_);
+
+    ctx_ = nullptr;
+    dev_ = nullptr;
 }
 
 }  // namespace mk

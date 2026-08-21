@@ -3,6 +3,7 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 
+#include "megakernelPOCParams.h"
 #include "taskSystem/host/taskManagerHost.h"
 
 namespace cldnn {
@@ -10,6 +11,38 @@ class primitive_inst;
 };
 
 namespace mk {
+
+// TEMPORARY HERE:
+struct MonoCtxH {
+    void* hs = nullptr;
+    void* h = nullptr;
+    void* out = nullptr;
+    void* wn = nullptr;
+    void* pn = nullptr;
+    void* qw = nullptr;
+    void* kw = nullptr;
+    void* vw = nullptr;
+    void* ow = nullptr;
+    void* gw = nullptr;
+    void* uw = nullptr;
+    void* dw = nullptr;
+    void* qn = nullptr;
+    void* kn = nullptr;
+    void* rf = nullptr;
+    void* qb = nullptr;
+    void* kb = nullptr;
+    void* vb = nullptr;
+    void* xn = nullptr;
+    void* gbuf = nullptr;
+    void* nbuf = nullptr;
+    void* kc = nullptr;
+    void* vc = nullptr;
+    void* sync = nullptr;
+    void* past_pos = nullptr;
+    int step = 0;
+    unsigned CS = 0;
+    unsigned tok_off = 0;
+};
 
 // Simplified runtime for MEGAKERNEL POC.
 // For POC we want to have detailed control over the runtime, so
@@ -19,14 +52,15 @@ public:
     MegaKernelPOCRuntime() = default;
     ~MegaKernelPOCRuntime() = default;
 
-    void Init(cldnn::primitive_inst& instance);
-    void Execute(cldnn::primitive_inst& instance);
-    void Deinit();
+    void Init(Qwen06BWeights* weights, cl_device_id deviceId, cl_context context, cl_command_queue stream);
+    void Execute(Qwen06BInputsOutputs* io, cldnn::primitive_inst& instance);
+    void Destroy();
 
 private:
     cl_context ctx_ = nullptr;
     cl_device_id dev_ = nullptr;
     cl_program prog_ = nullptr;
+    cl_command_queue stream_ = nullptr;
     cl_kernel kTask_ = nullptr;  // task-system worker kernel (whole model)
     // Intel USM extension entry points (resolved in Init).
     clDeviceMemAllocINTEL_fn usmAlloc_ = nullptr;
@@ -47,6 +81,7 @@ private:
     void* mCtx_ = nullptr;
     TaskManager taskManager_{};
     cl_mem mTaskMgr_ = nullptr;
+    MonoCtxH runtimeContext_{};
 };
 
 }  // namespace mk
