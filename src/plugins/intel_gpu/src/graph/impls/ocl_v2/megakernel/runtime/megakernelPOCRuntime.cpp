@@ -674,7 +674,7 @@ void MegaKernelPOCRuntime::Init(Qwen06BWeights* weights, cl_device_id deviceId, 
     runtimeContext_.rf = weights->rope_inv_freq;
 }
 
-void MegaKernelPOCRuntime::Execute(Qwen06BInputsOutputs* io, cldnn::primitive_inst& instance) {
+void MegaKernelPOCRuntime::Execute(Qwen06BInputsOutputs* io) {
     runtimeContext_.hs = io->hidden_states;
     runtimeContext_.past_pos = io->position_ids;
     runtimeContext_.out = io->hidden_states_out;

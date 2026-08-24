@@ -6,10 +6,6 @@
 #include "megakernelPOCParams.h"
 #include "taskSystem/host/taskManagerHost.h"
 
-namespace cldnn {
-class primitive_inst;
-};
-
 namespace mk {
 
 // TEMPORARY HERE:
@@ -53,7 +49,7 @@ public:
     ~MegaKernelPOCRuntime() = default;
 
     void Init(Qwen06BWeights* weights, cl_device_id deviceId, cl_context context, cl_command_queue stream);
-    void Execute(Qwen06BInputsOutputs* io, cldnn::primitive_inst& instance);
+    void Execute(Qwen06BInputsOutputs* io);
     void Destroy();
 
 private:

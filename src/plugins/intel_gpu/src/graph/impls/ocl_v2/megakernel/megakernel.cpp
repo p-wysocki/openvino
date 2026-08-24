@@ -134,7 +134,7 @@ public:
         io.hidden_states_out = instance.output_memory(0).buffer_ptr();
         io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
 
-        runtime_.Execute(&io, instance);
+        runtime_.Execute(&io);
 
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
