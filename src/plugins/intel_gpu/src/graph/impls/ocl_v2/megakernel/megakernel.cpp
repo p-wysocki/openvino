@@ -96,8 +96,8 @@ public:
             return m.buffer_ptr();
         };
 
-        mk::Qwen06BConstantParams weights{};
-
+        // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known constant parameter type.
+        mk::ConstantParamsImpl weights{};
         weights.q_proj_w = usm_raw(instance.input_memory(5), "q_proj_w");
         weights.k_proj_w = usm_raw(instance.input_memory(6), "k_proj_w");
         weights.v_proj_w = usm_raw(instance.input_memory(7), "v_proj_w");
@@ -110,8 +110,10 @@ public:
         weights.q_norm_w = usm_raw(instance.input_memory(14), "q_norm_w");
         weights.k_norm_w = usm_raw(instance.input_memory(15), "k_norm_w");
         weights.rope_inv_freq = usm_raw(instance.input_memory(16), "rope_inv_freq");
+        // ---
 
-        mk::Qwen06BPlatformParams platformParams{};
+        // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
+        mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
@@ -131,11 +133,13 @@ public:
         OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
                         "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
 
-        mk::Qwen06BRuntimeParams io{};
+        // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known runtime parameter type.
+        mk::RuntimeParamsImpl io{};
         io.hidden_states = instance.input_memory(0).buffer_ptr();
         io.position_ids = instance.input_memory(1).buffer_ptr();
         io.hidden_states_out = instance.output_memory(0).buffer_ptr();
         io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
+        // ---
 
         megakernelRuntime_->Execute(&io);
 

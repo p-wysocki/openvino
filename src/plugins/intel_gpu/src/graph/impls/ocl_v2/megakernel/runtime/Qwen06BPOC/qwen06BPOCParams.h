@@ -35,4 +35,8 @@ public:
     cl_command_queue stream;
 };
 
+using ConstantParamsImpl = Qwen06BConstantParams;
+using RuntimeParamsImpl = Qwen06BRuntimeParams;
+using PlatformParamsImpl = Qwen06BPlatformParams;
+
 }  // namespace mk
