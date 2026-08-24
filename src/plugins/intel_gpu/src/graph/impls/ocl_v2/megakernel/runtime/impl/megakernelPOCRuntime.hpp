@@ -2,7 +2,7 @@
 
 #include <CL/cl_ext.h>
 
-#include "megakernelPOCParams.h"
+#include "../megakernelPOCParams.h"
 #include "taskSystem/host/taskManagerHost.h"
 
 namespace mk {

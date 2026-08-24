@@ -1,5 +1,5 @@
 #include "qwen06BMegakernel.h"
-#include "megakernelPOCRuntime.hpp"
+#include "impl/megakernelPOCRuntime.hpp"
 
 namespace mk {
 /////////////////////////////////////////////////////////////////////////
