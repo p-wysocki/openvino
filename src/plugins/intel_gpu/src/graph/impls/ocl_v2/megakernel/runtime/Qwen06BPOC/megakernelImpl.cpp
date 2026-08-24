@@ -1,10 +1,11 @@
-#include "qwen06BMegakernel.h"
-#include "impl/megakernelPOCRuntime.hpp"
+#include "megakernelImpl.h"
+
+#include "impl/qwen06BPOCRuntime.h"
 
 namespace mk {
 /////////////////////////////////////////////////////////////////////////
 IMegakernelRuntime* CreateMegaKernelPOCRuntime() {
-    return new mk::MegaKernelPOCRuntime();
+    return new mk::Qwen06BPOCRuntime();
 }
 
 /////////////////////////////////////////////////////////////////////////

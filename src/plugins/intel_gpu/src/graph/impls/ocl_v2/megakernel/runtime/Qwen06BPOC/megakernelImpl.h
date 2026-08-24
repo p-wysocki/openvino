@@ -1,6 +1,6 @@
 #pragma once
 #include "../iMegakernelRuntime.h"
-#include "megakernelPOCParams.h"
+#include "qwen06BPOCParams.h"
 
 namespace mk {
 // Create a MegaKernelPOCRuntime instance.

@@ -2,7 +2,7 @@
 
 #include <CL/cl_ext.h>
 
-#include "../megakernelPOCParams.h"
+#include "../qwen06BPOCParams.h"
 #include "taskSystem/host/taskManagerHost.h"
 
 namespace mk {
@@ -39,13 +39,10 @@ struct MonoCtxH {
     unsigned tok_off = 0;
 };
 
-// Simplified runtime for MEGAKERNEL POC.
-// For POC we want to have detailed control over the runtime, so
-// we implement a custom runtime instead of using the standard runtime.
-class MegaKernelPOCRuntime : public IMegakernelRuntime {
+class Qwen06BPOCRuntime : public IMegakernelRuntime {
 public:
-    MegaKernelPOCRuntime() = default;
-    ~MegaKernelPOCRuntime() = default;
+    Qwen06BPOCRuntime() = default;
+    ~Qwen06BPOCRuntime() = default;
 
     void Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) override;
     void Execute(const IRuntimeParams* runtimeParams) override;

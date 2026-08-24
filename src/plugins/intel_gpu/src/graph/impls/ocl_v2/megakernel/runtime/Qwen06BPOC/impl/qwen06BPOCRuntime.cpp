@@ -1,4 +1,4 @@
-#include "megakernelPOCRuntime.hpp"
+#include "qwen06BPOCRuntime.h"
 
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_memory.hpp"
@@ -549,7 +549,7 @@ struct MkTaskH {
     int tile;
 };
 
-void MegaKernelPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
+void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
     const auto* platformParams_ = static_cast<const Qwen06BPlatformParams*>(platformParams);
     ctx_ = platformParams_->context;
     dev_ = platformParams_->deviceId;
@@ -677,7 +677,7 @@ void MegaKernelPOCRuntime::Init(const IConstantParams* constantParams, const IPl
     runtimeContext_.rf = weights->rope_inv_freq;
 }
 
-void MegaKernelPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
+void Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     const auto* io = static_cast<const Qwen06BRuntimeParams*>(runtimeParams);
     runtimeContext_.hs = io->hidden_states;
     runtimeContext_.past_pos = io->position_ids;
@@ -712,7 +712,7 @@ void MegaKernelPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     }
 }
 
-void MegaKernelPOCRuntime::Destroy() {
+void Qwen06BPOCRuntime::Destroy() {
     if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
         HostReleaseTaskSystem(taskManager_, dev_, ctx_);
         taskManager_ = {};

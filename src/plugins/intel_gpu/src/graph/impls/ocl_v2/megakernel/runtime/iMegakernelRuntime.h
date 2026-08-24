@@ -1,6 +1,6 @@
 #pragma once
 
-// Basic interface for a MegaKernel runtime.
+// Simplified runtime interface for MEGAKERNEL POC.
 namespace mk {
 // Constant parameters (weights) for the runtime.
 class IConstantParams {};
