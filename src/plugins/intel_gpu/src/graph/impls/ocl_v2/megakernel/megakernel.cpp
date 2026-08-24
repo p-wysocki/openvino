@@ -30,14 +30,11 @@
 #include "megakernel_inst.h"
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_event.hpp"
-#include "ocl/ocl_memory.hpp"
 #include "ocl/ocl_stream.hpp"
-#include "runtime/megakernelPOCRuntime.hpp"
-#include "taskSystem/host/taskManagerHost.h"
+#include "runtime/qwen06BMegakernel.h"
 
 namespace ov::intel_gpu::ocl {
 
-using cldnn::ocl::gpu_buffer;
 using cldnn::ocl::ocl_engine;
 using cldnn::ocl::ocl_event;
 using cldnn::ocl::ocl_stream;
@@ -60,7 +57,7 @@ public:
     MegaKernelFastImpl(const MegaKernelFastImpl& other) : cldnn::primitive_impl(other) {}
 
     [[nodiscard]] std::unique_ptr<cldnn::primitive_impl> clone() const override {
-        OPENVINO_ASSERT(ready_ == false,
+        OPENVINO_ASSERT(megakernelRuntime_ == nullptr,
                         "[GPU] MegaKernelFastImpl::clone() should not be called if megakernel runtime is initialized; use create_impl() instead.");
         return std::make_unique<MegaKernelFastImpl>(*this);
     }
@@ -78,8 +75,11 @@ public:
 
     void ensure_ready(cldnn::primitive_inst& instance) {
         std::lock_guard<std::mutex> g(mu_);
-        if (ready_)
+        if (megakernelRuntime_ != nullptr) {
             return;
+        }
+
+        megakernelRuntime_ = mk::CreateMegaKernelPOCRuntime();
 
         auto& eng = cldnn::downcast<cldnn::ocl::ocl_engine>(instance.get_network().get_engine());
         cl_context ctx = eng.get_cl_context().get();
@@ -115,8 +115,7 @@ public:
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        runtime_.Init(&weights, &platformParams);
-        ready_ = true;
+        megakernelRuntime_->Init(&weights, &platformParams);
     }
 
     cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
@@ -138,7 +137,7 @@ public:
         io.hidden_states_out = instance.output_memory(0).buffer_ptr();
         io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
 
-        runtime_.Execute(&io);
+        megakernelRuntime_->Execute(&io);
 
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
@@ -146,13 +145,14 @@ public:
     }
 
     ~MegaKernelFastImpl() override {
-        runtime_.Destroy();
+        if (megakernelRuntime_)
+            mk::DestroyMegaKernelPOCRuntime(megakernelRuntime_);
+        megakernelRuntime_ = nullptr;
     }
 
 private:
     std::mutex mu_;
-    bool ready_ = false;
-    mk::MegaKernelPOCRuntime runtime_;
+    mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
 };
 
 }  // namespace
