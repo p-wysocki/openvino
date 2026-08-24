@@ -31,7 +31,7 @@
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_event.hpp"
 #include "ocl/ocl_stream.hpp"
-#include "runtime/Qwen06BPOC/megakernelImpl.h"
+#include "Qwen06BPOC/megakernelImpl.h"
 
 namespace ov::intel_gpu::ocl {
 

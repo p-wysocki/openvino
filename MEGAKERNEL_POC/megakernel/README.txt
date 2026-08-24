@@ -1,0 +1,9 @@
+Folder contains POC impl of megakernel implemenations for openvino.
+
+Currrently the idea is that each megakernel will be delivered as a stand alone library,
+containing kernel plus runtime implementation.
+
+The openvino engine has to link against that library.
+
+Each implementation is backed by header-only, interface lib megakernel runtime, which defines 
+interface that openvino engien will link against. 

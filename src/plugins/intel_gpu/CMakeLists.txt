@@ -124,6 +124,10 @@ set(INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_subdirectory(thirdparty)
 include(thirdparty/cmake/rapidjson.cmake)
 
+add_subdirectory("${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/megakernel/Qwen06BPOC"
+                 "${CMAKE_CURRENT_BINARY_DIR}/qwen06b_poc"
+                 EXCLUDE_FROM_ALL)
+                 
 if(CMAKE_COMPILER_IS_GNUCXX)
     ov_add_compiler_flags(-Werror)
 endif()

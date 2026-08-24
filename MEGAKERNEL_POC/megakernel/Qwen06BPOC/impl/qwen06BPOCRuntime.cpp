@@ -1,11 +1,29 @@
 #include "qwen06BPOCRuntime.h"
 
-#include "ocl/ocl_engine.hpp"
-#include "ocl/ocl_memory.hpp"
-#include "ocl/ocl_stream.hpp"
-#include "primitive_inst.h"
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mk {
+namespace {
+template <typename... Args>
+[[noreturn]] void throw_error(Args&&... args) {
+    std::ostringstream message;
+    (message << ... << std::forward<Args>(args));
+    throw std::runtime_error(message.str());
+}
+
+template <typename... Args>
+void assert_or_throw(bool condition, Args&&... args) {
+    if (!condition)
+        throw_error(std::forward<Args>(args)...);
+}
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Kernel source — embedded attempt4 kernels adapted for plugin tensor layouts
 // ---------------------------------------------------------------------------
@@ -561,11 +579,12 @@ void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatf
     usmFree_ = reinterpret_cast<clMemFreeINTEL_fn>(clGetExtensionFunctionAddressForPlatform(platform, "clMemFreeINTEL"));
     usmMemcpy_ = reinterpret_cast<clEnqueueMemcpyINTEL_fn>(clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemcpyINTEL"));
     usmMemFill_ = reinterpret_cast<clEnqueueMemFillINTEL_fn>(clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemFillINTEL"));
-    OPENVINO_ASSERT(usmAlloc_ && usmFree_ && usmMemcpy_ && usmMemFill_, "[MegaKernel] Intel USM extension functions are unavailable");
+    assert_or_throw(usmAlloc_ && usmFree_ && usmMemcpy_ && usmMemFill_,
+                    "[MegaKernel] Intel USM extension functions are unavailable");
 
     cl_int err;
     prog_ = clCreateProgramWithSource(ctx_, 1, &kKernelSrc, nullptr, &err);
-    OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
+    assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
     const std::string build_options = std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT;  //+
                                                                                                    //" -igc_opts 'VISAOptions=-hybridRAWithSpill'";
     err = clBuildProgram(prog_, 1, &dev_, build_options.c_str(), nullptr, nullptr);
@@ -574,16 +593,16 @@ void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatf
         clGetProgramBuildInfo(prog_, dev_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &n);
         std::vector<char> log(n);
         clGetProgramBuildInfo(prog_, dev_, CL_PROGRAM_BUILD_LOG, n, log.data(), nullptr);
-        OPENVINO_THROW("[MegaKernel] Build failed:\n", std::string(log.begin(), log.end()));
+        throw_error("[MegaKernel] Build failed:\n", std::string(log.begin(), log.end()));
     }
 
     kTask_ = clCreateKernel(prog_, "mk_task", &err);
-    OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(mk_task): ", err);
+    assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(mk_task): ", err);
 
     auto ualloc = [&](size_t bytes) -> void* {
         cl_int st = CL_SUCCESS;
         void* p = usmAlloc_(ctx_, dev_, nullptr, bytes, 0, &st);
-        OPENVINO_ASSERT(st == CL_SUCCESS && p, "[MegaKernel] USM device alloc: ", st);
+        assert_or_throw(st == CL_SUCCESS && p, "[MegaKernel] USM device alloc: ", st);
         return p;
     };
     // Per-token scratch (reused across tokens; tokens are serialised).
@@ -635,13 +654,14 @@ void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatf
             push(8, L, i);  // Stage F  (down)
     }
     err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, stream_);
-    OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
+    assert_or_throw(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
 
     // TaskManager descriptor consumed by the kernel as a __constant buffer.
     mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(taskManager_), &taskManager_, &err);
-    OPENVINO_ASSERT(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
+    assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
 
-    OPENVINO_ASSERT(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS, "[MegaKernel] set taskManager arg failed");
+    assert_or_throw(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS,
+                    "[MegaKernel] set taskManager arg failed");
     // The tasks reach every data buffer through USM pointers held in the
     // context, so allow the kernel to indirectly access any USM allocation
     // (device / host / shared) regardless of how OpenVINO allocated the weights.
@@ -703,12 +723,12 @@ void Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     for (uint t = 0; t < newTokens; t++) {
         runtimeContext_.step = t;
         runtimeContext_.tok_off = t * (unsigned)H_DIM;
-        OPENVINO_ASSERT(usmMemcpy_(stream_, CL_TRUE, mCtx_, &runtimeContext_, sizeof(runtimeContext_), 0, nullptr, nullptr) == CL_SUCCESS,
-                        "[MegaKernel] context update failed");
+        assert_or_throw(usmMemcpy_(stream_, CL_TRUE, mCtx_, &runtimeContext_, sizeof(runtimeContext_), 0, nullptr, nullptr) == CL_SUCCESS,
+                "[MegaKernel] context update failed");
         // Zero the stage counters and the FIFO cursor before the workers start.
         size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
         cl_int r = clEnqueueNDRangeKernel(stream_, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
-        OPENVINO_ASSERT(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
+        assert_or_throw(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
     }
 }
 

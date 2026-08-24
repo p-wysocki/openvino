@@ -46,16 +46,12 @@ add_custom_target(run_ocl_codegen ALL DEPENDS "${CODEGEN_INCDIR}/${KERNEL_SOURCE
 ov_gpu_add_backend_target(
     NAME ${TARGET_NAME}
     INCLUDES $<BUILD_INTERFACE:${CODEGEN_INCDIR}>
+    LINK_LIBRARIES Qwen06BPOC::Qwen06BPOC
     BYPASS
         ADDITIONAL_SOURCE_DIRS ${CODEGEN_INCDIR}
         DEPENDENCIES run_ocl_codegen
         ADD_CLANG_FORMAT
 )
-
-  set(TASK_SYSTEM_ROOT "${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/research/preloading_gemv/src/ocl")
-  target_sources(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}/taskSystem/host/taskManagerHost.cpp")
-  target_include_directories(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}")
-  target_compile_definitions(${TARGET_NAME} PRIVATE TASK_SYSTEM_OPENCL_ROOT="${TASK_SYSTEM_ROOT}")
 
 ov_build_target_faster(${TARGET_NAME} PCH)
 
