@@ -1,7 +1,7 @@
 #pragma once
 #include <CL/cl.h>
 
-#include "iMegakernelRuntime.h"
+#include "../iMegakernelRuntime.h"
 
 namespace mk {
 class Qwen06BConstantParams : public IConstantParams {

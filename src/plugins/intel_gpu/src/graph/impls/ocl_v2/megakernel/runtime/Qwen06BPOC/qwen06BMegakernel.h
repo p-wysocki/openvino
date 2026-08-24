@@ -1,5 +1,5 @@
 #pragma once
-#include "iMegakernelRuntime.h"
+#include "../iMegakernelRuntime.h"
 #include "megakernelPOCParams.h"
 
 namespace mk {
