@@ -1,7 +1,11 @@
 #pragma once
+#include <CL/cl.h>
+
+#include "iMegakernelRuntime.h"
 
 namespace mk {
-struct Qwen06BWeights {
+class Qwen06BConstantParams : public IConstantParams {
+public:
     void* q_proj_w;
     void* k_proj_w;
     void* v_proj_w;
@@ -16,10 +20,19 @@ struct Qwen06BWeights {
     void* rope_inv_freq;
 };
 
-struct Qwen06BInputsOutputs {
+class Qwen06BRuntimeParams : public IRuntimeParams {
+public:
     void* hidden_states;
     void* position_ids;
     void* hidden_states_out;
     int newTokens;
 };
+
+class Qwen06BPlatformParams : public IPlatformParams {
+public:
+    cl_device_id deviceId;
+    cl_context context;
+    cl_command_queue stream;
+};
+
 }  // namespace mk

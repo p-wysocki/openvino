@@ -96,7 +96,7 @@ public:
             return m.buffer_ptr();
         };
 
-        mk::Qwen06BWeights weights{};
+        mk::Qwen06BConstantParams weights{};
 
         weights.q_proj_w = usm_raw(instance.input_memory(5), "q_proj_w");
         weights.k_proj_w = usm_raw(instance.input_memory(6), "k_proj_w");
@@ -111,7 +111,11 @@ public:
         weights.k_norm_w = usm_raw(instance.input_memory(15), "k_norm_w");
         weights.rope_inv_freq = usm_raw(instance.input_memory(16), "rope_inv_freq");
 
-        runtime_.Init(&weights, dl_device, ctx, queue);
+        mk::Qwen06BPlatformParams platformParams{};
+        platformParams.context = ctx;
+        platformParams.deviceId = dl_device;
+        platformParams.stream = queue;
+        runtime_.Init(&weights, &platformParams);
         ready_ = true;
     }
 
@@ -128,7 +132,7 @@ public:
         OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
                         "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
 
-        mk::Qwen06BInputsOutputs io{};
+        mk::Qwen06BRuntimeParams io{};
         io.hidden_states = instance.input_memory(0).buffer_ptr();
         io.position_ids = instance.input_memory(1).buffer_ptr();
         io.hidden_states_out = instance.output_memory(0).buffer_ptr();

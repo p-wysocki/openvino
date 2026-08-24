@@ -549,10 +549,11 @@ struct MkTaskH {
     int tile;
 };
 
-void MegaKernelPOCRuntime::Init(Qwen06BWeights* weights, cl_device_id deviceId, cl_context context, cl_command_queue stream) {
-    ctx_ = context;
-    dev_ = deviceId;
-    stream_ = stream;
+void MegaKernelPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
+    const auto* platformParams_ = static_cast<const Qwen06BPlatformParams*>(platformParams);
+    ctx_ = platformParams_->context;
+    dev_ = platformParams_->deviceId;
+    stream_ = platformParams_->stream;
 
     cl_platform_id platform = nullptr;
     clGetDeviceInfo(dev_, CL_DEVICE_PLATFORM, sizeof(platform), &platform, nullptr);
@@ -649,6 +650,8 @@ void MegaKernelPOCRuntime::Init(Qwen06BWeights* weights, cl_device_id deviceId, 
     clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL, sizeof(enable), &enable);
     clSetKernelExecInfo(kTask_, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL, sizeof(enable), &enable);
 
+    const auto* weights = static_cast<const Qwen06BConstantParams*>(constantParams);
+
     runtimeContext_.h = mH_;
     runtimeContext_.qb = mQb_;
     runtimeContext_.kb = mKb_;
@@ -674,7 +677,8 @@ void MegaKernelPOCRuntime::Init(Qwen06BWeights* weights, cl_device_id deviceId, 
     runtimeContext_.rf = weights->rope_inv_freq;
 }
 
-void MegaKernelPOCRuntime::Execute(Qwen06BInputsOutputs* io) {
+void MegaKernelPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
+    const auto* io = static_cast<const Qwen06BRuntimeParams*>(runtimeParams);
     runtimeContext_.hs = io->hidden_states;
     runtimeContext_.past_pos = io->position_ids;
     runtimeContext_.out = io->hidden_states_out;

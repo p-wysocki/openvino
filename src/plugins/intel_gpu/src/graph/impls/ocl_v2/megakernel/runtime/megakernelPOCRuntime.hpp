@@ -1,6 +1,5 @@
 #pragma once
 
-#include <CL/cl.h>
 #include <CL/cl_ext.h>
 
 #include "megakernelPOCParams.h"
@@ -43,14 +42,14 @@ struct MonoCtxH {
 // Simplified runtime for MEGAKERNEL POC.
 // For POC we want to have detailed control over the runtime, so
 // we implement a custom runtime instead of using the standard runtime.
-class MegaKernelPOCRuntime {
+class MegaKernelPOCRuntime : public IMegakernelRuntime {
 public:
     MegaKernelPOCRuntime() = default;
     ~MegaKernelPOCRuntime() = default;
 
-    void Init(Qwen06BWeights* weights, cl_device_id deviceId, cl_context context, cl_command_queue stream);
-    void Execute(Qwen06BInputsOutputs* io);
-    void Destroy();
+    void Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) override;
+    void Execute(const IRuntimeParams* runtimeParams) override;
+    void Destroy() override;
 
 private:
     cl_context ctx_ = nullptr;
