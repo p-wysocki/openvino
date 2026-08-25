@@ -44,9 +44,9 @@ public:
     Qwen06BPOCRuntime() = default;
     ~Qwen06BPOCRuntime() = default;
 
-    void Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) override;
-    void Execute(const IRuntimeParams* runtimeParams) override;
-    void Destroy() override;
+    TErrorcode Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) override;
+    TErrorcode Execute(const IRuntimeParams* runtimeParams) override;
+    TErrorcode Destroy() override;
 
 private:
     cl_context ctx_ = nullptr;

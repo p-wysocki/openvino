@@ -567,7 +567,7 @@ struct MkTaskH {
     int tile;
 };
 
-void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
+TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
     const auto* platformParams_ = static_cast<const Qwen06BPlatformParams*>(platformParams);
     ctx_ = platformParams_->context;
     dev_ = platformParams_->deviceId;
@@ -695,9 +695,10 @@ void Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatf
     runtimeContext_.qn = weights->q_norm_w;
     runtimeContext_.kn = weights->k_norm_w;
     runtimeContext_.rf = weights->rope_inv_freq;
+        return 0;
 }
 
-void Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
+TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     const auto* io = static_cast<const Qwen06BRuntimeParams*>(runtimeParams);
     runtimeContext_.hs = io->hidden_states;
     runtimeContext_.past_pos = io->position_ids;
@@ -730,9 +731,10 @@ void Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         cl_int r = clEnqueueNDRangeKernel(stream_, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
         assert_or_throw(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
     }
+    return 0;
 }
 
-void Qwen06BPOCRuntime::Destroy() {
+TErrorcode Qwen06BPOCRuntime::Destroy() {
     if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
         HostReleaseTaskSystem(taskManager_, dev_, ctx_);
         taskManager_ = {};
@@ -772,6 +774,7 @@ void Qwen06BPOCRuntime::Destroy() {
 
     ctx_ = nullptr;
     dev_ = nullptr;
+    return 0;
 }
 
 }  // namespace mk
