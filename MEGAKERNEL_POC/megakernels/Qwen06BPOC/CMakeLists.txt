@@ -24,8 +24,8 @@ add_library(megakernel::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 include(GenerateExportHeader)
 generate_export_header(${TARGET_NAME}
-    EXPORT_FILE_NAME qwen06BPOCExport.h
-    EXPORT_MACRO_NAME QWEN06BPOC_API)
+    EXPORT_FILE_NAME exportApi.h
+    EXPORT_MACRO_NAME EXPORT_API)
 
 target_compile_definitions(${TARGET_NAME} PRIVATE
     CL_TARGET_OPENCL_VERSION=300
