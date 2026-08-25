@@ -1,12 +1,10 @@
 #pragma once
 #include "../iMegakernelRuntime.h"
 #include "qwen06BPOCParams.h"
+#include "qwen06BPOCExport.h"
 
-namespace mk {
 // Create a MegaKernelPOCRuntime instance.
-IMegakernelRuntime* CreateMegaKernelPOCRuntime();
+extern "C" QWEN06BPOC_API mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime();
 
 // Destroy a MegaKernelPOCRuntime instance.
-void DestroyMegaKernelPOCRuntime(IMegakernelRuntime* runtime);
-
-}  // namespace mk
+extern "C" QWEN06BPOC_API void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime);

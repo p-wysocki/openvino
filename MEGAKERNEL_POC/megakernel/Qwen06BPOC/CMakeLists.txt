@@ -14,18 +14,25 @@ if(NOT TARGET OpenCL::OpenCL)
     find_package(OpenCL REQUIRED)
 endif()
 
-add_library(Qwen06BPOC STATIC
+add_library(Qwen06BPOC SHARED
     megakernelImpl.cpp
     impl/qwen06BPOCRuntime.cpp
     "${TASK_SYSTEM_OPENCL_ROOT}/taskSystem/host/taskManagerHost.cpp")
 add_library(Qwen06BPOC::Qwen06BPOC ALIAS Qwen06BPOC)
+
+include(GenerateExportHeader)
+generate_export_header(Qwen06BPOC
+    EXPORT_FILE_NAME qwen06BPOCExport.h
+    EXPORT_MACRO_NAME QWEN06BPOC_API)
 
 target_compile_definitions(Qwen06BPOC PRIVATE
     CL_TARGET_OPENCL_VERSION=300
     TASK_SYSTEM_OPENCL_ROOT="${TASK_SYSTEM_OPENCL_ROOT}")
 
 target_include_directories(Qwen06BPOC
-    PUBLIC "${CMAKE_CURRENT_LIST_DIR}/.."
+    PUBLIC
+        "${CMAKE_CURRENT_LIST_DIR}/.."
+        "${CMAKE_CURRENT_BINARY_DIR}"
     PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/impl"
         "${TASK_SYSTEM_OPENCL_ROOT}")

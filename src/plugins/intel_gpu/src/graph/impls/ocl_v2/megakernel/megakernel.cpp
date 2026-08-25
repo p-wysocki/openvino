@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../primitive_ocl_base.hpp"
+#include "Qwen06BPOC/megakernelImpl.h"
 #include "intel_gpu/graph/network.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"
@@ -31,7 +32,6 @@
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_event.hpp"
 #include "ocl/ocl_stream.hpp"
-#include "Qwen06BPOC/megakernelImpl.h"
 
 namespace ov::intel_gpu::ocl {
 
@@ -79,7 +79,7 @@ public:
             return;
         }
 
-        megakernelRuntime_ = mk::CreateMegaKernelPOCRuntime();
+        megakernelRuntime_ = CreateMegaKernelPOCRuntime();
 
         auto& eng = cldnn::downcast<cldnn::ocl::ocl_engine>(instance.get_network().get_engine());
         cl_context ctx = eng.get_cl_context().get();
@@ -150,7 +150,7 @@ public:
 
     ~MegaKernelFastImpl() override {
         if (megakernelRuntime_)
-            mk::DestroyMegaKernelPOCRuntime(megakernelRuntime_);
+            DestroyMegaKernelPOCRuntime(megakernelRuntime_);
         megakernelRuntime_ = nullptr;
     }
 

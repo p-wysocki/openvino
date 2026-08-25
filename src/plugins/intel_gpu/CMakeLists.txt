@@ -144,6 +144,11 @@ ov_add_plugin(NAME ${TARGET_NAME}
               DEFAULT_CONFIG ${PLUGIN_DEFAULT_CONFIG}
               VERSION_DEFINES_FOR src/plugin/plugin.cpp)
 
+install(TARGETS Qwen06BPOC
+    RUNTIME DESTINATION ${OV_CPACK_PLUGINSDIR}
+    LIBRARY DESTINATION ${OV_CPACK_PLUGINSDIR}
+    COMPONENT gpu)
+
 target_compile_options(${TARGET_NAME} PRIVATE
     $<$<CONFIG:Release>:$<IF:$<CXX_COMPILER_ID:MSVC>,/Os,-Os>>)
 

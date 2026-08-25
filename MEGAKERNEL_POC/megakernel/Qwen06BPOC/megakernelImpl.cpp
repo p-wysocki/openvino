@@ -2,15 +2,12 @@
 
 #include "impl/qwen06BPOCRuntime.h"
 
-namespace mk {
 /////////////////////////////////////////////////////////////////////////
-IMegakernelRuntime* CreateMegaKernelPOCRuntime() {
-    return new mk::Qwen06BPOCRuntime();
+extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime() {
+  return new mk::Qwen06BPOCRuntime();
 }
 
 /////////////////////////////////////////////////////////////////////////
-void DestroyMegaKernelPOCRuntime(IMegakernelRuntime* runtime) {
-    if (runtime)
-        delete runtime;
+extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime) {
+  if (runtime) delete runtime;
 }
-};  // namespace mk
