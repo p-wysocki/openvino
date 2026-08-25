@@ -123,10 +123,6 @@ set(INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 add_subdirectory(thirdparty)
 include(thirdparty/cmake/rapidjson.cmake)
-
-add_subdirectory("${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/megakernel/Qwen06BPOC"
-                 "${CMAKE_CURRENT_BINARY_DIR}/qwen06b_poc"
-                 EXCLUDE_FROM_ALL)
                  
 if(CMAKE_COMPILER_IS_GNUCXX)
     ov_add_compiler_flags(-Werror)
@@ -143,11 +139,6 @@ ov_add_plugin(NAME ${TARGET_NAME}
               SOURCES ${PLUGIN_SOURCES}
               DEFAULT_CONFIG ${PLUGIN_DEFAULT_CONFIG}
               VERSION_DEFINES_FOR src/plugin/plugin.cpp)
-
-install(TARGETS Qwen06BPOC
-    RUNTIME DESTINATION ${OV_CPACK_PLUGINSDIR}
-    LIBRARY DESTINATION ${OV_CPACK_PLUGINSDIR}
-    COMPONENT gpu)
 
 target_compile_options(${TARGET_NAME} PRIVATE
     $<$<CONFIG:Release>:$<IF:$<CXX_COMPILER_ID:MSVC>,/Os,-Os>>)

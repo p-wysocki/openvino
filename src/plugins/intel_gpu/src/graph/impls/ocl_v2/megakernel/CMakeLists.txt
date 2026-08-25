@@ -1,0 +1,15 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+set(MEGAKERNEL_RUNTIME_TARGET megakernel::Qwen06BPOC)
+
+add_subdirectory("${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/megakernel/Qwen06BPOC"
+                 "${CMAKE_CURRENT_BINARY_DIR}/qwen06b_poc"
+                 EXCLUDE_FROM_ALL)
+
+install(TARGETS Qwen06BPOC
+        RUNTIME DESTINATION ${OV_CPACK_PLUGINSDIR}
+        LIBRARY DESTINATION ${OV_CPACK_PLUGINSDIR}
+        COMPONENT gpu)
+
+set(MEGAKERNEL_RUNTIME_TARGET ${MEGAKERNEL_RUNTIME_TARGET} PARENT_SCOPE)
