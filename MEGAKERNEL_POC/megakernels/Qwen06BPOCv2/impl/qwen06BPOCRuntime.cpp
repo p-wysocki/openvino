@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,7 @@ static const char* kKernelSrc = R"CL(
 #pragma OPENCL EXTENSION cl_khr_fp16              : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups       : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 
 #define H     1024
 #define QDIM  2048
@@ -525,6 +527,504 @@ __kernel void mk_task(__constant const TaskManager* taskManager) {
     __local char slm[64*1024];
     WorkerMainLoop_block(taskManager, slm);
 }
+
+// Batched B60 prefill path. Decode never dispatches these kernels.
+typedef struct PrefillCtx {
+    __global const half* hs;
+    __global half* h;
+    __global float* out;
+    __global const half* wn; __global const half* pn;
+    __global const half* qw; __global const half* kw; __global const half* vw;
+    __global const half* ow; __global const half* gw; __global const half* uw;
+    __global const half* dw;
+    __global const half* qn; __global const half* kn; __global const half* rf;
+    __global half* norm; __global half* qb; __global half* kb; __global half* vb;
+    __global half* xn; __global half* gate; __global half* up; __global half* proj;
+    __global half* kc; __global half* vc;
+    __global const long* positions;
+    uint tokens; uint CS;
+} PrefillCtx;
+
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void prefill_copy(__global const PrefillCtx* c) {
+    uint index = get_global_id(0), count = c->tokens * H;
+    if (index < count) c->h[index] = c->hs[index];
+}
+
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void prefill_rms(__global const PrefillCtx* c, int layer, int post_attn) {
+    uint token = get_group_id(0), lid = get_local_id(0);
+    __global const half* input = c->h + token * H;
+    __global const half* weight = (post_attn ? c->pn : c->wn) + layer * H;
+    __local float sums[256];
+    float sum = 0.0f;
+    for (uint index = lid; index < H; index += 256) {
+        float value = convert_float(input[index]);
+        sum = fma(value, value, sum);
+    }
+    sums[lid] = sum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint stride = 128; stride; stride >>= 1) {
+        if (lid < stride) sums[lid] += sums[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float scale = rsqrt(sums[0] / H + EPS);
+    for (uint index = lid; index < H; index += 256)
+        c->norm[token * H + index] = convert_half(convert_float(input[index]) * scale * convert_float(weight[index]));
+}
+
+// Sixteen SIMD16 subgroups compute a 16-token x 256-output tile. A 128-wide K
+// panel is cooperatively staged in SLM, following oneDNN-style GEMM blocking.
+// op: 0=Q, 1=K, 2=V, 3=O, 4=gate, 5=up, 6=down, 7=QKV, 8=gate+up.
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_gemm_m16(__global const PrefillCtx* c, int layer, int op) {
+    uint lane = get_sub_group_local_id();
+    uint output_index = get_group_id(0) * 256 + get_sub_group_id() * 16 + lane;
+    uint token_base = get_group_id(1) * 16;
+    uint input_dim, output_dim, output_stride;
+    __global const half* input;
+    __global const half* weight;
+    __global half* output;
+    if (op == 0) {
+        input_dim = H; output_dim = QDIM; input = c->norm; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+    } else if (op == 1) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+    } else if (op == 2) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+    } else if (op == 3) {
+        input_dim = QDIM; output_dim = H; input = c->xn; weight = c->ow + (ulong)layer * H * QDIM; output = c->proj;
+    } else if (op == 4) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+    } else if (op == 5) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+    } else if (op == 6) {
+        input_dim = IM; output_dim = H; input = c->gate; weight = c->dw + (ulong)layer * H * IM; output = c->proj;
+    } else if (op == 7) {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < QDIM) {
+            output_dim = QDIM; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+        } else if (output_index < QDIM + KVDIM) {
+            output_index -= QDIM;
+            output_dim = KVDIM; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+        } else {
+            output_index -= QDIM + KVDIM;
+            output_dim = KVDIM; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+        }
+    } else {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < IM) {
+            output_dim = IM; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+        } else {
+            output_index -= IM;
+            output_dim = IM; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+        }
+    }
+    output_stride = output_dim;
+    float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f);
+    __local half input_panel[16 * 128];
+    for (uint k_base = 0; k_base < input_dim; k_base += 128) {
+        for (uint index = get_local_id(0); index < 16 * 128; index += 256) {
+            uint token = index >> 7, feature = index & 127;
+            input_panel[index] = token_base + token < c->tokens
+                                     ? input[(token_base + token) * input_dim + k_base + feature]
+                                     : (half)0.0h;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (uint k = 0; k < 128; k += 16) {
+            short8 a0 = (short8)(as_short(input_panel[0 * 128 + k + lane]),
+                                 as_short(input_panel[1 * 128 + k + lane]),
+                                 as_short(input_panel[2 * 128 + k + lane]),
+                                 as_short(input_panel[3 * 128 + k + lane]),
+                                 as_short(input_panel[4 * 128 + k + lane]),
+                                 as_short(input_panel[5 * 128 + k + lane]),
+                                 as_short(input_panel[6 * 128 + k + lane]),
+                                 as_short(input_panel[7 * 128 + k + lane]));
+            short8 a1 = (short8)(as_short(input_panel[8 * 128 + k + lane]),
+                                 as_short(input_panel[9 * 128 + k + lane]),
+                                 as_short(input_panel[10 * 128 + k + lane]),
+                                 as_short(input_panel[11 * 128 + k + lane]),
+                                 as_short(input_panel[12 * 128 + k + lane]),
+                                 as_short(input_panel[13 * 128 + k + lane]),
+                                 as_short(input_panel[14 * 128 + k + lane]),
+                                 as_short(input_panel[15 * 128 + k + lane]));
+            int8 b = output_index < output_dim
+                         ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
+                         : (int8)(0);
+            acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
+            acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (output_index < output_dim) {
+        if (token_base + 0 < c->tokens) output[(token_base + 0) * output_stride + output_index] = convert_half(acc0.s0);
+        if (token_base + 1 < c->tokens) output[(token_base + 1) * output_stride + output_index] = convert_half(acc0.s1);
+        if (token_base + 2 < c->tokens) output[(token_base + 2) * output_stride + output_index] = convert_half(acc0.s2);
+        if (token_base + 3 < c->tokens) output[(token_base + 3) * output_stride + output_index] = convert_half(acc0.s3);
+        if (token_base + 4 < c->tokens) output[(token_base + 4) * output_stride + output_index] = convert_half(acc0.s4);
+        if (token_base + 5 < c->tokens) output[(token_base + 5) * output_stride + output_index] = convert_half(acc0.s5);
+        if (token_base + 6 < c->tokens) output[(token_base + 6) * output_stride + output_index] = convert_half(acc0.s6);
+        if (token_base + 7 < c->tokens) output[(token_base + 7) * output_stride + output_index] = convert_half(acc0.s7);
+        if (token_base + 8 < c->tokens) output[(token_base + 8) * output_stride + output_index] = convert_half(acc1.s0);
+        if (token_base + 9 < c->tokens) output[(token_base + 9) * output_stride + output_index] = convert_half(acc1.s1);
+        if (token_base + 10 < c->tokens) output[(token_base + 10) * output_stride + output_index] = convert_half(acc1.s2);
+        if (token_base + 11 < c->tokens) output[(token_base + 11) * output_stride + output_index] = convert_half(acc1.s3);
+        if (token_base + 12 < c->tokens) output[(token_base + 12) * output_stride + output_index] = convert_half(acc1.s4);
+        if (token_base + 13 < c->tokens) output[(token_base + 13) * output_stride + output_index] = convert_half(acc1.s5);
+        if (token_base + 14 < c->tokens) output[(token_base + 14) * output_stride + output_index] = convert_half(acc1.s6);
+        if (token_base + 15 < c->tokens) output[(token_base + 15) * output_stride + output_index] = convert_half(acc1.s7);
+    }
+}
+
+// Three accumulators trade M16's finer grid for fewer token work-groups on
+// medium prompts without taking on the M32 specialization's register footprint.
+#if 0
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_gemm_m24(__global const PrefillCtx* c, int layer, int op) {
+    uint lane = get_sub_group_local_id();
+    uint output_index = get_group_id(0) * 256 + get_sub_group_id() * 16 + lane;
+    uint token_base = get_group_id(1) * 24;
+    uint input_dim, output_dim, output_stride;
+    __global const half* input;
+    __global const half* weight;
+    __global half* output;
+    if (op == 0) {
+        input_dim = H; output_dim = QDIM; input = c->norm; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+    } else if (op == 1) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+    } else if (op == 2) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+    } else if (op == 3) {
+        input_dim = QDIM; output_dim = H; input = c->xn; weight = c->ow + (ulong)layer * H * QDIM; output = c->proj;
+    } else if (op == 4) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+    } else if (op == 5) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+    } else if (op == 6) {
+        input_dim = IM; output_dim = H; input = c->gate; weight = c->dw + (ulong)layer * H * IM; output = c->proj;
+    } else if (op == 7) {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < QDIM) {
+            output_dim = QDIM; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+        } else if (output_index < QDIM + KVDIM) {
+            output_index -= QDIM;
+            output_dim = KVDIM; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+        } else {
+            output_index -= QDIM + KVDIM;
+            output_dim = KVDIM; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+        }
+    } else {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < IM) {
+            output_dim = IM; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+        } else {
+            output_index -= IM;
+            output_dim = IM; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+        }
+    }
+    output_stride = output_dim;
+    float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f), acc2 = (float8)(0.0f);
+    __local half input_panel[24 * 128];
+    for (uint k_base = 0; k_base < input_dim; k_base += 128) {
+        for (uint index = get_local_id(0); index < 24 * 128; index += 256) {
+            uint token = index >> 7, feature = index & 127;
+            input_panel[index] = token_base + token < c->tokens
+                                     ? input[(token_base + token) * input_dim + k_base + feature]
+                                     : (half)0.0h;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (uint k = 0; k < 128; k += 16) {
+            short8 a0 = (short8)(as_short(input_panel[0 * 128 + k + lane]),
+                                 as_short(input_panel[1 * 128 + k + lane]),
+                                 as_short(input_panel[2 * 128 + k + lane]),
+                                 as_short(input_panel[3 * 128 + k + lane]),
+                                 as_short(input_panel[4 * 128 + k + lane]),
+                                 as_short(input_panel[5 * 128 + k + lane]),
+                                 as_short(input_panel[6 * 128 + k + lane]),
+                                 as_short(input_panel[7 * 128 + k + lane]));
+            short8 a1 = (short8)(as_short(input_panel[8 * 128 + k + lane]),
+                                 as_short(input_panel[9 * 128 + k + lane]),
+                                 as_short(input_panel[10 * 128 + k + lane]),
+                                 as_short(input_panel[11 * 128 + k + lane]),
+                                 as_short(input_panel[12 * 128 + k + lane]),
+                                 as_short(input_panel[13 * 128 + k + lane]),
+                                 as_short(input_panel[14 * 128 + k + lane]),
+                                 as_short(input_panel[15 * 128 + k + lane]));
+            short8 a2 = (short8)(as_short(input_panel[16 * 128 + k + lane]),
+                                 as_short(input_panel[17 * 128 + k + lane]),
+                                 as_short(input_panel[18 * 128 + k + lane]),
+                                 as_short(input_panel[19 * 128 + k + lane]),
+                                 as_short(input_panel[20 * 128 + k + lane]),
+                                 as_short(input_panel[21 * 128 + k + lane]),
+                                 as_short(input_panel[22 * 128 + k + lane]),
+                                 as_short(input_panel[23 * 128 + k + lane]));
+            int8 b = output_index < output_dim
+                         ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
+                         : (int8)(0);
+            acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
+            acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
+            acc2 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b, acc2);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (output_index < output_dim) {
+        if (token_base + 0 < c->tokens) output[(token_base + 0) * output_stride + output_index] = convert_half(acc0.s0);
+        if (token_base + 1 < c->tokens) output[(token_base + 1) * output_stride + output_index] = convert_half(acc0.s1);
+        if (token_base + 2 < c->tokens) output[(token_base + 2) * output_stride + output_index] = convert_half(acc0.s2);
+        if (token_base + 3 < c->tokens) output[(token_base + 3) * output_stride + output_index] = convert_half(acc0.s3);
+        if (token_base + 4 < c->tokens) output[(token_base + 4) * output_stride + output_index] = convert_half(acc0.s4);
+        if (token_base + 5 < c->tokens) output[(token_base + 5) * output_stride + output_index] = convert_half(acc0.s5);
+        if (token_base + 6 < c->tokens) output[(token_base + 6) * output_stride + output_index] = convert_half(acc0.s6);
+        if (token_base + 7 < c->tokens) output[(token_base + 7) * output_stride + output_index] = convert_half(acc0.s7);
+        if (token_base + 8 < c->tokens) output[(token_base + 8) * output_stride + output_index] = convert_half(acc1.s0);
+        if (token_base + 9 < c->tokens) output[(token_base + 9) * output_stride + output_index] = convert_half(acc1.s1);
+        if (token_base + 10 < c->tokens) output[(token_base + 10) * output_stride + output_index] = convert_half(acc1.s2);
+        if (token_base + 11 < c->tokens) output[(token_base + 11) * output_stride + output_index] = convert_half(acc1.s3);
+        if (token_base + 12 < c->tokens) output[(token_base + 12) * output_stride + output_index] = convert_half(acc1.s4);
+        if (token_base + 13 < c->tokens) output[(token_base + 13) * output_stride + output_index] = convert_half(acc1.s5);
+        if (token_base + 14 < c->tokens) output[(token_base + 14) * output_stride + output_index] = convert_half(acc1.s6);
+        if (token_base + 15 < c->tokens) output[(token_base + 15) * output_stride + output_index] = convert_half(acc1.s7);
+        if (token_base + 16 < c->tokens) output[(token_base + 16) * output_stride + output_index] = convert_half(acc2.s0);
+        if (token_base + 17 < c->tokens) output[(token_base + 17) * output_stride + output_index] = convert_half(acc2.s1);
+        if (token_base + 18 < c->tokens) output[(token_base + 18) * output_stride + output_index] = convert_half(acc2.s2);
+        if (token_base + 19 < c->tokens) output[(token_base + 19) * output_stride + output_index] = convert_half(acc2.s3);
+        if (token_base + 20 < c->tokens) output[(token_base + 20) * output_stride + output_index] = convert_half(acc2.s4);
+        if (token_base + 21 < c->tokens) output[(token_base + 21) * output_stride + output_index] = convert_half(acc2.s5);
+        if (token_base + 22 < c->tokens) output[(token_base + 22) * output_stride + output_index] = convert_half(acc2.s6);
+        if (token_base + 23 < c->tokens) output[(token_base + 23) * output_stride + output_index] = convert_half(acc2.s7);
+    }
+}
+#endif
+
+// The long-prompt specialization reuses each weight operand across 32 token
+// rows. Keeping it as a separate entry point avoids imposing four accumulators
+// on the M16 kernel's register allocation.
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) {
+    uint lane = get_sub_group_local_id();
+    uint output_index = get_group_id(0) * 512 + get_sub_group_id() * 16 + lane;
+    uint token_base = get_group_id(1) * 32;
+    uint input_dim, output_dim, output_stride;
+    __global const half* input;
+    __global const half* weight;
+    __global half* output;
+    if (op == 0) {
+        input_dim = H; output_dim = QDIM; input = c->norm; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+    } else if (op == 1) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+    } else if (op == 2) {
+        input_dim = H; output_dim = KVDIM; input = c->norm; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+    } else if (op == 3) {
+        input_dim = QDIM; output_dim = H; input = c->xn; weight = c->ow + (ulong)layer * H * QDIM; output = c->proj;
+    } else if (op == 4) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+    } else if (op == 5) {
+        input_dim = H; output_dim = IM; input = c->norm; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+    } else if (op == 6) {
+        input_dim = IM; output_dim = H; input = c->gate; weight = c->dw + (ulong)layer * H * IM; output = c->proj;
+    } else if (op == 7) {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < QDIM) {
+            output_dim = QDIM; weight = c->qw + (ulong)layer * QDIM * H; output = c->qb;
+        } else if (output_index < QDIM + KVDIM) {
+            output_index -= QDIM;
+            output_dim = KVDIM; weight = c->kw + (ulong)layer * KVDIM * H; output = c->kb;
+        } else {
+            output_index -= QDIM + KVDIM;
+            output_dim = KVDIM; weight = c->vw + (ulong)layer * KVDIM * H; output = c->vb;
+        }
+    } else {
+        input_dim = H;
+        input = c->norm;
+        if (output_index < IM) {
+            output_dim = IM; weight = c->gw + (ulong)layer * IM * H; output = c->gate;
+        } else {
+            output_index -= IM;
+            output_dim = IM; weight = c->uw + (ulong)layer * IM * H; output = c->up;
+        }
+    }
+    output_stride = output_dim;
+    float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f);
+    float8 acc2 = (float8)(0.0f), acc3 = (float8)(0.0f);
+    __local half input_panel[32 * 128];
+    for (uint k_base = 0; k_base < input_dim; k_base += 128) {
+        for (uint index = get_local_id(0); index < 32 * 128; index += 512) {
+            uint token = index >> 7, feature = index & 127;
+            input_panel[index] = token_base + token < c->tokens
+                                     ? input[(token_base + token) * input_dim + k_base + feature]
+                                     : (half)0.0h;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (uint k = 0; k < 128; k += 16) {
+            short8 a0 = (short8)(as_short(input_panel[0 * 128 + k + lane]),
+                                 as_short(input_panel[1 * 128 + k + lane]),
+                                 as_short(input_panel[2 * 128 + k + lane]),
+                                 as_short(input_panel[3 * 128 + k + lane]),
+                                 as_short(input_panel[4 * 128 + k + lane]),
+                                 as_short(input_panel[5 * 128 + k + lane]),
+                                 as_short(input_panel[6 * 128 + k + lane]),
+                                 as_short(input_panel[7 * 128 + k + lane]));
+            short8 a1 = (short8)(as_short(input_panel[8 * 128 + k + lane]),
+                                 as_short(input_panel[9 * 128 + k + lane]),
+                                 as_short(input_panel[10 * 128 + k + lane]),
+                                 as_short(input_panel[11 * 128 + k + lane]),
+                                 as_short(input_panel[12 * 128 + k + lane]),
+                                 as_short(input_panel[13 * 128 + k + lane]),
+                                 as_short(input_panel[14 * 128 + k + lane]),
+                                 as_short(input_panel[15 * 128 + k + lane]));
+            short8 a2 = (short8)(as_short(input_panel[16 * 128 + k + lane]),
+                                 as_short(input_panel[17 * 128 + k + lane]),
+                                 as_short(input_panel[18 * 128 + k + lane]),
+                                 as_short(input_panel[19 * 128 + k + lane]),
+                                 as_short(input_panel[20 * 128 + k + lane]),
+                                 as_short(input_panel[21 * 128 + k + lane]),
+                                 as_short(input_panel[22 * 128 + k + lane]),
+                                 as_short(input_panel[23 * 128 + k + lane]));
+            short8 a3 = (short8)(as_short(input_panel[24 * 128 + k + lane]),
+                                 as_short(input_panel[25 * 128 + k + lane]),
+                                 as_short(input_panel[26 * 128 + k + lane]),
+                                 as_short(input_panel[27 * 128 + k + lane]),
+                                 as_short(input_panel[28 * 128 + k + lane]),
+                                 as_short(input_panel[29 * 128 + k + lane]),
+                                 as_short(input_panel[30 * 128 + k + lane]),
+                                 as_short(input_panel[31 * 128 + k + lane]));
+            int8 b = output_index < output_dim
+                         ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
+                         : (int8)(0);
+            acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
+            acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
+            acc2 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b, acc2);
+            acc3 = intel_sub_group_f16_f16_matrix_mad_k16(a3, b, acc3);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (output_index < output_dim) {
+        if (token_base + 0 < c->tokens) output[(token_base + 0) * output_stride + output_index] = convert_half(acc0.s0);
+        if (token_base + 1 < c->tokens) output[(token_base + 1) * output_stride + output_index] = convert_half(acc0.s1);
+        if (token_base + 2 < c->tokens) output[(token_base + 2) * output_stride + output_index] = convert_half(acc0.s2);
+        if (token_base + 3 < c->tokens) output[(token_base + 3) * output_stride + output_index] = convert_half(acc0.s3);
+        if (token_base + 4 < c->tokens) output[(token_base + 4) * output_stride + output_index] = convert_half(acc0.s4);
+        if (token_base + 5 < c->tokens) output[(token_base + 5) * output_stride + output_index] = convert_half(acc0.s5);
+        if (token_base + 6 < c->tokens) output[(token_base + 6) * output_stride + output_index] = convert_half(acc0.s6);
+        if (token_base + 7 < c->tokens) output[(token_base + 7) * output_stride + output_index] = convert_half(acc0.s7);
+        if (token_base + 8 < c->tokens) output[(token_base + 8) * output_stride + output_index] = convert_half(acc1.s0);
+        if (token_base + 9 < c->tokens) output[(token_base + 9) * output_stride + output_index] = convert_half(acc1.s1);
+        if (token_base + 10 < c->tokens) output[(token_base + 10) * output_stride + output_index] = convert_half(acc1.s2);
+        if (token_base + 11 < c->tokens) output[(token_base + 11) * output_stride + output_index] = convert_half(acc1.s3);
+        if (token_base + 12 < c->tokens) output[(token_base + 12) * output_stride + output_index] = convert_half(acc1.s4);
+        if (token_base + 13 < c->tokens) output[(token_base + 13) * output_stride + output_index] = convert_half(acc1.s5);
+        if (token_base + 14 < c->tokens) output[(token_base + 14) * output_stride + output_index] = convert_half(acc1.s6);
+        if (token_base + 15 < c->tokens) output[(token_base + 15) * output_stride + output_index] = convert_half(acc1.s7);
+        if (token_base + 16 < c->tokens) output[(token_base + 16) * output_stride + output_index] = convert_half(acc2.s0);
+        if (token_base + 17 < c->tokens) output[(token_base + 17) * output_stride + output_index] = convert_half(acc2.s1);
+        if (token_base + 18 < c->tokens) output[(token_base + 18) * output_stride + output_index] = convert_half(acc2.s2);
+        if (token_base + 19 < c->tokens) output[(token_base + 19) * output_stride + output_index] = convert_half(acc2.s3);
+        if (token_base + 20 < c->tokens) output[(token_base + 20) * output_stride + output_index] = convert_half(acc2.s4);
+        if (token_base + 21 < c->tokens) output[(token_base + 21) * output_stride + output_index] = convert_half(acc2.s5);
+        if (token_base + 22 < c->tokens) output[(token_base + 22) * output_stride + output_index] = convert_half(acc2.s6);
+        if (token_base + 23 < c->tokens) output[(token_base + 23) * output_stride + output_index] = convert_half(acc2.s7);
+        if (token_base + 24 < c->tokens) output[(token_base + 24) * output_stride + output_index] = convert_half(acc3.s0);
+        if (token_base + 25 < c->tokens) output[(token_base + 25) * output_stride + output_index] = convert_half(acc3.s1);
+        if (token_base + 26 < c->tokens) output[(token_base + 26) * output_stride + output_index] = convert_half(acc3.s2);
+        if (token_base + 27 < c->tokens) output[(token_base + 27) * output_stride + output_index] = convert_half(acc3.s3);
+        if (token_base + 28 < c->tokens) output[(token_base + 28) * output_stride + output_index] = convert_half(acc3.s4);
+        if (token_base + 29 < c->tokens) output[(token_base + 29) * output_stride + output_index] = convert_half(acc3.s5);
+        if (token_base + 30 < c->tokens) output[(token_base + 30) * output_stride + output_index] = convert_half(acc3.s6);
+        if (token_base + 31 < c->tokens) output[(token_base + 31) * output_stride + output_index] = convert_half(acc3.s7);
+    }
+}
+
+__attribute__((reqd_work_group_size(16, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
+    uint lane = get_sub_group_local_id(), head = get_group_id(0), token = get_group_id(1);
+    int pos = (int)c->positions[token];
+    if (head < NH) {
+        __global half* query = c->qb + token * QDIM + head * HD;
+        float values[8], sum = 0.0f;
+        for (uint j = 0; j < 8; ++j) { values[j] = convert_float(query[lane + j * 16]); sum = fma(values[j], values[j], sum); }
+        float scale = rsqrt(sub_group_reduce_add(sum) / HD + EPS);
+        for (uint j = 0; j < 4; ++j) {
+            uint dim = lane + j * 16;
+            float angle = (float)pos * convert_float(c->rf[dim]), cs = native_cos(angle), sn = native_sin(angle);
+            float lo = values[j] * scale * convert_float(c->qn[layer * HD + dim]);
+            float hi = values[j + 4] * scale * convert_float(c->qn[layer * HD + dim + HHD]);
+            query[dim] = convert_half(lo * cs - hi * sn);
+            query[dim + HHD] = convert_half(hi * cs + lo * sn);
+        }
+    } else {
+        uint kv_head = head - NH;
+        __global half* key = c->kb + token * KVDIM + kv_head * HD;
+        __global half* value = c->vb + token * KVDIM + kv_head * HD;
+        float values[8], sum = 0.0f;
+        for (uint j = 0; j < 8; ++j) { values[j] = convert_float(key[lane + j * 16]); sum = fma(values[j], values[j], sum); }
+        float scale = rsqrt(sub_group_reduce_add(sum) / HD + EPS);
+        ulong cache_base = ((ulong)layer * KVH + kv_head) * (ulong)c->CS * HD + (ulong)pos * HD;
+        for (uint j = 0; j < 4; ++j) {
+            uint dim = lane + j * 16;
+            float angle = (float)pos * convert_float(c->rf[dim]), cs = native_cos(angle), sn = native_sin(angle);
+            float lo = values[j] * scale * convert_float(c->kn[layer * HD + dim]);
+            float hi = values[j + 4] * scale * convert_float(c->kn[layer * HD + dim + HHD]);
+            c->kc[cache_base + dim] = convert_half(lo * cs - hi * sn);
+            c->kc[cache_base + dim + HHD] = convert_half(hi * cs + lo * sn);
+            c->vc[cache_base + dim] = value[dim];
+            c->vc[cache_base + dim + HHD] = value[dim + HHD];
+        }
+    }
+}
+
+__attribute__((reqd_work_group_size(16, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_attention(__global const PrefillCtx* c, int layer) {
+    uint lane = get_sub_group_local_id(), query_head = get_group_id(0), token = get_group_id(1);
+    uint kv_head = query_head / GQA;
+    int pos = (int)c->positions[token];
+    __global const half* query = c->qb + token * QDIM + query_head * HD;
+    ulong cache_base = ((ulong)layer * KVH + kv_head) * (ulong)c->CS * HD;
+    float q[8], acc[8];
+    for (uint j = 0; j < 8; ++j) { q[j] = convert_float(query[lane + j * 16]); acc[j] = 0.0f; }
+    float maximum = -INFINITY, denominator = 0.0f;
+    for (int sequence = 0; sequence <= pos; ++sequence) {
+        float dot_product = 0.0f;
+        for (uint j = 0; j < 8; ++j)
+            dot_product = fma(q[j], convert_float(c->kc[cache_base + (ulong)sequence * HD + lane + j * 16]), dot_product);
+        float score = sub_group_reduce_add(dot_product) * rsqrt((float)HD);
+        float new_maximum = fmax(maximum, score);
+        float correction = native_exp(maximum - new_maximum), probability = native_exp(score - new_maximum);
+        denominator = denominator * correction + probability;
+        for (uint j = 0; j < 8; ++j) {
+            float value = convert_float(c->vc[cache_base + (ulong)sequence * HD + lane + j * 16]);
+            acc[j] = acc[j] * correction + probability * value;
+        }
+        maximum = new_maximum;
+    }
+    for (uint j = 0; j < 8; ++j)
+        c->xn[token * QDIM + query_head * HD + lane + j * 16] = convert_half(acc[j] / denominator);
+}
+
+// op: 0=attention residual, 1=SiLU(gate)*up, 2=MLP residual/final output.
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int op) {
+    uint index = get_global_id(0), width = op == 1 ? IM : H, count = c->tokens * width;
+    if (index >= count) return;
+    if (op == 0) {
+        c->h[index] = convert_half(convert_float(c->h[index]) + convert_float(c->proj[index]));
+    } else if (op == 1) {
+        float gate = convert_float(c->gate[index]);
+        c->gate[index] = convert_half(gate / (1.0f + native_exp(-gate)) * convert_float(c->up[index]));
+    } else {
+        float value = convert_float(c->h[index]) + convert_float(c->proj[index]);
+        c->h[index] = convert_half(value);
+        if (layer == NUM_L - 1) c->out[index] = value;
+    }
+}
 )CL";
 
 // ---------------------------------------------------------------------------
@@ -560,6 +1060,29 @@ static constexpr int SYNC_N = NUM_L * 5 + 1;            // per-(layer,stage) cou
 // parallelism (more outstanding weight loads => higher HBM utilisation) while
 // staying below the point where shared-cursor atomic_inc contention dominates.
 static constexpr int MONO_WG = 32, MONO_LWS = 512;
+
+struct PrefillCtxH {
+    void* hs = nullptr; void* h = nullptr; void* out = nullptr;
+    void* wn = nullptr; void* pn = nullptr;
+    void* qw = nullptr; void* kw = nullptr; void* vw = nullptr;
+    void* ow = nullptr; void* gw = nullptr; void* uw = nullptr; void* dw = nullptr;
+    void* qn = nullptr; void* kn = nullptr; void* rf = nullptr;
+    void* norm = nullptr; void* qb = nullptr; void* kb = nullptr; void* vb = nullptr;
+    void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
+    void* kc = nullptr; void* vc = nullptr; void* positions = nullptr;
+    unsigned tokens = 0; unsigned CS = 0;
+};
+
+struct PrefillState {
+    cl_kernel copy = nullptr, rms = nullptr, gemm_m16 = nullptr, gemm_m32 = nullptr, rope = nullptr;
+    cl_kernel attention = nullptr, elementwise = nullptr;
+    clSetKernelArgMemPointerINTEL_fn set_usm_arg = nullptr;
+    void* context = nullptr; void* norm = nullptr; void* qb = nullptr; void* kb = nullptr;
+    void* vb = nullptr; void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
+    PrefillCtxH host_context{};
+};
+
+static std::unordered_map<const Qwen06BPOCRuntime*, PrefillState> gPrefillStates;
 
 struct MkTaskH {
     void* ctx;
@@ -620,6 +1143,54 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     mSync_ = ualloc(SYNC_N * sizeof(int));
     // Shared per-token context.
     mCtx_ = ualloc(sizeof(MonoCtxH));
+
+    // Optimization log (B60, 19 / 58 / 281 token prompts):
+    // Baseline reused decode per token: 59 / 170 / 821 ms, or 0.20x / 0.10x /
+    // 0.05x versus standard OpenVINO. Iteration 1 batched all prompt tokens and
+    // mapped every dense projection to SIMD16 XMX: 21 / 34 / 110 ms. Iteration
+    // 2 shared each activation tile through 48 KiB SLM; 20 / 42 / 149 ms showed
+    // that reduced occupancy outweighed reuse, so it was reverted. Iteration 3
+    // fused QKV and gate/up launch families: 18 / 32 / 111 ms, retained because
+    // it improves short/medium prompts without changing long-prompt performance.
+    // Iterations 4-13 established K128/N256 and a prompt-size crossover between
+    // M16 and M32. Iteration 14 split those shapes into independent entry points,
+    // avoiding M32 register pressure on short prompts. Iterations 15-18 rejected
+    // M24, K256, and N384; N512 improved the long M32 path. The retained dispatch
+    // is M16/N256/K128 through 64 tokens and M32/N512/K128 above 64 tokens.
+    PrefillState prefill;
+    auto create_prefill_kernel = [&](const char* name) {
+        cl_kernel kernel = clCreateKernel(prog_, name, &err);
+        assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(", name, "): ", err);
+        return kernel;
+    };
+    prefill.copy = create_prefill_kernel("prefill_copy");
+    prefill.rms = create_prefill_kernel("prefill_rms");
+    prefill.gemm_m16 = create_prefill_kernel("prefill_gemm_m16");
+    prefill.gemm_m32 = create_prefill_kernel("prefill_gemm_m32");
+    prefill.rope = create_prefill_kernel("prefill_rope_cache");
+    prefill.attention = create_prefill_kernel("prefill_attention");
+    prefill.elementwise = create_prefill_kernel("prefill_elementwise");
+    prefill.set_usm_arg = reinterpret_cast<clSetKernelArgMemPointerINTEL_fn>(
+        clGetExtensionFunctionAddressForPlatform(platform, "clSetKernelArgMemPointerINTEL"));
+    assert_or_throw(prefill.set_usm_arg, "[MegaKernel] clSetKernelArgMemPointerINTEL unavailable");
+    prefill.context = ualloc(sizeof(PrefillCtxH));
+    prefill.norm = ualloc((size_t)MAX_SEQ * H_DIM * 2);
+    prefill.qb = ualloc((size_t)MAX_SEQ * QDIM * 2);
+    prefill.kb = ualloc((size_t)MAX_SEQ * KVDIM * 2);
+    prefill.vb = ualloc((size_t)MAX_SEQ * KVDIM * 2);
+    prefill.xn = ualloc((size_t)MAX_SEQ * QDIM * 2);
+    prefill.gate = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
+    prefill.up = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
+    prefill.proj = ualloc((size_t)MAX_SEQ * H_DIM * 2);
+    for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
+                             prefill.attention, prefill.elementwise}) {
+        assert_or_throw(prefill.set_usm_arg(kernel, 0, prefill.context) == CL_SUCCESS,
+                        "[MegaKernel] set prefill context argument failed");
+        cl_bool enable = CL_TRUE;
+        clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL, sizeof(enable), &enable);
+        clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL, sizeof(enable), &enable);
+        clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL, sizeof(enable), &enable);
+    }
 
     // Build the topologically-sorted task queue once. Each task carries the
     // context pointer plus its (layer, tile); the task `type` selects the stage.
@@ -695,7 +1266,33 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     runtimeContext_.qn = weights->q_norm_w;
     runtimeContext_.kn = weights->k_norm_w;
     runtimeContext_.rf = weights->rope_inv_freq;
-        return 0;
+
+    prefill.host_context.h = mH_;
+    prefill.host_context.wn = weights->input_ln_w;
+    prefill.host_context.pn = weights->post_attn_ln_w;
+    prefill.host_context.qw = weights->q_proj_w;
+    prefill.host_context.kw = weights->k_proj_w;
+    prefill.host_context.vw = weights->v_proj_w;
+    prefill.host_context.ow = weights->o_proj_w;
+    prefill.host_context.gw = weights->gate_proj_w;
+    prefill.host_context.uw = weights->up_proj_w;
+    prefill.host_context.dw = weights->down_proj_w;
+    prefill.host_context.qn = weights->q_norm_w;
+    prefill.host_context.kn = weights->k_norm_w;
+    prefill.host_context.rf = weights->rope_inv_freq;
+    prefill.host_context.norm = prefill.norm;
+    prefill.host_context.qb = prefill.qb;
+    prefill.host_context.kb = prefill.kb;
+    prefill.host_context.vb = prefill.vb;
+    prefill.host_context.xn = prefill.xn;
+    prefill.host_context.gate = prefill.gate;
+    prefill.host_context.up = prefill.up;
+    prefill.host_context.proj = prefill.proj;
+    prefill.host_context.kc = mKC_;
+    prefill.host_context.vc = mVC_;
+    prefill.host_context.CS = MAX_SEQ;
+    gPrefillStates.emplace(this, std::move(prefill));
+    return 0;
 }
 
 TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
@@ -716,6 +1313,81 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         return w;
     }();
 
+    if (newTokens > 1) {
+        assert_or_throw(newTokens <= MAX_SEQ, "[MegaKernel] prefill exceeds KV-cache capacity: ", newTokens);
+        auto state_it = gPrefillStates.find(this);
+        assert_or_throw(state_it != gPrefillStates.end(), "[MegaKernel] prefill state is unavailable");
+        PrefillState& prefill = state_it->second;
+        prefill.host_context.hs = io->hidden_states;
+        prefill.host_context.out = io->hidden_states_out;
+        prefill.host_context.positions = io->position_ids;
+        prefill.host_context.tokens = newTokens;
+        assert_or_throw(usmMemcpy_(stream_, CL_TRUE, prefill.context, &prefill.host_context,
+                                  sizeof(prefill.host_context), 0, nullptr, nullptr) == CL_SUCCESS,
+                        "[MegaKernel] prefill context update failed");
+
+        auto set_int_arg = [](cl_kernel kernel, cl_uint index, int value) {
+            assert_or_throw(clSetKernelArg(kernel, index, sizeof(value), &value) == CL_SUCCESS,
+                            "[MegaKernel] set prefill scalar argument failed");
+        };
+        int dispatch_index = 0;
+        const bool sync_prefill = std::getenv("OV_MEGAKERNEL_PREFILL_SYNC") != nullptr;
+        auto enqueue_1d = [&](cl_kernel kernel, size_t count, size_t local) {
+            size_t global = (count + local - 1) / local * local;
+            cl_int status = clEnqueueNDRangeKernel(stream_, kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr);
+            assert_or_throw(status == CL_SUCCESS, "[MegaKernel] enqueue prefill kernel: ", status);
+            ++dispatch_index;
+            if (sync_prefill)
+                assert_or_throw(clFinish(stream_) == CL_SUCCESS, "[MegaKernel] prefill dispatch failed: ", dispatch_index);
+        };
+        auto enqueue_2d = [&](cl_kernel kernel, size_t groups_x, size_t groups_y, size_t local_x) {
+            size_t global[2] = {groups_x * local_x, groups_y};
+            size_t local[2] = {local_x, 1};
+            cl_int status = clEnqueueNDRangeKernel(stream_, kernel, 2, nullptr, global, local, 0, nullptr, nullptr);
+            assert_or_throw(status == CL_SUCCESS, "[MegaKernel] enqueue prefill kernel: ", status);
+            ++dispatch_index;
+            if (sync_prefill)
+                assert_or_throw(clFinish(stream_) == CL_SUCCESS, "[MegaKernel] prefill dispatch failed: ", dispatch_index);
+        };
+        auto gemm = [&](int layer, int op, int output_dim) {
+            const bool use_m32 = newTokens > 64;
+            cl_kernel kernel = use_m32 ? prefill.gemm_m32 : prefill.gemm_m16;
+            const size_t token_tile = use_m32 ? 32 : 16;
+            const size_t output_tile = use_m32 ? 512 : 256;
+            set_int_arg(kernel, 1, layer);
+            set_int_arg(kernel, 2, op);
+            enqueue_2d(kernel,
+                       (output_dim + output_tile - 1) / output_tile,
+                       (newTokens + token_tile - 1) / token_tile,
+                       output_tile);
+        };
+
+        enqueue_1d(prefill.copy, (size_t)newTokens * H_DIM, 256);
+        for (int layer = 0; layer < NUM_L; ++layer) {
+            set_int_arg(prefill.rms, 1, layer);
+            set_int_arg(prefill.rms, 2, 0);
+            enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
+            gemm(layer, 7, QDIM + 2 * KVDIM);
+            set_int_arg(prefill.rope, 1, layer);
+            enqueue_2d(prefill.rope, NH + KVH, newTokens, 16);
+            set_int_arg(prefill.attention, 1, layer);
+            enqueue_2d(prefill.attention, NH, newTokens, 16);
+            gemm(layer, 3, H_DIM);
+            set_int_arg(prefill.elementwise, 1, layer);
+            set_int_arg(prefill.elementwise, 2, 0);
+            enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
+            set_int_arg(prefill.rms, 2, 1);
+            enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
+            gemm(layer, 8, 2 * IM_DIM);
+            set_int_arg(prefill.elementwise, 2, 1);
+            enqueue_1d(prefill.elementwise, (size_t)newTokens * IM_DIM, 256);
+            gemm(layer, 6, H_DIM);
+            set_int_arg(prefill.elementwise, 2, 2);
+            enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
+        }
+        return 0;
+    }
+
     // ===== Task-system path: the whole 28-layer model as one queue of tasks,
     // launched once per new token. The in-order queue serialises tokens so
     // token t+1 sees the KV cache written by token t. For each token we refresh
@@ -735,6 +1407,22 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
 }
 
 TErrorcode Qwen06BPOCRuntime::Destroy() {
+    auto state_it = gPrefillStates.find(this);
+    if (state_it != gPrefillStates.end()) {
+        PrefillState& prefill = state_it->second;
+        for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
+                                 prefill.attention, prefill.elementwise}) {
+            if (kernel)
+                clReleaseKernel(kernel);
+        }
+        for (void* allocation : {prefill.context, prefill.norm, prefill.qb, prefill.kb,
+                                 prefill.vb, prefill.xn, prefill.gate, prefill.up, prefill.proj}) {
+            if (allocation && ctx_ && usmFree_)
+                usmFree_(ctx_, allocation);
+        }
+        gPrefillStates.erase(state_it);
+    }
+
     if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
         HostReleaseTaskSystem(taskManager_, dev_, ctx_);
         taskManager_ = {};
