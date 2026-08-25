@@ -13,3 +13,8 @@ extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime();
 extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime);
 
 which creates runtime for given megakernel.
+
+Each megakernel implementationt has to define:
+class ConstantParamsImpl -> which inherits from mk::IConstantParams
+class RuntimeParamsImpl -> which inherits from mk::IRuntimeParams
+class PlatformParamsImpl -> which inherits from mk::IPlatformParams
