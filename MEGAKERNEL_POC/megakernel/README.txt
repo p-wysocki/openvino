@@ -7,3 +7,9 @@ The openvino engine has to link against that library.
 
 Each implementation is backed by header-only, interface lib megakernel runtime, which defines 
 interface that openvino engien will link against. 
+
+All megakernels implementations has to export functions:
+extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime();
+extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime);
+
+which creates runtime for given megakernel.
