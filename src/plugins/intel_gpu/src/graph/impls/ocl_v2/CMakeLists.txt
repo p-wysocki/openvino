@@ -4,6 +4,8 @@
 
 set(TARGET_NAME "openvino_intel_gpu_ocl_v2_obj")
 
+add_subdirectory(megakernel)
+
 # Path which points to root directory where code generated elements are created
 # (specific to build configuration).
 set(CODEGEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/codegen")
@@ -46,16 +48,12 @@ add_custom_target(run_ocl_codegen ALL DEPENDS "${CODEGEN_INCDIR}/${KERNEL_SOURCE
 ov_gpu_add_backend_target(
     NAME ${TARGET_NAME}
     INCLUDES $<BUILD_INTERFACE:${CODEGEN_INCDIR}>
+  LINK_LIBRARIES ${MEGAKERNEL_RUNTIME_TARGET}
     BYPASS
         ADDITIONAL_SOURCE_DIRS ${CODEGEN_INCDIR}
         DEPENDENCIES run_ocl_codegen
         ADD_CLANG_FORMAT
 )
-
-  set(TASK_SYSTEM_ROOT "${CMAKE_SOURCE_DIR}/MEGAKERNEL_POC/research/preloading_gemv/src/ocl")
-  target_sources(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}/taskSystem/host/taskManagerHost.cpp")
-  target_include_directories(${TARGET_NAME} PRIVATE "${TASK_SYSTEM_ROOT}")
-  target_compile_definitions(${TARGET_NAME} PRIVATE TASK_SYSTEM_OPENCL_ROOT="${TASK_SYSTEM_ROOT}")
 
 ov_build_target_faster(${TARGET_NAME} PCH)
 
