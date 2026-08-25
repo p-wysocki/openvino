@@ -9,10 +9,13 @@ Each implementation is backed by header-only, interface lib megakernel runtime, 
 interface that openvino engien will link against. 
 
 All megakernels implementations has to export functions:
-extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime();
-extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime);
+-> extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime();
+-> extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime);
+which has to be defined in file megakernelImpl.h
 
 which creates runtime for given megakernel.
+
+The created library has to be shared lib with the same name as the main folder.
 
 Each megakernel implementationt has to define:
 class ConstantParamsImpl -> which inherits from mk::IConstantParams

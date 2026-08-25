@@ -24,10 +24,10 @@
 #include <vector>
 
 #include "../primitive_ocl_base.hpp"
-#include "Qwen06BPOC/megakernelImpl.h"
 #include "intel_gpu/graph/network.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"
+#include "megakernelImpl.h"
 #include "megakernel_inst.h"
 #include "ocl/ocl_engine.hpp"
 #include "ocl/ocl_event.hpp"
