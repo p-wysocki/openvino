@@ -46,7 +46,7 @@ add_custom_target(run_ocl_codegen ALL DEPENDS "${CODEGEN_INCDIR}/${KERNEL_SOURCE
 ov_gpu_add_backend_target(
     NAME ${TARGET_NAME}
     INCLUDES $<BUILD_INTERFACE:${CODEGEN_INCDIR}>
-    LINK_LIBRARIES Qwen06BPOC::Qwen06BPOC
+    LINK_LIBRARIES megakernel::Qwen06BPOC
     BYPASS
         ADDITIONAL_SOURCE_DIRS ${CODEGEN_INCDIR}
         DEPENDENCIES run_ocl_codegen

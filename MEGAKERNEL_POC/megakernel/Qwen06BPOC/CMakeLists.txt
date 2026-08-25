@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Qwen06BPOC LANGUAGES CXX)
+set(TARGET_NAME Qwen06BPOC)
+
+project(${TARGET_NAME} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,22 +16,22 @@ if(NOT TARGET OpenCL::OpenCL)
     find_package(OpenCL REQUIRED)
 endif()
 
-add_library(Qwen06BPOC SHARED
+add_library(${TARGET_NAME} SHARED
     megakernelImpl.cpp
     impl/qwen06BPOCRuntime.cpp
     "${TASK_SYSTEM_OPENCL_ROOT}/taskSystem/host/taskManagerHost.cpp")
-add_library(Qwen06BPOC::Qwen06BPOC ALIAS Qwen06BPOC)
+add_library(megakernel::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 include(GenerateExportHeader)
-generate_export_header(Qwen06BPOC
+generate_export_header(${TARGET_NAME}
     EXPORT_FILE_NAME qwen06BPOCExport.h
     EXPORT_MACRO_NAME QWEN06BPOC_API)
 
-target_compile_definitions(Qwen06BPOC PRIVATE
+target_compile_definitions(${TARGET_NAME} PRIVATE
     CL_TARGET_OPENCL_VERSION=300
     TASK_SYSTEM_OPENCL_ROOT="${TASK_SYSTEM_OPENCL_ROOT}")
 
-target_include_directories(Qwen06BPOC
+target_include_directories(${TARGET_NAME}
     PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}/.."
         "${CMAKE_CURRENT_BINARY_DIR}"
@@ -37,6 +39,6 @@ target_include_directories(Qwen06BPOC
         "${CMAKE_CURRENT_LIST_DIR}/impl"
         "${TASK_SYSTEM_OPENCL_ROOT}")
 
-target_link_libraries(Qwen06BPOC PUBLIC OpenCL::OpenCL)
+target_link_libraries(${TARGET_NAME} PUBLIC OpenCL::OpenCL)
 
-set_target_properties(Qwen06BPOC PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
