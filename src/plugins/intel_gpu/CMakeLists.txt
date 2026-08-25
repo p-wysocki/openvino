@@ -122,8 +122,7 @@ set(MAIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 add_subdirectory(thirdparty)
-include(thirdparty/cmake/rapidjson.cmake)
-                 
+include(thirdparty/cmake/rapidjson.cmake)                 
 if(CMAKE_COMPILER_IS_GNUCXX)
     ov_add_compiler_flags(-Werror)
 endif()
