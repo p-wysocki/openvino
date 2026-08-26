@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(TARGET_NAME Qwen06BPOCv2)
+set(TARGET_NAME Qwen06BPOC_prefill_megakernel)
 
 project(${TARGET_NAME} LANGUAGES CXX)
 

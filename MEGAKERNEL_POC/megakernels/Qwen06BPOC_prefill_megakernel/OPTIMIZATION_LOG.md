@@ -404,3 +404,106 @@ Final retained-code run:
 ## Remaining Bottleneck
 
 The retained prompt-size dispatch uses M16/N256/K128 through 64 tokens and M32/N512/K128 above 64. N768 and N1024 proved that further activation reuse loses too much grid parallelism, while K64/K256 showed that K128 is the panel-size balance. Init-time packing of every major projection family was slower, and even a K-major 16x16 layout with subgroup block reads did not beat row-major `vload16`. The original row-major tensors therefore already provide the best tested B60 weight path without hundreds of MiB of duplicate storage. Further progress requires stage-level device profiling or a different GEMM decomposition rather than another local layout permutation.
+
+## Iteration 29: Dedicated Prefill Task System
+
+Replaced the per-stage prefill kernel dispatches with independent SIMD16 task
+workers. Each former work-group is represented by one static `TaskDesc`; exact
+stage task counts form the semaphore dependencies. Task queues are cached by
+prompt length, and M16/LWS256 remains selected through 64 tokens while
+M32/LWS512 handles longer prompts. Decode task types, workers, and queue
+construction were not changed.
+
+Validation exposed two task-specific correctness requirements. Tail tasks must
+guard inactive lanes instead of returning before the task completion barrier,
+and the M32 RMS reduction must combine all 32 subgroup partial sums rather than
+only the first SIMD16 group. Both were corrected before measurement.
+
+| Prompt tokens | Standard OpenVINO TTFT | Task prefill TTFT | Prefill speed |
+|---:|---:|---:|---:|
+| 19 | 11.852 ms | 21.235 ms | 0.56x |
+| 58 | 16.095 ms | 33.596 ms | 0.48x |
+| 281 | 38.502 ms | 79.369 ms | 0.49x |
+
+Outcome: retained to provide the requested prefill task architecture. The task
+worker removes the repeated host-side stage dispatches but is slower than the
+specialized standalone-kernel path because all stages use the GEMM worker's
+large work-group and each fine-grained task pays queue and semaphore overhead.
+Dedicated decode remained 1.58x faster with argmax match true and cosine
+similarity 1.0000. All generated outputs matched.
+
+## Iterations 30-34: Late and Fine-Grained Prefill Task Waits
+
+These iterations changed only the dedicated prefill task system. Decode task
+types, task bodies, queue construction, and dispatch were not modified.
+
+### Iteration 30: Operation-Local Late Waits
+
+Removed the unconditional wait from `ExecutePrefillTaskM16/M32`. Each prefill
+operation now waits immediately before its first read of producer-owned mutable
+data, allowing task decoding, address calculation, constant-weight selection,
+and output setup to execute while the dependency is pending.
+
+Correctness passed. The benchmark host was heavily loaded during this run:
+standard OpenVINO TTFT rose to `107.910 / 76.751 / 115.951 ms`, so the measured
+megakernel TTFT of `96.228 / 147.640 / 87.589 ms` was not used for comparison.
+The structural change was retained for the following iterations.
+
+### Iteration 31: First Weight Vector Register Preload
+
+Loaded the first constant K16 weight vector into registers before the late GEMM
+wait and reused it for the first XMX operation. Correctness passed, but system
+load remained abnormal and the long megakernel TTFT reached `178.765 ms`.
+Outcome: rejected because the extra live `int8` increased register pressure and
+did not demonstrate a stable benefit.
+
+### Iteration 32: First Weight Tile SLM Preload
+
+Cooperatively staged the complete first K16 weight tile before waiting: 8 KiB
+for M16 and 16 KiB for M32. Worker SLM was increased from 16 KiB to 32 KiB.
+
+| Prompt tokens | Standard OpenVINO TTFT | SLM preload TTFT |
+|---:|---:|---:|
+| 19 | 11.926 ms | 25.107 ms |
+| 58 | 17.336 ms | 39.173 ms |
+| 281 | 43.073 ms | 84.446 ms |
+
+Outcome: rejected. Cooperative preload traffic and lower occupancy cost more
+than overlapping one K16 weight tile with the dependency wait.
+
+### Iteration 33: Per-Token Residual Synchronization
+
+Added a second optional completion counter to each prefill task. Copy and final
+residual tasks signal both their stage counter and a token-specific counter in
+one release barrier. Each next-layer RMS task waits only for the groups that
+produce its token, rather than the complete previous-layer residual matrix.
+
+Initial TTFT was `21.050 / 32.443 / 82.954 ms`. This design was retained.
+
+### Iteration 34: Per-Tile RMS-to-GEMM Synchronization
+
+RMS tasks additionally signaled one counter per 16-token M16 or 32-token M32
+tile. QKV and gate/up GEMM tasks waited only for their own RMS input tile.
+
+| Prompt tokens | Standard OpenVINO TTFT | Tile-sync TTFT |
+|---:|---:|---:|
+| 19 | 12.538 ms | 20.937 ms |
+| 58 | 16.579 ms | 32.660 ms |
+| 281 | 40.304 ms | 83.342 ms |
+
+Outcome: rejected. The additional RMS atomics did not offset medium/long task
+overhead. Iteration 33 was restored.
+
+Final retained-code run:
+
+| Prompt tokens | Standard OpenVINO TTFT | Final task prefill TTFT | Prefill speed |
+|---:|---:|---:|---:|
+| 19 | 12.267 ms | 20.920 ms | 0.59x |
+| 58 | 17.597 ms | 32.823 ms | 0.54x |
+| 281 | 38.406 ms | 79.905 ms | 0.48x |
+
+Compared with the final Iteration 29 task-only run (`21.366 / 32.898 / 80.508
+ms`), late waits plus per-token residual synchronization improved short and
+long TTFT slightly without changing numerical results. Dedicated decode speedup
+was 1.59x, argmax matched, cosine similarity was 1.0000, and generated outputs
+matched for all prompts.

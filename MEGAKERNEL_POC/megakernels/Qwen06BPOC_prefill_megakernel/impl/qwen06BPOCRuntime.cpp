@@ -1,5 +1,6 @@
 #include "qwen06BPOCRuntime.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -541,47 +542,87 @@ typedef struct PrefillCtx {
     __global half* norm; __global half* qb; __global half* kb; __global half* vb;
     __global half* xn; __global half* gate; __global half* up; __global half* proj;
     __global half* kc; __global half* vc;
+    __global int* sync;
     __global const long* positions;
     uint tokens; uint CS;
 } PrefillCtx;
 
-__attribute__((reqd_work_group_size(256, 1, 1)))
-__kernel void prefill_copy(__global const PrefillCtx* c) {
-    uint index = get_global_id(0), count = c->tokens * H;
+typedef struct PrefillTask {
+    __global const PrefillCtx* ctx;
+    int layer; int op; int group_x; int group_y;
+    int wait_index; int wait_count; int signal_index; int tile_signal_index;
+} PrefillTask;
+
+inline void prefill_task_wait(const PrefillTask task) {
+    if (task.wait_index >= 0)
+        WaitForSemaphore_block(0,
+                               (volatile __global atomic_int*)(task.ctx->sync + task.wait_index),
+                               task.wait_count);
+}
+
+inline void prefill_task_signal(const PrefillTask task) {
+    barrier(CLK_GLOBAL_MEM_FENCE);
+    if (get_sub_group_id() == 0 && get_sub_group_local_id() == 0) {
+        atomic_fetch_add_explicit((volatile __global atomic_int*)(task.ctx->sync + task.signal_index),
+                                  1,
+                                  memory_order_release,
+                                  memory_scope_device);
+        if (task.tile_signal_index >= 0)
+            atomic_fetch_add_explicit((volatile __global atomic_int*)(task.ctx->sync + task.tile_signal_index),
+                                      1,
+                                      memory_order_release,
+                                      memory_scope_device);
+    }
+}
+
+inline void prefill_copy_impl(__global const PrefillCtx* c, uint group_x) {
+    uint index = group_x * get_local_size(0) + get_local_id(0), count = c->tokens * H;
     if (index < count) c->h[index] = c->hs[index];
 }
 
-__attribute__((reqd_work_group_size(256, 1, 1)))
-__kernel void prefill_rms(__global const PrefillCtx* c, int layer, int post_attn) {
-    uint token = get_group_id(0), lid = get_local_id(0);
+inline void prefill_rms_impl(__global const PrefillCtx* c,
+                             int layer,
+                             int post_attn,
+                             uint token,
+                             __local float* sums,
+                             const PrefillTask task) {
+    uint lid = get_local_id(0), lane = get_sub_group_local_id(), subgroup = get_sub_group_id();
     __global const half* input = c->h + token * H;
     __global const half* weight = (post_attn ? c->pn : c->wn) + layer * H;
-    __local float sums[256];
+    prefill_task_wait(task);
     float sum = 0.0f;
-    for (uint index = lid; index < H; index += 256) {
+    for (uint index = lid; index < H; index += get_local_size(0)) {
         float value = convert_float(input[index]);
         sum = fma(value, value, sum);
     }
-    sums[lid] = sum;
+    sum = sub_group_reduce_add(sum);
+    if (lane == 0) sums[subgroup] = sum;
     barrier(CLK_LOCAL_MEM_FENCE);
-    for (uint stride = 128; stride; stride >>= 1) {
-        if (lid < stride) sums[lid] += sums[lid + stride];
-        barrier(CLK_LOCAL_MEM_FENCE);
+    if (subgroup == 0) {
+        sum = lane < get_num_sub_groups() ? sums[lane] : 0.0f;
+        if (lane + 16 < get_num_sub_groups()) sum += sums[lane + 16];
+        sum = sub_group_reduce_add(sum);
+        if (lane == 0) sums[0] = sum;
     }
+    barrier(CLK_LOCAL_MEM_FENCE);
     float scale = rsqrt(sums[0] / H + EPS);
-    for (uint index = lid; index < H; index += 256)
+    for (uint index = lid; index < H; index += get_local_size(0))
         c->norm[token * H + index] = convert_half(convert_float(input[index]) * scale * convert_float(weight[index]));
 }
 
 // Sixteen SIMD16 subgroups compute a 16-token x 256-output tile. A 128-wide K
 // panel is cooperatively staged in SLM, following oneDNN-style GEMM blocking.
 // op: 0=Q, 1=K, 2=V, 3=O, 4=gate, 5=up, 6=down, 7=QKV, 8=gate+up.
-__attribute__((reqd_work_group_size(256, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void prefill_gemm_m16(__global const PrefillCtx* c, int layer, int op) {
+inline void prefill_gemm_m16_impl(__global const PrefillCtx* c,
+                                  int layer,
+                                  int op,
+                                  uint group_x,
+                                  uint group_y,
+                                  __local half* input_panel,
+                                  const PrefillTask task) {
     uint lane = get_sub_group_local_id();
-    uint output_index = get_group_id(0) * 256 + get_sub_group_id() * 16 + lane;
-    uint token_base = get_group_id(1) * 16;
+    uint output_index = group_x * 256 + get_sub_group_id() * 16 + lane;
+    uint token_base = group_y * 16;
     uint input_dim, output_dim, output_stride;
     __global const half* input;
     __global const half* weight;
@@ -624,7 +665,7 @@ __kernel void prefill_gemm_m16(__global const PrefillCtx* c, int layer, int op) 
     }
     output_stride = output_dim;
     float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f);
-    __local half input_panel[16 * 128];
+    prefill_task_wait(task);
     for (uint k_base = 0; k_base < input_dim; k_base += 128) {
         for (uint index = get_local_id(0); index < 16 * 128; index += 256) {
             uint token = index >> 7, feature = index & 127;
@@ -650,9 +691,9 @@ __kernel void prefill_gemm_m16(__global const PrefillCtx* c, int layer, int op) 
                                  as_short(input_panel[13 * 128 + k + lane]),
                                  as_short(input_panel[14 * 128 + k + lane]),
                                  as_short(input_panel[15 * 128 + k + lane]));
-            int8 b = output_index < output_dim
-                         ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
-                         : (int8)(0);
+                     int8 b = output_index < output_dim
+                            ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
+                            : (int8)(0);
             acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
             acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
         }
@@ -804,12 +845,16 @@ __kernel void prefill_gemm_m24(__global const PrefillCtx* c, int layer, int op) 
 // The long-prompt specialization reuses each weight operand across 32 token
 // rows. Keeping it as a separate entry point avoids imposing four accumulators
 // on the M16 kernel's register allocation.
-__attribute__((reqd_work_group_size(512, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) {
+inline void prefill_gemm_m32_impl(__global const PrefillCtx* c,
+                                  int layer,
+                                  int op,
+                                  uint group_x,
+                                  uint group_y,
+                                  __local half* input_panel,
+                                  const PrefillTask task) {
     uint lane = get_sub_group_local_id();
-    uint output_index = get_group_id(0) * 512 + get_sub_group_id() * 16 + lane;
-    uint token_base = get_group_id(1) * 32;
+    uint output_index = group_x * 512 + get_sub_group_id() * 16 + lane;
+    uint token_base = group_y * 32;
     uint input_dim, output_dim, output_stride;
     __global const half* input;
     __global const half* weight;
@@ -853,7 +898,7 @@ __kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) 
     output_stride = output_dim;
     float8 acc0 = (float8)(0.0f), acc1 = (float8)(0.0f);
     float8 acc2 = (float8)(0.0f), acc3 = (float8)(0.0f);
-    __local half input_panel[32 * 128];
+    prefill_task_wait(task);
     for (uint k_base = 0; k_base < input_dim; k_base += 128) {
         for (uint index = get_local_id(0); index < 32 * 128; index += 512) {
             uint token = index >> 7, feature = index & 127;
@@ -895,9 +940,9 @@ __kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) 
                                  as_short(input_panel[29 * 128 + k + lane]),
                                  as_short(input_panel[30 * 128 + k + lane]),
                                  as_short(input_panel[31 * 128 + k + lane]));
-            int8 b = output_index < output_dim
-                         ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
-                         : (int8)(0);
+                     int8 b = output_index < output_dim
+                            ? as_int8(vload16(0, weight + (ulong)output_index * input_dim + k_base + k))
+                            : (int8)(0);
             acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, b, acc0);
             acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, b, acc1);
             acc2 = intel_sub_group_f16_f16_matrix_mad_k16(a2, b, acc2);
@@ -941,12 +986,17 @@ __kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) 
     }
 }
 
-__attribute__((reqd_work_group_size(16, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
-    uint lane = get_sub_group_local_id(), head = get_group_id(0), token = get_group_id(1);
-    int pos = (int)c->positions[token];
-    if (head < NH) {
+inline void prefill_rope_cache_impl(__global const PrefillCtx* c,
+                                    int layer,
+                                    uint group_x,
+                                    const PrefillTask task) {
+    uint lane = get_sub_group_local_id();
+    uint linear = group_x * get_num_sub_groups() + get_sub_group_id();
+    prefill_task_wait(task);
+    if (linear < c->tokens * (NH + KVH)) {
+        uint head = linear % (NH + KVH), token = linear / (NH + KVH);
+        int pos = (int)c->positions[token];
+        if (head < NH) {
         __global half* query = c->qb + token * QDIM + head * HD;
         float values[8], sum = 0.0f;
         for (uint j = 0; j < 8; ++j) { values[j] = convert_float(query[lane + j * 16]); sum = fma(values[j], values[j], sum); }
@@ -959,7 +1009,7 @@ __kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
             query[dim] = convert_half(lo * cs - hi * sn);
             query[dim + HHD] = convert_half(hi * cs + lo * sn);
         }
-    } else {
+        } else {
         uint kv_head = head - NH;
         __global half* key = c->kb + token * KVDIM + kv_head * HD;
         __global half* value = c->vb + token * KVDIM + kv_head * HD;
@@ -977,53 +1027,130 @@ __kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
             c->vc[cache_base + dim] = value[dim];
             c->vc[cache_base + dim + HHD] = value[dim + HHD];
         }
+        }
     }
 }
 
-__attribute__((reqd_work_group_size(16, 1, 1)))
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void prefill_attention(__global const PrefillCtx* c, int layer) {
-    uint lane = get_sub_group_local_id(), query_head = get_group_id(0), token = get_group_id(1);
-    uint kv_head = query_head / GQA;
-    int pos = (int)c->positions[token];
-    __global const half* query = c->qb + token * QDIM + query_head * HD;
-    ulong cache_base = ((ulong)layer * KVH + kv_head) * (ulong)c->CS * HD;
-    float q[8], acc[8];
-    for (uint j = 0; j < 8; ++j) { q[j] = convert_float(query[lane + j * 16]); acc[j] = 0.0f; }
-    float maximum = -INFINITY, denominator = 0.0f;
-    for (int sequence = 0; sequence <= pos; ++sequence) {
-        float dot_product = 0.0f;
-        for (uint j = 0; j < 8; ++j)
-            dot_product = fma(q[j], convert_float(c->kc[cache_base + (ulong)sequence * HD + lane + j * 16]), dot_product);
-        float score = sub_group_reduce_add(dot_product) * rsqrt((float)HD);
-        float new_maximum = fmax(maximum, score);
-        float correction = native_exp(maximum - new_maximum), probability = native_exp(score - new_maximum);
-        denominator = denominator * correction + probability;
-        for (uint j = 0; j < 8; ++j) {
-            float value = convert_float(c->vc[cache_base + (ulong)sequence * HD + lane + j * 16]);
-            acc[j] = acc[j] * correction + probability * value;
+inline void prefill_attention_impl(__global const PrefillCtx* c,
+                                   int layer,
+                                   uint group_x,
+                                   const PrefillTask task) {
+    uint lane = get_sub_group_local_id();
+    uint linear = group_x * get_num_sub_groups() + get_sub_group_id();
+    prefill_task_wait(task);
+    if (linear < c->tokens * NH) {
+        uint query_head = linear % NH, token = linear / NH;
+        uint kv_head = query_head / GQA;
+        int pos = (int)c->positions[token];
+        __global const half* query = c->qb + token * QDIM + query_head * HD;
+        ulong cache_base = ((ulong)layer * KVH + kv_head) * (ulong)c->CS * HD;
+        float q[8], acc[8];
+        for (uint j = 0; j < 8; ++j) { q[j] = convert_float(query[lane + j * 16]); acc[j] = 0.0f; }
+        float maximum = -INFINITY, denominator = 0.0f;
+        for (int sequence = 0; sequence <= pos; ++sequence) {
+            float dot_product = 0.0f;
+            for (uint j = 0; j < 8; ++j)
+                dot_product = fma(q[j], convert_float(c->kc[cache_base + (ulong)sequence * HD + lane + j * 16]), dot_product);
+            float score = sub_group_reduce_add(dot_product) * rsqrt((float)HD);
+            float new_maximum = fmax(maximum, score);
+            float correction = native_exp(maximum - new_maximum), probability = native_exp(score - new_maximum);
+            denominator = denominator * correction + probability;
+            for (uint j = 0; j < 8; ++j) {
+                float value = convert_float(c->vc[cache_base + (ulong)sequence * HD + lane + j * 16]);
+                acc[j] = acc[j] * correction + probability * value;
+            }
+            maximum = new_maximum;
         }
-        maximum = new_maximum;
+        for (uint j = 0; j < 8; ++j) {
+            c->xn[token * QDIM + query_head * HD + lane + j * 16] = convert_half(acc[j] / denominator);
+        }
     }
-    for (uint j = 0; j < 8; ++j)
-        c->xn[token * QDIM + query_head * HD + lane + j * 16] = convert_half(acc[j] / denominator);
 }
 
 // op: 0=attention residual, 1=SiLU(gate)*up, 2=MLP residual/final output.
-__attribute__((reqd_work_group_size(256, 1, 1)))
-__kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int op) {
-    uint index = get_global_id(0), width = op == 1 ? IM : H, count = c->tokens * width;
-    if (index >= count) return;
-    if (op == 0) {
-        c->h[index] = convert_half(convert_float(c->h[index]) + convert_float(c->proj[index]));
-    } else if (op == 1) {
-        float gate = convert_float(c->gate[index]);
-        c->gate[index] = convert_half(gate / (1.0f + native_exp(-gate)) * convert_float(c->up[index]));
-    } else {
-        float value = convert_float(c->h[index]) + convert_float(c->proj[index]);
-        c->h[index] = convert_half(value);
-        if (layer == NUM_L - 1) c->out[index] = value;
+inline void prefill_elementwise_impl(__global const PrefillCtx* c,
+                                     int layer,
+                                     int op,
+                                     uint group_x,
+                                     const PrefillTask task) {
+    uint index = group_x * get_local_size(0) + get_local_id(0);
+    uint width = op == 1 ? IM : H, count = c->tokens * width;
+    prefill_task_wait(task);
+    if (index < count) {
+        if (op == 0) {
+            c->h[index] = convert_half(convert_float(c->h[index]) + convert_float(c->proj[index]));
+        } else if (op == 1) {
+            float gate = convert_float(c->gate[index]);
+            c->gate[index] = convert_half(gate / (1.0f + native_exp(-gate)) * convert_float(c->up[index]));
+        } else {
+            float value = convert_float(c->h[index]) + convert_float(c->proj[index]);
+            c->h[index] = convert_half(value);
+            if (layer == NUM_L - 1) c->out[index] = value;
+        }
     }
+}
+
+
+inline void ExecutePrefillTaskM16(TaskDesc task_desc, __local char* slm) {
+    const PrefillTask task = *(const PrefillTask*)task_desc.payload;
+    switch (task_desc.type) {
+        case 0: prefill_copy_impl(task.ctx, task.group_x); break;
+        case 1: prefill_rms_impl(task.ctx, task.layer, task.op, task.group_x, (__local float*)slm, task); break;
+        case 2: prefill_gemm_m16_impl(task.ctx,
+                          task.layer,
+                          task.op,
+                          task.group_x,
+                          task.group_y,
+                          (__local half*)slm,
+                          task); break;
+        case 3: prefill_rope_cache_impl(task.ctx, task.layer, task.group_x, task); break;
+        case 4: prefill_attention_impl(task.ctx, task.layer, task.group_x, task); break;
+        case 5: prefill_elementwise_impl(task.ctx, task.layer, task.op, task.group_x, task); break;
+        default: break;
+    }
+    prefill_task_signal(task);
+}
+
+#define WorkerMainLoop_block_EXEC_FUN ExecutePrefillTaskM16
+#define WorkerMainLoop_block_SUFFIX _prefill_m16
+#include "taskSystem/device/workerMainLoop_template.hcl"
+
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_task_m16(__constant const TaskManager* taskManager) {
+    __local char slm[16*1024];
+    WorkerMainLoop_block_prefill_m16(taskManager, slm);
+}
+
+inline void ExecutePrefillTaskM32(TaskDesc task_desc, __local char* slm) {
+    const PrefillTask task = *(const PrefillTask*)task_desc.payload;
+    switch (task_desc.type) {
+        case 0: prefill_copy_impl(task.ctx, task.group_x); break;
+        case 1: prefill_rms_impl(task.ctx, task.layer, task.op, task.group_x, (__local float*)slm, task); break;
+        case 2: prefill_gemm_m32_impl(task.ctx,
+                          task.layer,
+                          task.op,
+                          task.group_x,
+                          task.group_y,
+                          (__local half*)slm,
+                          task); break;
+        case 3: prefill_rope_cache_impl(task.ctx, task.layer, task.group_x, task); break;
+        case 4: prefill_attention_impl(task.ctx, task.layer, task.group_x, task); break;
+        case 5: prefill_elementwise_impl(task.ctx, task.layer, task.op, task.group_x, task); break;
+        default: break;
+    }
+    prefill_task_signal(task);
+}
+
+#define WorkerMainLoop_block_EXEC_FUN ExecutePrefillTaskM32
+#define WorkerMainLoop_block_SUFFIX _prefill_m32
+#include "taskSystem/device/workerMainLoop_template.hcl"
+
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void prefill_task_m32(__constant const TaskManager* taskManager) {
+    __local char slm[16*1024];
+    WorkerMainLoop_block_prefill_m32(taskManager, slm);
 }
 )CL";
 
@@ -1069,17 +1196,30 @@ struct PrefillCtxH {
     void* qn = nullptr; void* kn = nullptr; void* rf = nullptr;
     void* norm = nullptr; void* qb = nullptr; void* kb = nullptr; void* vb = nullptr;
     void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
-    void* kc = nullptr; void* vc = nullptr; void* positions = nullptr;
+    void* kc = nullptr; void* vc = nullptr; void* sync = nullptr; void* positions = nullptr;
     unsigned tokens = 0; unsigned CS = 0;
 };
 
+struct PrefillTaskH {
+    void* ctx = nullptr;
+    int layer = 0; int op = 0; int group_x = 0; int group_y = 0;
+    int wait_index = -1; int wait_count = 0; int signal_index = 0; int tile_signal_index = -1;
+};
+
+struct PrefillQueueState {
+    TaskManager manager{};
+    cl_mem descriptor = nullptr;
+    void* sync = nullptr;
+    bool use_m32 = false;
+};
+
 struct PrefillState {
-    cl_kernel copy = nullptr, rms = nullptr, gemm_m16 = nullptr, gemm_m32 = nullptr, rope = nullptr;
-    cl_kernel attention = nullptr, elementwise = nullptr;
+    cl_kernel task_m16 = nullptr, task_m32 = nullptr;
     clSetKernelArgMemPointerINTEL_fn set_usm_arg = nullptr;
     void* context = nullptr; void* norm = nullptr; void* qb = nullptr; void* kb = nullptr;
     void* vb = nullptr; void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
     PrefillCtxH host_context{};
+    std::unordered_map<unsigned, PrefillQueueState> queues;
 };
 
 static std::unordered_map<const Qwen06BPOCRuntime*, PrefillState> gPrefillStates;
@@ -1170,13 +1310,8 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
         assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(", name, "): ", err);
         return kernel;
     };
-    prefill.copy = create_prefill_kernel("prefill_copy");
-    prefill.rms = create_prefill_kernel("prefill_rms");
-    prefill.gemm_m16 = create_prefill_kernel("prefill_gemm_m16");
-    prefill.gemm_m32 = create_prefill_kernel("prefill_gemm_m32");
-    prefill.rope = create_prefill_kernel("prefill_rope_cache");
-    prefill.attention = create_prefill_kernel("prefill_attention");
-    prefill.elementwise = create_prefill_kernel("prefill_elementwise");
+    prefill.task_m16 = create_prefill_kernel("prefill_task_m16");
+    prefill.task_m32 = create_prefill_kernel("prefill_task_m32");
     prefill.set_usm_arg = reinterpret_cast<clSetKernelArgMemPointerINTEL_fn>(
         clGetExtensionFunctionAddressForPlatform(platform, "clSetKernelArgMemPointerINTEL"));
     assert_or_throw(prefill.set_usm_arg, "[MegaKernel] clSetKernelArgMemPointerINTEL unavailable");
@@ -1189,10 +1324,7 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     prefill.gate = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
     prefill.up = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
     prefill.proj = ualloc((size_t)MAX_SEQ * H_DIM * 2);
-    for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
-                             prefill.attention, prefill.elementwise}) {
-        assert_or_throw(prefill.set_usm_arg(kernel, 0, prefill.context) == CL_SUCCESS,
-                        "[MegaKernel] set prefill context argument failed");
+    for (cl_kernel kernel : {prefill.task_m16, prefill.task_m32}) {
         cl_bool enable = CL_TRUE;
         clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL, sizeof(enable), &enable);
         clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL, sizeof(enable), &enable);
@@ -1329,69 +1461,159 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         prefill.host_context.out = io->hidden_states_out;
         prefill.host_context.positions = io->position_ids;
         prefill.host_context.tokens = newTokens;
+
+        auto queue_it = prefill.queues.find(newTokens);
+        if (queue_it == prefill.queues.end()) {
+            cl_int queue_error = CL_SUCCESS;
+            PrefillQueueState queue_state;
+            queue_state.use_m32 = newTokens > 64;
+            const int local_size = queue_state.use_m32 ? 512 : 256;
+            const int subgroup_count = local_size / 16;
+            const int token_tile = queue_state.use_m32 ? 32 : 16;
+            const int output_tile = queue_state.use_m32 ? 512 : 256;
+            std::vector<TaskDesc> tasks;
+            int previous_index = -1, previous_count = 0, signal_index = 0;
+            auto append_stage = [&](int type,
+                                    int layer,
+                                    int op,
+                                    int groups_x,
+                                    int groups_y,
+                                    int tile_wait_base = -1,
+                                    int tile_wait_count = 0,
+                                    int tile_signal_base = -1,
+                                    int signal_groups_per_token = 0) {
+                const int task_count = groups_x * groups_y;
+                for (int group_y = 0; group_y < groups_y; ++group_y) {
+                    for (int group_x = 0; group_x < groups_x; ++group_x) {
+                        TaskDesc descriptor{};
+                        descriptor.type = type;
+                        PrefillTaskH task;
+                        task.ctx = prefill.context;
+                        task.layer = layer;
+                        task.op = op;
+                        task.group_x = group_x;
+                        task.group_y = group_y;
+                           task.wait_index = tile_wait_base >= 0 ? tile_wait_base + group_x : previous_index;
+                           task.wait_count = tile_wait_base >= 0 ? tile_wait_count : previous_count;
+                        task.signal_index = signal_index;
+                        task.tile_signal_index = tile_signal_base >= 0
+                                                     ? tile_signal_base + group_x / signal_groups_per_token
+                                                     : -1;
+                        static_assert(sizeof(PrefillTaskH) <= sizeof(descriptor.payload),
+                                      "PrefillTask exceeds payload");
+                        std::memcpy(descriptor.payload, &task, sizeof(task));
+                        tasks.push_back(descriptor);
+                    }
+                }
+                previous_index = signal_index++;
+                previous_count = task_count;
+            };
+            auto divide_up = [](int value, int divisor) { return (value + divisor - 1) / divisor; };
+
+            const int residual_groups_per_token = H_DIM / local_size;
+            int residual_tile_base = signal_index;
+            signal_index += newTokens;
+            append_stage(0,
+                         0,
+                         0,
+                         divide_up(newTokens * H_DIM, local_size),
+                         1,
+                         -1,
+                         0,
+                         residual_tile_base,
+                         residual_groups_per_token);
+            for (int layer = 0; layer < NUM_L; ++layer) {
+                append_stage(1,
+                             layer,
+                             0,
+                             newTokens,
+                             1,
+                             residual_tile_base,
+                             residual_groups_per_token);
+                append_stage(2,
+                             layer,
+                             7,
+                             divide_up(QDIM + 2 * KVDIM, output_tile),
+                             divide_up(newTokens, token_tile));
+                append_stage(3, layer, 0, divide_up(newTokens * (NH + KVH), subgroup_count), 1);
+                append_stage(4, layer, 0, divide_up(newTokens * NH, subgroup_count), 1);
+                append_stage(2,
+                             layer,
+                             3,
+                             divide_up(H_DIM, output_tile),
+                             divide_up(newTokens, token_tile));
+                append_stage(5, layer, 0, divide_up(newTokens * H_DIM, local_size), 1);
+                append_stage(1, layer, 1, newTokens, 1);
+                append_stage(2,
+                             layer,
+                             8,
+                             divide_up(2 * IM_DIM, output_tile),
+                             divide_up(newTokens, token_tile));
+                append_stage(5, layer, 1, divide_up(newTokens * IM_DIM, local_size), 1);
+                append_stage(2,
+                             layer,
+                             6,
+                             divide_up(H_DIM, output_tile),
+                             divide_up(newTokens, token_tile));
+                residual_tile_base = signal_index;
+                signal_index += newTokens;
+                append_stage(5,
+                             layer,
+                             2,
+                             divide_up(newTokens * H_DIM, local_size),
+                             1,
+                             -1,
+                             0,
+                             residual_tile_base,
+                             residual_groups_per_token);
+            }
+
+            queue_state.sync = usmAlloc_(ctx_, dev_, nullptr, signal_index * sizeof(int), 0, &queue_error);
+            assert_or_throw(queue_error == CL_SUCCESS && queue_state.sync,
+                            "[MegaKernel] prefill task sync allocation failed: ", queue_error);
+            std::vector<int> zero_sync(signal_index, 0);
+            assert_or_throw(usmMemcpy_(stream_,
+                                       CL_TRUE,
+                                       queue_state.sync,
+                                       zero_sync.data(),
+                                       zero_sync.size() * sizeof(int),
+                                       0,
+                                       nullptr,
+                                       nullptr) == CL_SUCCESS,
+                            "[MegaKernel] prefill task sync initialization failed");
+            queue_error = HostInitalizeTaskSystem(queue_state.manager,
+                                                  tasks,
+                                                  static_cast<int*>(queue_state.sync),
+                                                  signal_index,
+                                                  dev_,
+                                                  ctx_,
+                                                  stream_);
+            assert_or_throw(queue_error == CL_SUCCESS,
+                            "[MegaKernel] prefill task-system initialization failed: ", queue_error);
+            queue_state.descriptor = clCreateBuffer(ctx_,
+                                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                    sizeof(queue_state.manager),
+                                                    &queue_state.manager,
+                                                    &queue_error);
+            assert_or_throw(queue_error == CL_SUCCESS,
+                            "[MegaKernel] prefill task-manager descriptor creation failed: ", queue_error);
+            queue_it = prefill.queues.emplace(newTokens, std::move(queue_state)).first;
+        }
+
+        PrefillQueueState& queue_state = queue_it->second;
+        prefill.host_context.sync = queue_state.sync;
         assert_or_throw(usmMemcpy_(stream_, CL_TRUE, prefill.context, &prefill.host_context,
                                   sizeof(prefill.host_context), 0, nullptr, nullptr) == CL_SUCCESS,
                         "[MegaKernel] prefill context update failed");
-
-        auto set_int_arg = [](cl_kernel kernel, cl_uint index, int value) {
-            assert_or_throw(clSetKernelArg(kernel, index, sizeof(value), &value) == CL_SUCCESS,
-                            "[MegaKernel] set prefill scalar argument failed");
-        };
-        int dispatch_index = 0;
-        const bool sync_prefill = std::getenv("OV_MEGAKERNEL_PREFILL_SYNC") != nullptr;
-        auto enqueue_1d = [&](cl_kernel kernel, size_t count, size_t local) {
-            size_t global = (count + local - 1) / local * local;
-            cl_int status = clEnqueueNDRangeKernel(stream_, kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr);
-            assert_or_throw(status == CL_SUCCESS, "[MegaKernel] enqueue prefill kernel: ", status);
-            ++dispatch_index;
-            if (sync_prefill)
-                assert_or_throw(clFinish(stream_) == CL_SUCCESS, "[MegaKernel] prefill dispatch failed: ", dispatch_index);
-        };
-        auto enqueue_2d = [&](cl_kernel kernel, size_t groups_x, size_t groups_y, size_t local_x) {
-            size_t global[2] = {groups_x * local_x, groups_y};
-            size_t local[2] = {local_x, 1};
-            cl_int status = clEnqueueNDRangeKernel(stream_, kernel, 2, nullptr, global, local, 0, nullptr, nullptr);
-            assert_or_throw(status == CL_SUCCESS, "[MegaKernel] enqueue prefill kernel: ", status);
-            ++dispatch_index;
-            if (sync_prefill)
-                assert_or_throw(clFinish(stream_) == CL_SUCCESS, "[MegaKernel] prefill dispatch failed: ", dispatch_index);
-        };
-        auto gemm = [&](int layer, int op, int output_dim) {
-            const bool use_m32 = newTokens > 64;
-            cl_kernel kernel = use_m32 ? prefill.gemm_m32 : prefill.gemm_m16;
-            const size_t token_tile = use_m32 ? 32 : 16;
-            const size_t output_tile = use_m32 ? 512 : 256;
-            set_int_arg(kernel, 1, layer);
-            set_int_arg(kernel, 2, op);
-            enqueue_2d(kernel,
-                       (output_dim + output_tile - 1) / output_tile,
-                       (newTokens + token_tile - 1) / token_tile,
-                       output_tile);
-        };
-
-        enqueue_1d(prefill.copy, (size_t)newTokens * H_DIM, 256);
-        for (int layer = 0; layer < NUM_L; ++layer) {
-            set_int_arg(prefill.rms, 1, layer);
-            set_int_arg(prefill.rms, 2, 0);
-            enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
-            gemm(layer, 7, QDIM + 2 * KVDIM);
-            set_int_arg(prefill.rope, 1, layer);
-            enqueue_2d(prefill.rope, NH + KVH, newTokens, 16);
-            set_int_arg(prefill.attention, 1, layer);
-            enqueue_2d(prefill.attention, NH, newTokens, 16);
-            gemm(layer, 3, H_DIM);
-            set_int_arg(prefill.elementwise, 1, layer);
-            set_int_arg(prefill.elementwise, 2, 0);
-            enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
-            set_int_arg(prefill.rms, 2, 1);
-            enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
-            gemm(layer, 8, 2 * IM_DIM);
-            set_int_arg(prefill.elementwise, 2, 1);
-            enqueue_1d(prefill.elementwise, (size_t)newTokens * IM_DIM, 256);
-            gemm(layer, 6, H_DIM);
-            set_int_arg(prefill.elementwise, 2, 2);
-            enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
-        }
+        cl_kernel task_kernel = queue_state.use_m32 ? prefill.task_m32 : prefill.task_m16;
+        assert_or_throw(clSetKernelArg(task_kernel, 0, sizeof(cl_mem), &queue_state.descriptor) == CL_SUCCESS,
+                        "[MegaKernel] set prefill task manager failed");
+        const size_t local = queue_state.use_m32 ? 512 : 256;
+        const size_t worker_count = std::min<size_t>(160, queue_state.manager.workQueueSize);
+        const size_t global = worker_count * local;
+        assert_or_throw(clEnqueueNDRangeKernel(stream_, task_kernel, 1, nullptr, &global, &local, 0, nullptr, nullptr) ==
+                            CL_SUCCESS,
+                        "[MegaKernel] enqueue prefill task workers failed");
         return 0;
     }
 
@@ -1417,8 +1639,16 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
     auto state_it = gPrefillStates.find(this);
     if (state_it != gPrefillStates.end()) {
         PrefillState& prefill = state_it->second;
-        for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
-                                 prefill.attention, prefill.elementwise}) {
+        for (auto& queue_entry : prefill.queues) {
+            PrefillQueueState& queue = queue_entry.second;
+            if (queue.manager.workQueue || queue.manager.processedTaskCount)
+                HostReleaseTaskSystem(queue.manager, dev_, ctx_);
+            if (queue.descriptor)
+                clReleaseMemObject(queue.descriptor);
+            if (queue.sync && ctx_ && usmFree_)
+                usmFree_(ctx_, queue.sync);
+        }
+        for (cl_kernel kernel : {prefill.task_m16, prefill.task_m32}) {
             if (kernel)
                 clReleaseKernel(kernel);
         }
