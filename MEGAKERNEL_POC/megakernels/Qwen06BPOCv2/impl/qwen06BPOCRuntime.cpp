@@ -1157,6 +1157,9 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     // avoiding M32 register pressure on short prompts. Iterations 15-18 rejected
     // M24, K256, and N384; N512 improved the long M32 path. The retained dispatch
     // is M16/N256/K128 through 64 tokens and M32/N512/K128 above 64 tokens.
+    // Iterations 19-23 rejected subgroup RMS reduction, N768/N1024, K64, and
+    // a 32-token M32 threshold; these confirmed GEMM weight traffic as the
+    // remaining bottleneck rather than reduction, SLM capacity, or barriers.
     PrefillState prefill;
     auto create_prefill_kernel = [&](const char* name) {
         cl_kernel kernel = clCreateKernel(prog_, name, &err);
