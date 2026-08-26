@@ -321,17 +321,77 @@ Lowered the specialized M32/N512/K64 dispatch threshold from 64 to 32 tokens so 
 
 Outcome: reverted. M32's four-accumulator register pressure and coarse token grid regress the medium prompt, validating the 64-token crossover.
 
+## Iteration 24: Packed Down-Projection Weights
+
+Allocated 168 MiB for a duplicate of all 28 down-projection matrices and repacked them synchronously in `Init()`. The layout was `[N/16][K/16][N lane][K lane]`, placing a subgroup's sixteen 16-half row vectors in one 512-byte tile. Decode retained the original weights; only prefill `op == 6` used the packed copy.
+
+| Prompt tokens | Row-major baseline | Packed down |
+|---:|---:|---:|
+| 19 | 13.733 ms | 16.357 ms |
+| 58 | 21.004 ms | 24.462 ms |
+| 281 | 63.615 ms | 63.377 ms |
+
+Outcome: reverted. Short and medium TTFT regressed substantially, and the long generated output diverged despite the dedicated decode argmax match and cosine 1.0000.
+
+## Iteration 25: Packed Gate/Up Weights
+
+Restored down projection and isolated the same Init-time layout on gate and up weights. This required 336 MiB of duplicate storage and redirected only fused prefill `op == 8`.
+
+| Prompt tokens | Row-major baseline | Packed gate/up |
+|---:|---:|---:|
+| 19 | 13.733 ms | 14.986 ms |
+| 58 | 21.004 ms | 23.478 ms |
+| 281 | 63.615 ms | 63.873 ms |
+
+Outcome: reverted. All prompt sizes were neutral or slower, and the long generated output diverged.
+
+## Iteration 26: Packed QKV Weights
+
+Restored gate/up and packed Q, K, and V separately during `Init()`, requiring about 224 MiB. The fused QKV dispatch remapped its output index before using the packed address.
+
+| Prompt tokens | Row-major baseline | Packed QKV |
+|---:|---:|---:|
+| 19 | 13.733 ms | 14.896 ms |
+| 58 | 21.004 ms | 21.961 ms |
+| 281 | 63.615 ms | 64.063 ms |
+
+Outcome: reverted. Packing regressed every prompt and the long generated output diverged.
+
+## Iteration 27: Packed Output-Projection Weights
+
+Restored QKV and isolated the row-interleaved packed layout on output-projection weights, adding about 112 MiB during `Init()`.
+
+| Prompt tokens | Row-major baseline | Packed output |
+|---:|---:|---:|
+| 19 | 13.733 ms | 15.905 ms |
+| 58 | 21.004 ms | 23.315 ms |
+| 281 | 63.615 ms | 63.127 ms |
+
+Outcome: reverted. The small long-prompt difference did not offset severe short/medium regressions or long-output divergence. Results across four projection families show that merely interleaving row vectors does not improve B60's weight loads.
+
+## Iteration 28: K-Major Tiles and Subgroup Block Reads
+
+Changed the output-projection packed tile to `[N/16][K/16][K lane][N lane]`. Two `intel_sub_group_block_read_us8` operations loaded each subgroup's 16x16 weight operand from a contiguous 512-byte tile, replacing sixteen adjacent per-lane `vload16` operations. Packing and allocation still occurred only in `Init()`.
+
+| Prompt tokens | Row-major baseline | Transposed tile/block read |
+|---:|---:|---:|
+| 19 | 13.733 ms | 13.988 ms |
+| 58 | 21.004 ms | 21.713 ms |
+| 281 | 63.615 ms | 63.547 ms |
+
+Outcome: reverted. Subgroup block reads recovered most of the row-interleaved regression but did not beat the original layout, and the long generated output still diverged. All duplicate allocations and packing kernels were removed.
+
 ## Final Correctness and Decode Check
 
-Iterations 19-23 completed the full build and benchmark workflow. Rejected variants were restored before the final run.
+Iterations 24-28 completed the full build and benchmark workflow. Rejected variants were restored before the final run.
 
 Final retained-code run:
 
 | Prompt tokens | Standard OpenVINO TTFT | Final megakernel TTFT | Prefill speed |
 |---:|---:|---:|---:|
-| 19 | 11.788 ms | 13.733 ms | 0.86x |
-| 58 | 16.951 ms | 21.004 ms | 0.81x |
-| 281 | 39.847 ms | 63.615 ms | 0.63x |
+| 19 | 13.542 ms | 13.615 ms | 0.99x |
+| 58 | 16.979 ms | 21.517 ms | 0.79x |
+| 281 | 39.297 ms | 62.702 ms | 0.63x |
 
 - Decode speedup remained approximately 1.5x across the runs.
 - Final dedicated decode-only speedup: 1.50x.
@@ -343,4 +403,4 @@ Final retained-code run:
 
 ## Remaining Bottleneck
 
-The retained prompt-size dispatch uses M16/N256/K128 through 64 tokens and M32/N512/K128 above 64. N768 and N1024 proved that further activation reuse loses too much grid parallelism, while K64/K256 showed that K128 is the panel-size balance. RMSNorm and attention changes were neutral or negative. Dense projection weight traffic remains dominant; a blocked or transposed persistent weight layout is now the strongest remaining candidate if its roughly 1.2 GB duplicate storage and one-time repacking cost are acceptable outside the timed path.
+The retained prompt-size dispatch uses M16/N256/K128 through 64 tokens and M32/N512/K128 above 64. N768 and N1024 proved that further activation reuse loses too much grid parallelism, while K64/K256 showed that K128 is the panel-size balance. Init-time packing of every major projection family was slower, and even a K-major 16x16 layout with subgroup block reads did not beat row-major `vload16`. The original row-major tensors therefore already provide the best tested B60 weight path without hundreds of MiB of duplicate storage. Further progress requires stage-level device profiling or a different GEMM decomposition rather than another local layout permutation.

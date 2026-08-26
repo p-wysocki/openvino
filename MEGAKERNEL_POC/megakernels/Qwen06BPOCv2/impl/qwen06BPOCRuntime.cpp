@@ -1160,6 +1160,10 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     // Iterations 19-23 rejected subgroup RMS reduction, N768/N1024, K64, and
     // a 32-token M32 threshold; these confirmed GEMM weight traffic as the
     // remaining bottleneck rather than reduction, SLM capacity, or barriers.
+    // Iterations 24-28 repacked down, gate/up, QKV, and output weights in Init,
+    // then tested transposed 16x16 tiles with subgroup block reads. All variants
+    // were slower or neutral and failed long generated-output parity, so the
+    // original row-major prefill weights remain retained without duplication.
     PrefillState prefill;
     auto create_prefill_kernel = [&](const char* name) {
         cl_kernel kernel = clCreateKernel(prog_, name, &err);
