@@ -1,7 +1,12 @@
 #include "qwen06BPOCRuntime.h"
 
+#include <oneapi/dnnl/dnnl.hpp>
+#include <oneapi/dnnl/dnnl_ocl.hpp>
+
+#include <array>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1073,6 +1078,23 @@ struct PrefillCtxH {
     unsigned tokens = 0; unsigned CS = 0;
 };
 
+enum DnnlGemmShape { DNNL_Q, DNNL_KV, DNNL_O, DNNL_MLP, DNNL_DOWN, DNNL_GEMM_SHAPES };
+
+struct DnnlGemmCall {
+    dnnl::memory src;
+    dnnl::memory weights;
+    dnnl::memory dst;
+    std::unordered_map<int, dnnl::memory> arguments;
+};
+
+struct DnnlPrefillPlan {
+    std::array<dnnl::matmul, DNNL_GEMM_SHAPES> primitives;
+    std::array<dnnl::memory::desc, DNNL_GEMM_SHAPES> src_descs;
+    std::array<dnnl::memory::desc, DNNL_GEMM_SHAPES> weights_descs;
+    std::array<dnnl::memory::desc, DNNL_GEMM_SHAPES> dst_descs;
+    std::vector<DnnlGemmCall> calls;
+};
+
 struct PrefillState {
     cl_kernel copy = nullptr, rms = nullptr, gemm_m16 = nullptr, gemm_m32 = nullptr, rope = nullptr;
     cl_kernel attention = nullptr, elementwise = nullptr;
@@ -1080,6 +1102,9 @@ struct PrefillState {
     void* context = nullptr; void* norm = nullptr; void* qb = nullptr; void* kb = nullptr;
     void* vb = nullptr; void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
     PrefillCtxH host_context{};
+    std::unique_ptr<dnnl::engine> dnnl_engine;
+    std::unique_ptr<dnnl::stream> dnnl_stream;
+    std::unordered_map<unsigned, std::unique_ptr<DnnlPrefillPlan>> dnnl_plans;
 };
 
 static std::unordered_map<const Qwen06BPOCRuntime*, PrefillState> gPrefillStates;
@@ -1189,6 +1214,9 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     prefill.gate = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
     prefill.up = ualloc((size_t)MAX_SEQ * IM_DIM * 2);
     prefill.proj = ualloc((size_t)MAX_SEQ * H_DIM * 2);
+    prefill.dnnl_engine = std::make_unique<dnnl::engine>(dnnl::ocl_interop::make_engine(dev_, ctx_));
+    prefill.dnnl_stream =
+        std::make_unique<dnnl::stream>(dnnl::ocl_interop::make_stream(*prefill.dnnl_engine, stream_));
     for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
                              prefill.attention, prefill.elementwise}) {
         assert_or_throw(prefill.set_usm_arg(kernel, 0, prefill.context) == CL_SUCCESS,
@@ -1369,26 +1397,101 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
                        output_tile);
         };
 
+        const bool use_dnnl = std::getenv("OV_MEGAKERNEL_PREFILL_ONEDNN") == nullptr ||
+                              std::strcmp(std::getenv("OV_MEGAKERNEL_PREFILL_ONEDNN"), "0") != 0;
+        DnnlPrefillPlan* dnnl_plan = nullptr;
+        if (use_dnnl) {
+            auto plan_it = prefill.dnnl_plans.find(newTokens);
+            if (plan_it == prefill.dnnl_plans.end()) {
+                auto plan = std::make_unique<DnnlPrefillPlan>();
+                dnnl::primitive_attr attr;
+                auto create_shape = [&](DnnlGemmShape shape, int input_dim, int output_dim) {
+                    plan->src_descs[shape] = dnnl::memory::desc(
+                        {(dnnl::memory::dim)newTokens, input_dim}, dnnl::memory::data_type::f16,
+                        {(dnnl::memory::dim)input_dim, 1});
+                    plan->weights_descs[shape] = dnnl::memory::desc(
+                        {input_dim, output_dim}, dnnl::memory::data_type::f16,
+                        {1, (dnnl::memory::dim)input_dim});
+                    plan->dst_descs[shape] = dnnl::memory::desc(
+                        {(dnnl::memory::dim)newTokens, output_dim}, dnnl::memory::data_type::f16,
+                        {(dnnl::memory::dim)output_dim, 1});
+                    plan->primitives[shape] = dnnl::matmul(dnnl::matmul::primitive_desc(
+                        *prefill.dnnl_engine, plan->src_descs[shape], plan->weights_descs[shape],
+                        plan->dst_descs[shape], attr));
+                };
+                create_shape(DNNL_Q, H_DIM, QDIM);
+                create_shape(DNNL_KV, H_DIM, KVDIM);
+                create_shape(DNNL_O, QDIM, H_DIM);
+                create_shape(DNNL_MLP, H_DIM, IM_DIM);
+                create_shape(DNNL_DOWN, IM_DIM, H_DIM);
+
+                plan->calls.reserve(NUM_L * 7);
+                auto offset = [](void* base, size_t elements) {
+                    return static_cast<void*>(static_cast<char*>(base) + elements * sizeof(cl_half));
+                };
+                auto add_call = [&](DnnlGemmShape shape, void* src, void* weights, void* dst) {
+                    const auto kind = dnnl::ocl_interop::memory_kind::usm;
+                    DnnlGemmCall call{dnnl::ocl_interop::make_memory(
+                                          plan->src_descs[shape], *prefill.dnnl_engine, kind, {src}),
+                                      dnnl::ocl_interop::make_memory(
+                                          plan->weights_descs[shape], *prefill.dnnl_engine, kind, {weights}),
+                                      dnnl::ocl_interop::make_memory(
+                                          plan->dst_descs[shape], *prefill.dnnl_engine, kind, {dst}),
+                                      {}};
+                    call.arguments = {{DNNL_ARG_SRC, call.src},
+                                      {DNNL_ARG_WEIGHTS, call.weights},
+                                      {DNNL_ARG_DST, call.dst}};
+                    plan->calls.push_back(std::move(call));
+                };
+                for (int layer = 0; layer < NUM_L; ++layer) {
+                    add_call(DNNL_Q, prefill.norm, offset(prefill.host_context.qw, (size_t)layer * QDIM * H_DIM), prefill.qb);
+                    add_call(DNNL_KV, prefill.norm, offset(prefill.host_context.kw, (size_t)layer * KVDIM * H_DIM), prefill.kb);
+                    add_call(DNNL_KV, prefill.norm, offset(prefill.host_context.vw, (size_t)layer * KVDIM * H_DIM), prefill.vb);
+                    add_call(DNNL_O, prefill.xn, offset(prefill.host_context.ow, (size_t)layer * H_DIM * QDIM), prefill.proj);
+                    add_call(DNNL_MLP, prefill.norm, offset(prefill.host_context.gw, (size_t)layer * IM_DIM * H_DIM), prefill.gate);
+                    add_call(DNNL_MLP, prefill.norm, offset(prefill.host_context.uw, (size_t)layer * IM_DIM * H_DIM), prefill.up);
+                    add_call(DNNL_DOWN, prefill.gate, offset(prefill.host_context.dw, (size_t)layer * H_DIM * IM_DIM), prefill.proj);
+                }
+                plan_it = prefill.dnnl_plans.emplace(newTokens, std::move(plan)).first;
+            }
+            dnnl_plan = plan_it->second.get();
+        }
+        auto dnnl_gemm = [&](int layer, int projection, DnnlGemmShape shape) {
+            DnnlGemmCall& call = dnnl_plan->calls[layer * 7 + projection];
+            dnnl_plan->primitives[shape].execute(*prefill.dnnl_stream, call.arguments);
+        };
+
         enqueue_1d(prefill.copy, (size_t)newTokens * H_DIM, 256);
         for (int layer = 0; layer < NUM_L; ++layer) {
             set_int_arg(prefill.rms, 1, layer);
             set_int_arg(prefill.rms, 2, 0);
             enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
-            gemm(layer, 7, QDIM + 2 * KVDIM);
+            if (use_dnnl) {
+                dnnl_gemm(layer, 0, DNNL_Q);
+                dnnl_gemm(layer, 1, DNNL_KV);
+                dnnl_gemm(layer, 2, DNNL_KV);
+            } else {
+                gemm(layer, 7, QDIM + 2 * KVDIM);
+            }
             set_int_arg(prefill.rope, 1, layer);
             enqueue_2d(prefill.rope, NH + KVH, newTokens, 16);
             set_int_arg(prefill.attention, 1, layer);
             enqueue_2d(prefill.attention, NH, newTokens, 16);
-            gemm(layer, 3, H_DIM);
             set_int_arg(prefill.elementwise, 1, layer);
+            if (use_dnnl) dnnl_gemm(layer, 3, DNNL_O); else gemm(layer, 3, H_DIM);
             set_int_arg(prefill.elementwise, 2, 0);
             enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
             set_int_arg(prefill.rms, 2, 1);
             enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
-            gemm(layer, 8, 2 * IM_DIM);
+            if (use_dnnl) {
+                dnnl_gemm(layer, 4, DNNL_MLP);
+                dnnl_gemm(layer, 5, DNNL_MLP);
+            } else {
+                gemm(layer, 8, 2 * IM_DIM);
+            }
             set_int_arg(prefill.elementwise, 2, 1);
             enqueue_1d(prefill.elementwise, (size_t)newTokens * IM_DIM, 256);
-            gemm(layer, 6, H_DIM);
+            if (use_dnnl) dnnl_gemm(layer, 6, DNNL_DOWN); else gemm(layer, 6, H_DIM);
             set_int_arg(prefill.elementwise, 2, 2);
             enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
         }
@@ -1417,6 +1520,9 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
     auto state_it = gPrefillStates.find(this);
     if (state_it != gPrefillStates.end()) {
         PrefillState& prefill = state_it->second;
+        prefill.dnnl_plans.clear();
+        prefill.dnnl_stream.reset();
+        prefill.dnnl_engine.reset();
         for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
                                  prefill.attention, prefill.elementwise}) {
             if (kernel)

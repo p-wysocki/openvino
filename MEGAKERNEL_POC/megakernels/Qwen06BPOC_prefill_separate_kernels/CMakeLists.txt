@@ -39,6 +39,6 @@ target_include_directories(${TARGET_NAME}
         "${CMAKE_CURRENT_LIST_DIR}/impl"
         "${TASK_SYSTEM_OPENCL_ROOT}")
 
-target_link_libraries(${TARGET_NAME} PUBLIC OpenCL::OpenCL)
+target_link_libraries(${TARGET_NAME} PRIVATE OpenCL::OpenCL onednn_gpu_tgt)
 
 set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)

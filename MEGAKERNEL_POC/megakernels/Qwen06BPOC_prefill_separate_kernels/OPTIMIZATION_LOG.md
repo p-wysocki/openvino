@@ -404,3 +404,41 @@ Final retained-code run:
 ## Remaining Bottleneck
 
 The retained prompt-size dispatch uses M16/N256/K128 through 64 tokens and M32/N512/K128 above 64. N768 and N1024 proved that further activation reuse loses too much grid parallelism, while K64/K256 showed that K128 is the panel-size balance. Init-time packing of every major projection family was slower, and even a K-major 16x16 layout with subgroup block reads did not beat row-major `vload16`. The original row-major tensors therefore already provide the best tested B60 weight path without hundreds of MiB of duplicate storage. Further progress requires stage-level device profiling or a different GEMM decomposition rather than another local layout permutation.
+
+## Iterations 29-33: oneDNN GPU GEMM
+
+Iteration 29 replaced the custom prefill GEMMs with cached oneDNN GPU matmul
+primitives using OpenCL interoperability and the existing USM allocations. The
+row-major model weights use transposed-stride descriptors, so the path requires
+no copies or repacking. `DNNL_VERBOSE=1` confirmed `jit:gemm:any` on the B60.
+The custom kernels remain available with `OV_MEGAKERNEL_PREFILL_ONEDNN=0`.
+
+| Prompt tokens | Previous custom GEMM | oneDNN GEMM |
+|---:|---:|---:|
+| 19 | 13.615 ms | 6.810 ms |
+| 58 | 21.517 ms | 11.620 ms |
+| 281 | 62.702 ms | 41.446 ms |
+
+Outcome: retained. Generated output matched the standard OpenVINO path.
+
+Iteration 30 fused the O-projection residual through a oneDNN sum post-op. It
+measured 7.149 / 11.203 / 41.088 ms, but corrupted the hidden state and generated
+only repeated `!` tokens. Outcome: reverted.
+
+Iteration 31 removed the forced fp32 accumulation attribute and allowed oneDNN
+to select its default accumulation mode. It measured 6.810 / 11.218 / 41.136 ms
+with matching generated output. Outcome: retained.
+
+Iteration 32 computed the up projection first and fused SiLU plus binary multiply
+into the gate matmul using oneDNN post-ops. Primitive creation succeeded, but
+execution failed on the B60. Outcome: reverted.
+
+Iteration 33 cached each primitive's immutable argument map instead of rebuilding
+196 hash maps per inference. It measured 6.964 / 11.344 / 41.288 ms with matching
+generated output. The difference from Iteration 31 is within run-to-run noise;
+the allocation-free dispatch path was retained.
+
+The retained oneDNN path improves megakernel prefill TTFT by approximately 2.0x,
+1.9x, and 1.5x for the 19-, 58-, and 281-token prompts respectively. It beats
+standard OpenVINO prefill on short and medium prompts and is near parity on the
+long prompt in the measured runs.
