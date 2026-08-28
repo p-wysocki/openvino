@@ -12,12 +12,15 @@ jobs:
       - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
       - name: Check out repository code
         uses: actions/checkout@v6
+        with:
+          path: ./repo
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: List files in the repository
         run: |
-          ls ${{ github.workspace }}
-      - run: echo "📂 The current working directory is ${{ github.workspace }}."
+          cat /proc/1/cgroup
+          ls ./repo
+      - run: echo "📂 The current working directory is ./repo ."
       - run: echo "📝 The contents of the current working directory are:"
-      - run: ls -la ${{ github.workspace }}
+      - run: ls -la ./repo
       - run: echo "🍏 This job's status is ${{ job.status }}."
