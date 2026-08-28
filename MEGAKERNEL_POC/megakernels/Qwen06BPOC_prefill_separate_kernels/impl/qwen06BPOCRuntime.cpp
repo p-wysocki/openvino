@@ -545,6 +545,7 @@ typedef struct PrefillCtx {
     __global const half* qn; __global const half* kn; __global const half* rf;
     __global half* norm; __global half* qb; __global half* kb; __global half* vb;
     __global half* xn; __global half* gate; __global half* up; __global half* proj;
+    __global half* scores;
     __global half* kc; __global half* vc;
     __global const long* positions;
     uint tokens; uint CS;
@@ -946,10 +947,13 @@ __kernel void prefill_gemm_m32(__global const PrefillCtx* c, int layer, int op) 
     }
 }
 
-__attribute__((reqd_work_group_size(16, 1, 1)))
+// All NH+KVH heads for a token share one work-group (one subgroup per head)
+// instead of one 16-thread work-group per head; this cuts the number of
+// launched work-groups for this stage by 24x (see Iteration 29).
+__attribute__((reqd_work_group_size((NH + KVH) * 16, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void prefill_rope_cache(__global const PrefillCtx* c, int layer) {
-    uint lane = get_sub_group_local_id(), head = get_group_id(0), token = get_group_id(1);
+    uint lane = get_sub_group_local_id(), head = get_sub_group_id(), token = get_group_id(1);
     int pos = (int)c->positions[token];
     if (head < NH) {
         __global half* query = c->qb + token * QDIM + head * HD;
@@ -1014,6 +1018,40 @@ __kernel void prefill_attention(__global const PrefillCtx* c, int layer) {
         c->xn[token * QDIM + query_head * HD + lane + j * 16] = convert_half(acc[j] / denominator);
 }
 
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void prefill_attention_softmax(__global const PrefillCtx* c) {
+    uint row = get_group_id(0), lid = get_local_id(0);
+    uint token = row % c->tokens;
+    __global half* scores = c->scores + (ulong)row * c->tokens;
+    __local float reduction[256];
+    float maximum = -INFINITY;
+    for (uint key = lid; key <= token; key += 256)
+        maximum = fmax(maximum, convert_float(scores[key]) * rsqrt((float)HD));
+    reduction[lid] = maximum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint stride = 128; stride; stride >>= 1) {
+        if (lid < stride) reduction[lid] = fmax(reduction[lid], reduction[lid + stride]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    maximum = reduction[0];
+    float denominator = 0.0f;
+    for (uint key = lid; key <= token; key += 256)
+        denominator += native_exp(convert_float(scores[key]) * rsqrt((float)HD) - maximum);
+    reduction[lid] = denominator;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint stride = 128; stride; stride >>= 1) {
+        if (lid < stride) reduction[lid] += reduction[lid + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    denominator = reduction[0];
+    for (uint key = lid; key < c->tokens; key += 256) {
+        float probability = key <= token
+                                ? native_exp(convert_float(scores[key]) * rsqrt((float)HD) - maximum) / denominator
+                                : 0.0f;
+        scores[key] = convert_half(probability);
+    }
+}
+
 // op: 0=attention residual, 1=SiLU(gate)*up, 2=MLP residual/final output.
 __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int op) {
@@ -1074,7 +1112,9 @@ struct PrefillCtxH {
     void* qn = nullptr; void* kn = nullptr; void* rf = nullptr;
     void* norm = nullptr; void* qb = nullptr; void* kb = nullptr; void* vb = nullptr;
     void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
-    void* kc = nullptr; void* vc = nullptr; void* positions = nullptr;
+    void* scores = nullptr;
+    void* kc = nullptr; void* vc = nullptr;
+    void* positions = nullptr;
     unsigned tokens = 0; unsigned CS = 0;
 };
 
@@ -1093,14 +1133,21 @@ struct DnnlPrefillPlan {
     std::array<dnnl::memory::desc, DNNL_GEMM_SHAPES> weights_descs;
     std::array<dnnl::memory::desc, DNNL_GEMM_SHAPES> dst_descs;
     std::vector<DnnlGemmCall> calls;
+    dnnl::matmul attention_qk;
+    dnnl::matmul attention_pv;
+    std::vector<DnnlGemmCall> attention_qk_calls;
+    std::vector<DnnlGemmCall> attention_pv_calls;
 };
 
 struct PrefillState {
     cl_kernel copy = nullptr, rms = nullptr, gemm_m16 = nullptr, gemm_m32 = nullptr, rope = nullptr;
     cl_kernel attention = nullptr, elementwise = nullptr;
+    cl_kernel attention_softmax = nullptr;
     clSetKernelArgMemPointerINTEL_fn set_usm_arg = nullptr;
     void* context = nullptr; void* norm = nullptr; void* qb = nullptr; void* kb = nullptr;
     void* vb = nullptr; void* xn = nullptr; void* gate = nullptr; void* up = nullptr; void* proj = nullptr;
+    void* scores = nullptr;
+    size_t scores_bytes = 0;
     PrefillCtxH host_context{};
     std::unique_ptr<dnnl::engine> dnnl_engine;
     std::unique_ptr<dnnl::stream> dnnl_stream;
@@ -1201,6 +1248,7 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     prefill.gemm_m32 = create_prefill_kernel("prefill_gemm_m32");
     prefill.rope = create_prefill_kernel("prefill_rope_cache");
     prefill.attention = create_prefill_kernel("prefill_attention");
+    prefill.attention_softmax = create_prefill_kernel("prefill_attention_softmax");
     prefill.elementwise = create_prefill_kernel("prefill_elementwise");
     prefill.set_usm_arg = reinterpret_cast<clSetKernelArgMemPointerINTEL_fn>(
         clGetExtensionFunctionAddressForPlatform(platform, "clSetKernelArgMemPointerINTEL"));
@@ -1218,7 +1266,7 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     prefill.dnnl_stream =
         std::make_unique<dnnl::stream>(dnnl::ocl_interop::make_stream(*prefill.dnnl_engine, stream_));
     for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
-                             prefill.attention, prefill.elementwise}) {
+                             prefill.attention, prefill.attention_softmax, prefill.elementwise}) {
         assert_or_throw(prefill.set_usm_arg(kernel, 0, prefill.context) == CL_SUCCESS,
                         "[MegaKernel] set prefill context argument failed");
         cl_bool enable = CL_TRUE;
@@ -1353,9 +1401,25 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         auto state_it = gPrefillStates.find(this);
         assert_or_throw(state_it != gPrefillStates.end(), "[MegaKernel] prefill state is unavailable");
         PrefillState& prefill = state_it->second;
+        const bool use_batched_attention = newTokens > 64 &&
+                           std::getenv("OV_MEGAKERNEL_PREFILL_BATCHED_ATTENTION") == nullptr;
+        if (use_batched_attention) {
+            const size_t required_scores_bytes = (size_t)NH * newTokens * newTokens * sizeof(cl_half);
+            if (required_scores_bytes > prefill.scores_bytes) {
+                if (prefill.scores)
+                    usmFree_(ctx_, prefill.scores);
+                cl_int status = CL_SUCCESS;
+                prefill.scores = usmAlloc_(ctx_, dev_, nullptr, required_scores_bytes, 0, &status);
+                assert_or_throw(status == CL_SUCCESS && prefill.scores,
+                                "[MegaKernel] batched attention score allocation failed: ", status);
+                prefill.scores_bytes = required_scores_bytes;
+                prefill.dnnl_plans.clear();
+            }
+        }
         prefill.host_context.hs = io->hidden_states;
         prefill.host_context.out = io->hidden_states_out;
         prefill.host_context.positions = io->position_ids;
+        prefill.host_context.scores = prefill.scores;
         prefill.host_context.tokens = newTokens;
         assert_or_throw(usmMemcpy_(stream_, CL_TRUE, prefill.context, &prefill.host_context,
                                   sizeof(prefill.host_context), 0, nullptr, nullptr) == CL_SUCCESS,
@@ -1452,6 +1516,43 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
                     add_call(DNNL_MLP, prefill.norm, offset(prefill.host_context.uw, (size_t)layer * IM_DIM * H_DIM), prefill.up);
                     add_call(DNNL_DOWN, prefill.gate, offset(prefill.host_context.dw, (size_t)layer * H_DIM * IM_DIM), prefill.proj);
                 }
+                if (use_batched_attention) {
+                    using dim = dnnl::memory::dim;
+                    const dim tokens = newTokens;
+                    auto q_desc = dnnl::memory::desc({KVH, 2, tokens, HD}, dnnl::memory::data_type::f16,
+                                                     {2 * HD, HD, QDIM, 1});
+                    auto k_desc = dnnl::memory::desc({KVH, 1, HD, tokens}, dnnl::memory::data_type::f16,
+                                                     {(dim)MAX_SEQ * HD, HD, 1, HD});
+                    auto scores_desc = dnnl::memory::desc({KVH, 2, tokens, tokens}, dnnl::memory::data_type::f16,
+                                                          {2 * tokens * tokens, tokens * tokens, tokens, 1});
+                    auto v_desc = dnnl::memory::desc({KVH, 1, tokens, HD}, dnnl::memory::data_type::f16,
+                                                     {(dim)MAX_SEQ * HD, HD, HD, 1});
+                    auto output_desc = dnnl::memory::desc({KVH, 2, tokens, HD}, dnnl::memory::data_type::f16,
+                                                          {2 * HD, HD, QDIM, 1});
+                    plan->attention_qk = dnnl::matmul(dnnl::matmul::primitive_desc(
+                        *prefill.dnnl_engine, q_desc, k_desc, scores_desc));
+                    plan->attention_pv = dnnl::matmul(dnnl::matmul::primitive_desc(
+                        *prefill.dnnl_engine, scores_desc, v_desc, output_desc));
+                    const auto kind = dnnl::ocl_interop::memory_kind::usm;
+                    auto add_attention_call = [&](std::vector<DnnlGemmCall>& calls,
+                                                  const dnnl::memory::desc& src_desc, void* src,
+                                                  const dnnl::memory::desc& weights_desc, void* weights,
+                                                  const dnnl::memory::desc& dst_desc, void* dst) {
+                        DnnlGemmCall call{dnnl::ocl_interop::make_memory(src_desc, *prefill.dnnl_engine, kind, {src}),
+                                          dnnl::ocl_interop::make_memory(weights_desc, *prefill.dnnl_engine, kind, {weights}),
+                                          dnnl::ocl_interop::make_memory(dst_desc, *prefill.dnnl_engine, kind, {dst}), {}};
+                        call.arguments = {{DNNL_ARG_SRC, call.src}, {DNNL_ARG_WEIGHTS, call.weights}, {DNNL_ARG_DST, call.dst}};
+                        calls.push_back(std::move(call));
+                    };
+                    for (int layer = 0; layer < NUM_L; ++layer) {
+                        add_attention_call(plan->attention_qk_calls, q_desc, prefill.qb, k_desc,
+                                           offset(prefill.host_context.kc, (size_t)layer * KVH * MAX_SEQ * HD),
+                                           scores_desc, prefill.scores);
+                        add_attention_call(plan->attention_pv_calls, scores_desc, prefill.scores, v_desc,
+                                           offset(prefill.host_context.vc, (size_t)layer * KVH * MAX_SEQ * HD),
+                                           output_desc, prefill.xn);
+                    }
+                }
                 plan_it = prefill.dnnl_plans.emplace(newTokens, std::move(plan)).first;
             }
             dnnl_plan = plan_it->second.get();
@@ -1474,9 +1575,17 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
                 gemm(layer, 7, QDIM + 2 * KVDIM);
             }
             set_int_arg(prefill.rope, 1, layer);
-            enqueue_2d(prefill.rope, NH + KVH, newTokens, 16);
+            enqueue_2d(prefill.rope, 1, newTokens, (NH + KVH) * 16);
             set_int_arg(prefill.attention, 1, layer);
-            enqueue_2d(prefill.attention, NH, newTokens, 16);
+            if (use_batched_attention) {
+                DnnlGemmCall& qk = dnnl_plan->attention_qk_calls[layer];
+                dnnl_plan->attention_qk.execute(*prefill.dnnl_stream, qk.arguments);
+                enqueue_1d(prefill.attention_softmax, (size_t)NH * newTokens * 256, 256);
+                DnnlGemmCall& pv = dnnl_plan->attention_pv_calls[layer];
+                dnnl_plan->attention_pv.execute(*prefill.dnnl_stream, pv.arguments);
+            } else {
+                enqueue_2d(prefill.attention, NH, newTokens, 16);
+            }
             set_int_arg(prefill.elementwise, 1, layer);
             if (use_dnnl) dnnl_gemm(layer, 3, DNNL_O); else gemm(layer, 3, H_DIM);
             set_int_arg(prefill.elementwise, 2, 0);
@@ -1524,7 +1633,7 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
         prefill.dnnl_stream.reset();
         prefill.dnnl_engine.reset();
         for (cl_kernel kernel : {prefill.copy, prefill.rms, prefill.gemm_m16, prefill.gemm_m32, prefill.rope,
-                                 prefill.attention, prefill.elementwise}) {
+                     prefill.attention, prefill.attention_softmax, prefill.elementwise}) {
             if (kernel)
                 clReleaseKernel(kernel);
         }
@@ -1533,6 +1642,8 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
             if (allocation && ctx_ && usmFree_)
                 usmFree_(ctx_, allocation);
         }
+        if (prefill.scores && ctx_ && usmFree_)
+            usmFree_(ctx_, prefill.scores);
         gPrefillStates.erase(state_it);
     }
 

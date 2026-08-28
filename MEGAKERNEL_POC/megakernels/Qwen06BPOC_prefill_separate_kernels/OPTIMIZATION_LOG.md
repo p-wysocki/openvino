@@ -398,8 +398,99 @@ Final retained-code run:
 - Decode argmax match: true.
 - Decode cosine similarity: 1.0000.
 - Existing decode tasks and their dispatch path were not modified.
+
+## Re-baseline: Longer "long" Prompt
+
+The `long` benchmark prompt in `python/e2e_performance_measurement.py` was extended (repeated background text), raising it from 281 to 1889 tokens. This exposed the prefill path to much larger sequence lengths and changed which stage dominates TTFT, so prefill was re-measured before further work.
+
+| Prompt tokens | Standard OpenVINO TTFT | Megakernel TTFT | Prefill speed |
+|---:|---:|---:|---:|
+| 19 | 13.135 ms | 6.923 ms | 1.90x |
+| 58 | 17.433 ms | 11.206 ms | 1.56x |
+| 1889 | 251.105 ms | 398.685 ms | 0.63x |
+
+Short and medium prompts remained faster than standard OpenVINO from the retained iterations above; the long prompt, now much longer, regressed to 0.63x. This is the new target.
+
+## Iterations 29-33: KV-Cache Update Path
+
+These iterations targeted `prefill_rope_cache`, the kernel that applies RoPE to Q/K and writes K/V into the persistent KV cache once per (layer, token). At 1889 tokens it dispatched `(NH+KVH)=24` work-groups of only 16 threads each, per layer, per token — 28 * 24 * 1889 ≈ 1.27M tiny work-group launches for the whole prompt.
+
+### Iteration 29: Fused Per-Token RoPE/Cache Work-Group
+
+Combined all `NH+KVH=24` heads for one token into a single work-group (one SIMD16 subgroup per head, local size 384) instead of one 16-thread work-group per head. This cuts the number of launched work-groups for this stage by 24x, from `24 * tokens` to `tokens` per layer.
+
+| Prompt tokens | Before | Iteration 29 |
+|---:|---:|---:|
+| 19 | 6.923 ms | 6.906 ms |
+| 58 | 11.206 ms | 11.447 ms |
+| 1889 | 398.685 ms | 384.204 ms |
+
+Outcome: retained. The long prompt improved by about 3.6%; short/medium were unchanged within noise.
+
+### Iteration 30: Vectorized Block Read/Write
+
+On top of Iteration 29, replaced the four-iteration scalar per-lane loop (loading/storing `rf`, `qn`/`kn`, and Q/K/V one `half` at a time) with `float4`/`half4` math and `intel_sub_group_block_read_us4` / `intel_sub_group_block_write_us4`, since each lane's address is already `base + component*16 + lane` — exactly the layout these intrinsics expect.
+
+| Prompt tokens | Iteration 29 | Iteration 30 |
+|---:|---:|---:|
+| 19 | 6.906 ms | 6.834-6.938 ms |
+| 58 | 11.447 ms | 11.097-11.264 ms |
+| 1889 | 384.204 ms | 389.1-392.1 ms (two runs) |
+
+Outcome: reverted. The scalar addressing pattern was already auto-coalesced by the compiler/hardware; the explicit vector intrinsics were neutral to slightly worse on the long prompt across repeated runs.
+
+### Iteration 31: Separate Bulk V-Cache Copy Kernel
+
+V requires no RoPE or normalization, only a position-indexed scatter into the cache. Split it out of `prefill_rope_cache` into a new flat `prefill_cache_copy_v` kernel dispatched once per layer over all tokens at once with normal 256-thread work-groups, leaving only Q/K RoPE in the per-token/head kernel.
+
+| Prompt tokens | Iteration 29 | Iteration 31 |
+|---:|---:|---:|
+| 19 | 6.906 ms | 6.834 ms |
+| 58 | 11.447 ms | 11.264 ms |
+| 1889 | 384.204 ms | 395.647 ms |
+
+Outcome: reverted. The extra kernel launch (28 more dispatches, one per layer) outweighed the saved work in the fused kernel; the long prompt regressed.
+
+### Iteration 32: Two Tokens per Work-Group
+
+On top of Iteration 29, packed `ROPE_TPB=2` tokens into each `prefill_rope_cache` work-group (768 threads, 48 subgroups) to further amortize launch and barrier overhead, with the second token's subgroups mapped via `sub_group_id() / (NH+KVH)`.
+
+| Prompt tokens | Iteration 29 | Iteration 32 |
+|---:|---:|---:|
+| 19 | 6.906 ms | 6.938 ms |
+| 58 | 11.447 ms | 11.097 ms |
+| 1889 | 384.204 ms | 393.090 ms |
+
+Outcome: reverted. Doubling the work-group size did not improve the long prompt; the coarser dispatch grid (half as many work-groups, twice the size) was not better than the plain per-token fusion from Iteration 29.
+
+### Iteration 33: Precomputed RoPE Cos/Sin Table
+
+RoPE angles depend only on `(token position, dim)`, not on layer, but `prefill_rope_cache` recomputed `native_cos`/`native_sin` independently in all 28 layers. Added a small `prefill_rope_table` kernel that computes `cos(pos * rope_inv_freq)` / `sin(...)` once per prefill call into a `[tokens][64]` table, and had the per-layer kernel read from it instead of recomputing.
+
+| Prompt tokens | Iteration 29 | Iteration 33 |
+|---:|---:|---:|
+| 19 | 6.906 ms | 6.783 ms |
+| 58 | 11.447 ms | 10.937 ms |
+| 1889 | 384.204 ms | 391.672 ms |
+
+Outcome: reverted. Despite eliminating 27x redundant transcendental-function calls per token, the long prompt did not improve; `native_cos`/`native_sin` were evidently not a measurable cost next to the memory traffic already dominating this kernel.
+
+### Conclusion
+
+Only Iteration 29 (fusing the 24 per-head work-groups into one per-token work-group) produced a measurable, reproducible gain (~3.6% on the long prompt). Iterations 30-33 each tried a different way to reduce KV-cache-update cost further — wider vector memory ops, separating the RoPE-free V write, coarser token batching, and removing redundant per-layer trig — and none moved the long-prompt TTFT outside run-to-run noise (roughly ±2%). This indicates `prefill_rope_cache` is no longer the dominant cost at 1889 tokens once Iteration 29 is applied; the remaining prefill/standard-OpenVINO gap for long prompts is most likely the per-token, per-query-head serial causal-attention kernel (`prefill_attention`, O(n²) in sequence length with only 16 threads per query) or the oneDNN GEMM cost scaling with token count, not the cache-write path itself.
+
+Final retained state for this set of iterations (Iteration 29 only):
+
+| Prompt tokens | Standard OpenVINO TTFT | Megakernel TTFT | Prefill speed |
+|---:|---:|---:|---:|
+| 19 | 12.689 ms | 6.907 ms | 1.84x |
+| 58 | 15.005 ms | 11.300 ms | 1.33x |
+| 1889 | 231.979 ms | 385.253 ms | 0.60x |
+
+- Decode-only speedup: 1.51x, argmax match: true, cosine similarity: 1.0000.
+- Existing decode tasks and their dispatch path were not modified.
 - Target-only rebuild also passed:
-  `cmake --build ../build --target Qwen06BPOCv2 -j$(nproc)`.
+  `cmake --build ../build --target Qwen06BPOC_prefill_separate_kernels -j$(nproc)`.
 
 ## Remaining Bottleneck
 
@@ -442,3 +533,138 @@ The retained oneDNN path improves megakernel prefill TTFT by approximately 2.0x,
 1.9x, and 1.5x for the 19-, 58-, and 281-token prompts respectively. It beats
 standard OpenVINO prefill on short and medium prompts and is near parity on the
 long prompt in the measured runs.
+
+## Iterations 34-38: KV-Cache Work-Group Occupancy
+
+The current Iteration 29 cache-update kernel assigns one SIMD16 subgroup to each
+of the 16 query heads and 8 KV heads, producing a 384-thread work-group per
+token. Before changing it, the 1889-token prompt was measured over five calls:
+
+| Prompt tokens | Standard OpenVINO TTFT | Megakernel TTFT | Prefill speed |
+|---:|---:|---:|---:|
+| 19 | 14.323 ms | 6.753 ms | 2.12x |
+| 58 | 14.799 ms | 10.490 ms | 1.41x |
+| 1889 | 233.620 ms | 388.965 ms | 0.60x |
+
+Iterations 34-36 changed the kernel so each subgroup could process multiple
+strided Q or KV heads, then swept smaller work-groups. The memory access within
+each head remained subgroup-coalesced.
+
+| Iteration | Subgroups | Head assignment | 1889-token TTFT |
+|---:|---:|---|---:|
+| 34 | 12 | Strided Q and KV heads | 385.508 ms |
+| 35 | 8 | Two Q heads and one KV head per subgroup | 389.461 ms |
+| 36 | 16 | One Q head; first eight also update one KV head | 383.230 ms |
+
+Iteration 34's 0.9% difference was within normal variation. Iteration 35
+regressed long, short, and medium prompts. Iteration 36 initially appeared best
+at 383.230 ms.
+
+Iteration 37 retained 16 subgroups but performed the KV work before query RoPE,
+attempting to expose cache-store latency earlier. It regressed the long prompt
+to 392.047 ms and was reverted.
+
+Iteration 38 restored query-first execution and tested a 14-subgroup midpoint.
+It measured 389.517 ms and was reverted.
+
+A clean seven-call repeat of Iteration 36 measured 388.403 ms, effectively the
+same as the 388.965 ms baseline. It therefore failed the reproducibility check
+and was also reverted. The final source retains Iteration 29's simpler
+one-subgroup-per-head mapping.
+
+The final validation reported decode argmax match `true`, cosine similarity
+`1.0000`, and a 1.61x decode-only speedup. No generated-output mismatch was
+reported. These five experiments reinforce the earlier result: after fusing
+per-head work-groups, KV-cache update scheduling is not the remaining long-
+prefill bottleneck. Profiling and parallelizing the quadratic attention stage is
+the next higher-value direction.
+
+## Iterations 39-43: Sequence-Parallel Attention
+
+The long benchmark prompt had grown again, from 1889 to 3229 tokens. Its serial
+SIMD16 attention baseline measured 943.074 ms megakernel TTFT. Each experiment
+split one `(query_head, token)` row into contiguous sequence ranges processed by
+multiple SIMD16 subgroups, then merged their online-softmax maximum,
+denominator, and eight per-lane accumulators through SLM.
+
+| Iteration | Subgroups per row | Short TTFT | Medium TTFT | 3229-token TTFT |
+|---:|---:|---:|---:|---:|
+| 39 | 8 | 6.652 ms | 10.814 ms | 938.947 ms |
+| 40 | 2 | 6.747 ms | 10.455 ms | 935.499 ms |
+| 41 | 4 | 6.648 ms | 10.613 ms | 936.812 ms |
+| 42 | 16 | 6.924 ms | 13.993 ms | 943.639 ms |
+| 43 | 32 | 6.837 ms | 12.071 ms | 946.118 ms |
+
+All variants built successfully and generated output matching the standard
+OpenVINO path. Two subgroups produced the lowest single measurement, but its
+0.8% improvement over serial was within normal run-to-run variation. Larger
+work-groups added SLM reduction and occupancy cost without reducing TTFT.
+
+Outcome: all five variants reverted. Sequence traversal within a single
+attention row is not limited by a lack of subgroup parallelism. The retained
+cache layout is already coalesced at the hardware transaction level: for every
+K/V component, the SIMD16 lanes access 16 consecutive fp16 head-dimension
+elements. A future layout experiment should therefore target reuse across the
+two GQA query heads sharing one KV head, rather than rearranging each subgroup's
+already contiguous reads.
+
+## Iterations 44-48: GQA Reuse and Block Messages
+
+A fresh serial-attention baseline measured 6.854 / 11.379 / 941.185 ms for the
+19-, 58-, and 3229-token prompts. These iterations tested whether the two GQA
+query heads sharing each KV head could reuse cache loads, and whether explicit
+Intel subgroup block messages improved the existing strided source expression.
+
+| Iteration | Variant | Short TTFT | Medium TTFT | 3229-token TTFT |
+|---:|---|---:|---:|---:|
+| 44 | One SIMD16 subgroup computes both GQA query heads | 7.094 ms | 11.092 ms | 946.252 ms |
+| 45 | Paired heads plus `us8` Q/K/V block messages | 6.848 ms | 11.172 ms | 940.782 ms |
+| 46 | One head per subgroup plus `us8` block messages | 6.695 ms | 11.565 ms | 935.357 ms |
+| 47 | Iteration 46 plus 2x sequence-loop unrolling | 6.843 ms | 10.650 ms | 946.607 ms |
+| 48 | Iteration 46 plus 4x sequence-loop unrolling | 6.659 ms | 10.503 ms | 935.781 ms |
+
+All five variants built successfully and generated output matching standard
+OpenVINO. Paired-head reuse halved logical K/V loads but doubled live query and
+accumulator state, producing no gain. Explicit `us8` messages and 4x unrolling
+each produced isolated 0.6% long-prompt improvements, while 2x unrolling
+regressed by 0.6%; these deltas are below normal measurement variation and are
+not reproducible evidence of a faster kernel.
+
+Outcome: all five variants reverted. The compiler and memory subsystem already
+coalesce the lane-strided scalar expression effectively, and the shared cache
+likely serves the second GQA head without requiring explicit in-kernel reuse.
+The remaining 3229-token gap is therefore unlikely to come from head-dimension
+cache layout or redundant GQA reads in this attention kernel.
+
+## Iterations 49-53: Batched Prefill Attention
+
+The serial SIMD16 attention baseline was 941.185 ms at 3229 prompt tokens.
+Iteration 49 replaced its per-row GEMV loop with two cached 4D oneDNN matmuls:
+`Q * K^T`, followed by a causal row-softmax OpenCL kernel, followed by `P * V`.
+The GQA K/V batch dimension is broadcast across its two query heads. Scores and
+probabilities share one prompt-sized FP16 buffer; at 3229 tokens this is about
+334 MB. Short prompts keep the original serial kernel.
+
+Iterations 50-53 tested a fused alternative that stages K/V in SLM and reuses
+each tile across both GQA heads and multiple query tokens. This avoids the full
+square score buffer and upper-triangle computation, but adds work-group barriers
+and SLM traffic.
+
+| Iteration | Variant | 3229-token TTFT |
+|---:|---|---:|
+| 49 | oneDNN batched QK/PV plus causal softmax | 605.456 ms |
+| 50 | Fused GQA, Q8/K32 tiles | 1009.501 ms |
+| 51 | Fused GQA, Q8/K16 tiles | 1017.427 ms |
+| 52 | Fused GQA, Q8/K64 tiles | 997.799 ms |
+| 53 | Fused GQA, Q4/K64 tiles | 1385.313 ms |
+
+Outcome: retained Iteration 49. It reduces long-prompt TTFT by 35.7% versus the
+serial attention baseline and generated matching output in the benchmark. The
+fused variants were all reverted: reduced global K/V traffic did not repay SLM
+and synchronization costs on B60. Set
+`OV_MEGAKERNEL_PREFILL_BATCHED_ATTENTION=0` to select the serial fallback.
+
+During measurement, the Python benchmark was initially found to load the
+installed wheel's shared object rather than the target-only build output. The
+reported numbers above were collected only after installing the rebuilt
+`libQwen06BPOC_prefill_separate_kernels.so` into the active OpenVINO package.
