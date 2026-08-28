@@ -18,7 +18,7 @@ jobs:
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: List files in the repository
         run: |
-          cat /proc/1/cgroup
+          test -f /.dockerenv && echo "RUNNING INSIDE DOCKER"
           ls ./repo
       - run: echo "📂 The current working directory is ./repo ."
       - run: echo "📝 The contents of the current working directory are:"
