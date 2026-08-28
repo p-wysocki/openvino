@@ -5,7 +5,7 @@ jobs:
   Explore-GitHub-Actions:
     runs-on: self-hosted
     container:
-      image: pk_dev_image:latest
+      image: pk_dev_image
     steps:
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
