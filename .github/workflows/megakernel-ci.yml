@@ -26,6 +26,7 @@ jobs:
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
+              set -Eeuo pipefail
               echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
               echo "🐧 This job is now running on a ${{ runner.os }} self-hosted runner."
               echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
