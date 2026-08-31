@@ -22,6 +22,7 @@ jobs:
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
             -w /workspace/repo \
+            --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
               echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
@@ -31,8 +32,7 @@ jobs:
               echo "🖥️ The workflow is now ready to test your code on the runner."
               test -f /.dockerenv && echo "RUNNING INSIDE DOCKER"
               echo "📝 The contents of the current working directory are:"
-              ls
-              echo "📂 The current working directory is ./repo ."
-              ls -la
+              echo "running test script:"
+              bash MEGAKERNEL_POC/ci_scripts/compile_run_megakernel_tests.sh
               echo "🍏 This job'\''s status is ${{ job.status }}."
             '
