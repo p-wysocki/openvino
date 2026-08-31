@@ -1,8 +1,8 @@
 name: megakernel-ci-test
-run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
-on: [push]
+run-name: Megakernel CI Benchmark/Tests
+on: [push, workflow_dispatch]
 jobs:
-  Explore-GitHub-Actions:
+  Megakernel-CI:
     runs-on: self-hosted
     permissions:
       contents: read
@@ -14,10 +14,7 @@ jobs:
           clean: true
           submodules: 'recursive'
 
-      - name: Verify local Docker image
-        run: docker image inspect ci_megakernel_image
-
-      - name: Run workflow commands inside local Docker image
+      - name: Compile ov with megakernel
         env:
           WORKSPACE_REPO: ${{ github.workspace }}/repo
         run: |
@@ -28,13 +25,27 @@ jobs:
             ci_megakernel_image \
             bash -lc '
               set -Eeuo pipefail
-              echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
               git config --global --add safe.directory /workspace/repo
               echo "building megakernel:"
               bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh
+              echo "DONE! This job'\''s status is ${{ job.status }}."
+            '
+
+      - name: Run benchmarks inside local Docker image
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
+        run: |
+          docker run --rm \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
+            -w /workspace/repo \
+            --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
+            ci_megakernel_image \
+            bash -lc '
+              set -Eeuo pipefail
+              git config --global --add safe.directory /workspace/repo
               echo "running megakernel tests:"
               bash MEGAKERNEL_POC/ci_scripts/run_megakernel_tests.sh
-              echo "🍏 This job'\''s status is ${{ job.status }}."
+              echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
       - name: Cleanup workspace
