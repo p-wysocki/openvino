@@ -34,3 +34,9 @@ jobs:
               bash MEGAKERNEL_POC/ci_scripts/compile_run_megakernel_tests.sh
               echo "🍏 This job'\''s status is ${{ job.status }}."
             '
+
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          sudo chmod -R 777 ${{ github.workspace }} || true
+          rm -rf ${{ github.workspace }}/* || true
