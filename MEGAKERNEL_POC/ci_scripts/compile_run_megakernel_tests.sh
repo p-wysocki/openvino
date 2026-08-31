@@ -1,8 +1,15 @@
 
 set -e
 
+venv_dir="$(mktemp -d)"
+trap 'rm -rf "${venv_dir}"' EXIT
+python3 -m venv --system-site-packages "${venv_dir}"
+source "${venv_dir}/bin/activate"
+
+pip install -U optimum-intel
+
 cd MEGAKERNEL_POC/python/
-python3 convert_to_openvino_ir.py
+python convert_to_openvino_ir.py
 cd ../..
 
 cmake -S . -B ../build/ \
@@ -26,10 +33,7 @@ cmake -S . -B ../build/ \
     #-DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC_prefill_separate_kernels
 cmake --build ../build/ --parallel 16
 
-venv_dir="$(mktemp -d)"
-trap 'rm -rf "${venv_dir}"' EXIT
-python3 -m venv --system-site-packages "${venv_dir}"
-source "${venv_dir}/bin/activate"
+
 
 python -m pip install ../build/wheels/*.whl --force-reinstall
 
