@@ -13,7 +13,7 @@ jobs:
           path: ./repo
 
       - name: Verify local Docker image
-        run: docker image inspect pk_dev_image
+        run: docker image inspect ci_megakernel_image
 
       - name: Run workflow commands inside local Docker image
         env:
