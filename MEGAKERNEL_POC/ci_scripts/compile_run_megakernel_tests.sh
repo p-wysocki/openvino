@@ -1,5 +1,5 @@
-
-set -e
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
 venv_dir="$(mktemp -d)"
 trap 'rm -rf "${venv_dir}"' EXIT
