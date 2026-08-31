@@ -20,13 +20,11 @@ main() {
     venv_dir="$(mktemp -d)"
     trap cleanup EXIT
 
-    #git submodule update --init --recursive
-
     python3 -m venv --system-site-packages "${venv_dir}"
     source "${venv_dir}/bin/activate"
 
-    chmod +x install_build_dependencies.sh
-    ./install_build_dependencies.sh
+    chmod +x "${repo_root}/install_build_dependencies.sh"
+    "${repo_root}/install_build_dependencies.sh"
 
     python -m pip install --upgrade optimum-intel
     python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
@@ -51,13 +49,6 @@ main() {
         -DENABLE_WHEEL=ON \
         -DENABLE_TEMPLATE_REGISTRATION=OFF
     cmake --build "${build_dir}" --parallel 16
-
-    python -m pip install "${build_dir}"/wheels/*.whl --force-reinstall
-    bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh"
-    python "${repo_root}/MEGAKERNEL_POC/python/e2e_performance_measurement.py" \
-        --frameworks decode_only optimum \
-        --torch-threads 20
 }
 
 main "$@"
-

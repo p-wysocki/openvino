@@ -30,8 +30,10 @@ jobs:
               set -Eeuo pipefail
               echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
               git config --global --add safe.directory /workspace/repo
-              echo "running test script:"
-              bash MEGAKERNEL_POC/ci_scripts/compile_run_megakernel_tests.sh
+              echo "building megakernel:"
+              bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh
+              echo "running megakernel tests:"
+              bash MEGAKERNEL_POC/ci_scripts/run_megakernel_tests.sh
               echo "🍏 This job'\''s status is ${{ job.status }}."
             '
 
