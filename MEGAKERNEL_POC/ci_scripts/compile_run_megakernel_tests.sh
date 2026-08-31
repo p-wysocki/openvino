@@ -20,8 +20,13 @@ main() {
     venv_dir="$(mktemp -d)"
     trap cleanup EXIT
 
+    git submodule update --init --recursive
+
     python3 -m venv --system-site-packages "${venv_dir}"
     source "${venv_dir}/bin/activate"
+
+    chmod +x install_build_dependencies.sh
+    ./install_build_dependencies.sh
 
     python -m pip install --upgrade optimum-intel
     python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
