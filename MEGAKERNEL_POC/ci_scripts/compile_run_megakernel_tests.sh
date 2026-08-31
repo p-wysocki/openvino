@@ -20,7 +20,7 @@ main() {
     venv_dir="$(mktemp -d)"
     trap cleanup EXIT
 
-    git submodule update --init --recursive
+    #git submodule update --init --recursive
 
     python3 -m venv --system-site-packages "${venv_dir}"
     source "${venv_dir}/bin/activate"

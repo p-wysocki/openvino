@@ -12,6 +12,7 @@ jobs:
         with:
           path: ./repo
           clean: true
+          submodules: 'recursive'
 
       - name: Verify local Docker image
         run: docker image inspect ci_megakernel_image
