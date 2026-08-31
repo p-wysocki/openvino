@@ -28,12 +28,7 @@ jobs:
             bash -lc '
               set -Eeuo pipefail
               echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
-              echo "🐧 This job is now running on a ${{ runner.os }} self-hosted runner."
-              echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
-              echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
-              echo "🖥️ The workflow is now ready to test your code on the runner."
-              test -f /.dockerenv && echo "RUNNING INSIDE DOCKER"
-              echo "📝 The contents of the current working directory are:"
+              git config --global --add safe.directory /workspace/repo
               echo "running test script:"
               bash MEGAKERNEL_POC/ci_scripts/compile_run_megakernel_tests.sh
               echo "🍏 This job'\''s status is ${{ job.status }}."
