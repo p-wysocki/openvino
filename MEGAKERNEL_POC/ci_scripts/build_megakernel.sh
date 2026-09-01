@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
-build_dir="$(cd "${repo_root}/.." && pwd)/build"
+build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
 
 main() {
