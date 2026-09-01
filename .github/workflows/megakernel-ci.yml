@@ -1,4 +1,4 @@
-name: megakernel-ci-test
+name: Megakernel-CI
 run-name: Megakernel CI Benchmark/Tests
 on: [push, workflow_dispatch]
 jobs:
@@ -31,7 +31,23 @@ jobs:
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Run tests and benchmarks 
+      - name: Compile OpenVINO GenAI
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
+        run: |
+          docker run --rm \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
+            -w /workspace/repo \
+            ci_megakernel_image \
+            bash -lc '
+              set -Eeuo pipefail
+              git config --global --add safe.directory /workspace/repo
+              echo "building OpenVINO GenAI:"
+              bash MEGAKERNEL_POC/ci_scripts/build_genai.sh
+              echo "DONE! This job'\''s status is ${{ job.status }}."
+            '
+
+      - name: Run tests and benchmarks
         env:
           WORKSPACE_REPO: ${{ github.workspace }}/repo
         run: |
