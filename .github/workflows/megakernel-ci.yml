@@ -1,0 +1,71 @@
+name: Megakernel-CI
+run-name: Megakernel CI Benchmark/Tests
+on: [push, workflow_dispatch]
+jobs:
+  Megakernel-CI:
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+        with:
+          path: ./repo
+          clean: true
+          submodules: 'recursive'
+
+      - name: Compile ov with megakernel
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
+        run: |
+          docker run --rm \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
+            -w /workspace/repo \
+            --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
+            ci_megakernel_image \
+            bash -lc '
+              set -Eeuo pipefail
+              git config --global --add safe.directory /workspace/repo
+              echo "building megakernel:"
+              bash MEGAKERNEL_POC/ci_scripts/build_megakernel.sh
+              echo "DONE! This job'\''s status is ${{ job.status }}."
+            '
+
+      - name: Compile OpenVINO GenAI
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
+        run: |
+          docker run --rm \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
+            -w /workspace/repo \
+            ci_megakernel_image \
+            bash -lc '
+              set -Eeuo pipefail
+              git config --global --add safe.directory /workspace/repo
+              echo "building OpenVINO GenAI:"
+              bash MEGAKERNEL_POC/ci_scripts/build_genai.sh
+              echo "DONE! This job'\''s status is ${{ job.status }}."
+            '
+
+      - name: Run tests and benchmarks
+        env:
+          WORKSPACE_REPO: ${{ github.workspace }}/repo
+        run: |
+          docker run --rm \
+            -v "$WORKSPACE_REPO:/workspace/repo" \
+            -w /workspace/repo \
+            --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
+            ci_megakernel_image \
+            bash -lc '
+              set -Eeuo pipefail
+              git config --global --add safe.directory /workspace/repo
+              echo "running megakernel tests:"
+              bash MEGAKERNEL_POC/ci_scripts/run_megakernel_tests.sh
+              echo "DONE! This job'\''s status is ${{ job.status }}."
+            '
+
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          sudo chmod -R 777 ${{ github.workspace }} || true
+          rm -rf ${{ github.workspace }}/* || true
