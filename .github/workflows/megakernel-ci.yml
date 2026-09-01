@@ -31,7 +31,7 @@ jobs:
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Run benchmarks inside local Docker image
+      - name: Run tests and benchmarks 
         env:
           WORKSPACE_REPO: ${{ github.workspace }}/repo
         run: |
