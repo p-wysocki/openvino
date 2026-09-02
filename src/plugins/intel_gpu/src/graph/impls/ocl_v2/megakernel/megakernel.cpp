@@ -25,6 +25,7 @@
 
 #include "../primitive_ocl_base.hpp"
 #include "intel_gpu/graph/network.hpp"
+#include "intel_gpu/op/megakernel.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"
 #include "megakernelImpl.h"
@@ -98,18 +99,18 @@ public:
 
         // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known constant parameter type.
         mk::ConstantParamsImpl weights{};
-        weights.q_proj_w = usm_raw(instance.input_memory(5), "q_proj_w");
-        weights.k_proj_w = usm_raw(instance.input_memory(6), "k_proj_w");
-        weights.v_proj_w = usm_raw(instance.input_memory(7), "v_proj_w");
-        weights.o_proj_w = usm_raw(instance.input_memory(8), "o_proj_w");
-        weights.gate_proj_w = usm_raw(instance.input_memory(9), "gate_proj_w");
-        weights.up_proj_w = usm_raw(instance.input_memory(10), "up_proj_w");
-        weights.down_proj_w = usm_raw(instance.input_memory(11), "down_proj_w");
-        weights.input_ln_w = usm_raw(instance.input_memory(12), "input_ln_w");
-        weights.post_attn_ln_w = usm_raw(instance.input_memory(13), "post_attn_ln_w");
-        weights.q_norm_w = usm_raw(instance.input_memory(14), "q_norm_w");
-        weights.k_norm_w = usm_raw(instance.input_memory(15), "k_norm_w");
-        weights.rope_inv_freq = usm_raw(instance.input_memory(16), "rope_inv_freq");
+        weights.q_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 0), "q_proj_w");
+        weights.k_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 1), "k_proj_w");
+        weights.v_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 2), "v_proj_w");
+        weights.o_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 3), "o_proj_w");
+        weights.gate_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 4), "gate_proj_w");
+        weights.up_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 5), "up_proj_w");
+        weights.down_proj_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 6), "down_proj_w");
+        weights.input_ln_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 7), "input_ln_w");
+        weights.post_attn_ln_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 8), "post_attn_ln_w");
+        weights.q_norm_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 9), "q_norm_w");
+        weights.k_norm_w = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 10), "k_norm_w");
+        weights.rope_inv_freq = usm_raw(instance.input_memory(op::mk_port::WEIGHTS + 11), "rope_inv_freq");
         // ---
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
@@ -133,12 +134,22 @@ public:
         OPENVINO_ASSERT(instance.input_memory(1).get_layout().data_type == cldnn::data_types::i64,
                         "[MegaKernel] supports only i64 position_ids (input 1) for the task-system path");
 
+        const int new_tokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
+        const bool import_past = collect_past_kv(instance);
+
         // TODO: Specific to Qwen06BPOC, but will have to be generalized to any megakernel runtime with a known runtime parameter type.
         mk::RuntimeParamsImpl io{};
         io.hidden_states = instance.input_memory(0).buffer_ptr();
         io.position_ids = instance.input_memory(1).buffer_ptr();
         io.hidden_states_out = instance.output_memory(0).buffer_ptr();
-        io.newTokens = (int)instance.input_memory(0).get_layout().get<ov::PartialShape>()[1].get_length();
+        io.newTokens = new_tokens;
+        if (import_past) {
+            io.past_key = past_key_.data();
+            io.past_value = past_value_.data();
+            io.past_key_stride = past_key_stride_.data();
+            io.past_value_stride = past_value_stride_.data();
+            io.import_past_len = past_len_;
+        }
         // ---
 
         megakernelRuntime_->Execute(&io);
@@ -155,8 +166,52 @@ public:
     }
 
 private:
+    // Two-model PoC: hand the prefill KV cache over to the MegaKernel's internal cache.
+    //
+    // The decode model has no KV ReadValue/Assign nodes, so nothing but the host ever
+    // writes its variable states: they are set exactly once per sequence, when the prefill
+    // request's cache is copied over. Consuming that "is set" flag therefore triggers the
+    // import on the first decode step of every sequence and on no other step. Afterwards
+    // the MegaKernel keeps growing its own cache and the states stay untouched.
+    bool collect_past_kv(cldnn::primitive_inst& instance) {
+        const auto& ids = instance.get_typed_desc<cldnn::megakernel>()->kv_variable_ids;
+        const size_t num_layers = ids.size() / 2;
+        auto& network = instance.get_network();
+
+        auto& key0 = network.get_variable(ids[0]);
+        if (!key0.is_set() || key0.get_memory() == nullptr)
+            return false;
+        past_len_ = static_cast<int>(key0.get_layout().get_dims()[2]);
+        if (past_len_ == 0)
+            return false;
+
+        past_key_.resize(num_layers);
+        past_value_.resize(num_layers);
+        past_key_stride_.resize(num_layers);
+        past_value_stride_.resize(num_layers);
+        for (size_t l = 0; l < num_layers; ++l) {
+            const auto collect = [&](const std::string& id, const void*& ptr, int& stride) {
+                auto& variable = network.get_variable(id);
+                const auto& layout = variable.get_layout();
+                OPENVINO_ASSERT(layout.data_type == cldnn::data_types::f16,
+                                "[MegaKernel] past KV cache must be f16, got ", layout.data_type);
+                ptr = variable.get_memory()->buffer_ptr();
+                // The sequence dimension may be over-allocated; the tokens of one head are
+                // laid out contiguously with this stride.
+                stride = static_cast<int>(layout.get_padded_dims()[2]);
+                variable.unset();
+            };
+            collect(ids[l], past_key_[l], past_key_stride_[l]);
+            collect(ids[num_layers + l], past_value_[l], past_value_stride_[l]);
+        }
+        return true;
+    }
+
     std::mutex mu_;
     mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
+    std::vector<const void*> past_key_, past_value_;
+    std::vector<int> past_key_stride_, past_value_stride_;
+    int past_len_ = 0;
 };
 
 }  // namespace

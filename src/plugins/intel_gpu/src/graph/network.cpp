@@ -32,6 +32,7 @@
 #include "deconvolution_inst.h"
 #include "mutable_data_inst.h"
 #include "condition_inst.h"
+#include "megakernel_inst.h"
 #include "read_value_inst.h"
 #include "reshape_inst.h"
 #include "kv_cache_inst.h"
@@ -1131,6 +1132,16 @@ void network::allocate_primitive_instance(program_node const& node) {
         if (!users.empty()) {
             is_lora_state = users.front()->is_type<lora>();
         }
+    }
+
+    if (node.is_type<megakernel>()) {
+        // The MegaKernel replaces the model's KV ReadValue/Assign pairs with its own device
+        // buffers, so there is no state primitive to register the variables from. Register
+        // them here instead to keep the cache reachable through query_state()/set_state().
+        const auto& prim = node.as<megakernel>().get_primitive();
+        for (const auto& variable_id : prim->kv_variable_ids)
+            set_variables_state_info(variable_id, prim->kv_variable_layout, prim->kv_variable_user_type,
+                                     prim.get(), nullptr, false);
     }
 
     if (auto state_prim = std::dynamic_pointer_cast<memory_state::variable>(inst)) {

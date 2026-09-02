@@ -6,9 +6,11 @@
 
 namespace ov::intel_gpu::op {
 
-MegaKernel::MegaKernel(const ov::OutputVector& inputs, const MegaKernelAttrs& attrs)
+MegaKernel::MegaKernel(const ov::OutputVector& inputs, const MegaKernelAttrs& attrs,
+                       MegaKernelKvVariables kv_variables)
     : Op(inputs),
-      m_attrs(attrs) {
+      m_attrs(attrs),
+      m_kv_variables(std::move(kv_variables)) {
     validate_and_infer_types();
 }
 
@@ -46,7 +48,7 @@ void MegaKernel::validate_and_infer_types() {
 
 std::shared_ptr<ov::Node> MegaKernel::clone_with_new_inputs(const ov::OutputVector& new_args) const {
     check_new_args_count(this, new_args);
-    return std::make_shared<MegaKernel>(new_args, m_attrs);
+    return std::make_shared<MegaKernel>(new_args, m_attrs, m_kv_variables);
 }
 
 }  // namespace ov::intel_gpu::op

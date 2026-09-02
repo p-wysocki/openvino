@@ -1576,7 +1576,8 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
             const auto& rank = node->input(0).get_partial_shape().rank().get_length();
             return rank != 4;
         });
-        manager.register_pass<ov::intel_gpu::InsertMegaKernel>();
+        if (config.get_enable_megakernel())
+            manager.register_pass<ov::intel_gpu::InsertMegaKernel>();
         manager.register_pass<ov::intel_gpu::KVCacheFusion>();
         manager.register_pass<ov::intel_gpu::FullyConnectedConvertFusion>();
         manager.register_pass<ov::intel_gpu::TransposeFusion>(device_info.supports_immad);

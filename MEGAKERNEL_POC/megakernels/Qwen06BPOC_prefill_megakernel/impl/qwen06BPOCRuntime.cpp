@@ -1441,6 +1441,29 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     runtimeContext_.out = io->hidden_states_out;
     const uint newTokens = io->newTokens;
 
+    // Two-model PoC: adopt the KV cache produced by the separate prefill model.
+    // The source tensors are OpenVINO KV-cache variables ([kv_heads, stride, head_dim]
+    // f16, one per layer); the internal cache is [layers, kv_heads, MAX_SEQ, head_dim],
+    // so the tokens of one head are contiguous on both sides and only the per-head
+    // stride differs.
+    if (io->import_past_len > 0) {
+        assert_or_throw(io->import_past_len <= MAX_SEQ,
+                        "[MegaKernel] handed-over KV cache exceeds capacity: ", io->import_past_len);
+        const size_t head_bytes = (size_t)io->import_past_len * HD * 2;
+        auto import_head = [&](const void* src, int src_stride, void* dst, int layer, int head) {
+            const char* from = (const char*)src + (size_t)head * src_stride * HD * 2;
+            char* to = (char*)dst + ((size_t)layer * KVH + head) * MAX_SEQ * HD * 2;
+            assert_or_throw(usmMemcpy_(stream_, CL_FALSE, to, from, head_bytes, 0, nullptr, nullptr) == CL_SUCCESS,
+                            "[MegaKernel] past KV import failed at layer ", layer);
+        };
+        for (int layer = 0; layer < NUM_L; layer++) {
+            for (int head = 0; head < KVH; head++) {
+                import_head(io->past_key[layer], io->past_key_stride[layer], mKC_, layer, head);
+                import_head(io->past_value[layer], io->past_value_stride[layer], mVC_, layer, head);
+            }
+        }
+    }
+
     // Co-resident worker count (see MONO_WG note). Tunable via env.
     static const int workers = [] {
         const char* v = std::getenv("OV_MEGAKERNEL_MONO_WG");

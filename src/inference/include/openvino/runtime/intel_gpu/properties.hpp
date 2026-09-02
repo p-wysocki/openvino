@@ -77,6 +77,15 @@ static constexpr Property<bool> enable_loop_unrolling{"GPU_ENABLE_LOOP_UNROLLING
  */
 static constexpr Property<bool> disable_winograd_convolution{"GPU_DISABLE_WINOGRAD_CONVOLUTION"};
 
+/**
+ * @brief MegaKernel PoC: fold the whole decoder of a supported model into a single
+ * MegaKernel primitive. The resulting model is a decode-only model — prefill has to be
+ * served by a separate copy of the same model compiled with this option turned off, and
+ * its KV cache handed over through the variable states.
+ * @ingroup ov_runtime_ocl_gpu_prop_cpp_api
+ */
+static constexpr Property<bool> enable_megakernel{"GPU_ENABLE_MEGAKERNEL"};
+
 namespace hint {
 /**
  * @brief This enum represents the possible value of ov::intel_gpu::hint::queue_throttle property:

@@ -26,6 +26,18 @@ public:
     void* position_ids;
     void* hidden_states_out;
     int newTokens;
+
+    // Two-model PoC: past KV cache handed over from the separate prefill model.
+    // Ignored unless import_past_len > 0, in which case the runtime overwrites the
+    // first import_past_len tokens of its internal cache before decoding. Each
+    // past_key/past_value entry points at one layer's f16 cache laid out as
+    // [num_kv_heads, stride, head_dim]; only the leading import_past_len tokens of
+    // every head are valid.
+    const void* const* past_key = nullptr;
+    const void* const* past_value = nullptr;
+    const int* past_key_stride = nullptr;
+    const int* past_value_stride = nullptr;
+    int import_past_len = 0;
 };
 
 class Qwen06BPlatformParams : public IPlatformParams {

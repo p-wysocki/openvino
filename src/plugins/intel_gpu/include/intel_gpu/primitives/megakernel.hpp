@@ -39,6 +39,14 @@ struct megakernel : public primitive_base<megakernel> {
     int64_t intermediate_size = 3072;
     float   rms_norm_eps = 1e-6f;
 
+    // KV-cache variables owned by this primitive: num_layers key ids followed by
+    // num_layers value ids. They have no ReadValue/Assign nodes in the graph; the network
+    // registers them from here so that the application can still read and write the cache
+    // through the ordinary variable-state API.
+    std::vector<std::string> kv_variable_ids;
+    layout kv_variable_layout = layout();
+    ov::element::Type kv_variable_user_type = ov::element::dynamic;
+
     size_t hash() const override {
         size_t seed = primitive::hash();
         seed = hash_combine(seed, num_layers);
@@ -61,19 +69,24 @@ struct megakernel : public primitive_base<megakernel> {
                head_dim     == rhs_c.head_dim &&
                num_heads    == rhs_c.num_heads &&
                intermediate_size == rhs_c.intermediate_size &&
-               rms_norm_eps == rhs_c.rms_norm_eps;
+               rms_norm_eps == rhs_c.rms_norm_eps &&
+               kv_variable_ids == rhs_c.kv_variable_ids;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<megakernel>::save(ob);
         ob << num_layers << hidden_size << num_kv_heads << head_dim
-           << num_heads << intermediate_size << rms_norm_eps;
+           << num_heads << intermediate_size << rms_norm_eps
+           << kv_variable_ids << kv_variable_layout
+           << make_data(&kv_variable_user_type, sizeof(ov::element::Type));
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<megakernel>::load(ib);
         ib >> num_layers >> hidden_size >> num_kv_heads >> head_dim
-           >> num_heads >> intermediate_size >> rms_norm_eps;
+           >> num_heads >> intermediate_size >> rms_norm_eps
+           >> kv_variable_ids >> kv_variable_layout
+           >> make_data(&kv_variable_user_type, sizeof(ov::element::Type));
     }
 };
 

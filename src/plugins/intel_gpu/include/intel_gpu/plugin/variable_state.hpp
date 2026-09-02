@@ -43,6 +43,9 @@ public:
     virtual size_t get_actual_mem_size() const = 0;
 
     void set() { m_is_set = true; }
+    // Lets a consumer that copies the state elsewhere mark it as taken, so that it can tell
+    // a freshly written state from one it has already picked up.
+    void unset() { m_is_set = false; }
     bool is_set() const { return m_is_set; }
 
 protected:

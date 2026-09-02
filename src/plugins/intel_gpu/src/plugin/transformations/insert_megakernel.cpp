@@ -5,22 +5,26 @@
 //  1. Detects the model by counting 56 ReadValue/Assign "past_key_values" pairs.
 //  2. Collects per-layer weight Constants (q/k/v/o proj, gate/up/down proj,
 //     input_ln, post_attn_ln, q_norm, k_norm) and stacks them along a new dim-0.
-//  3. Stacks the 56 ReadValue outputs into two [28,B,8,S,128] tensors via
-//     Unsqueeze+Concat (the ReadValue nodes are kept; only wiring changes).
-//  4. Creates MegaKernel.
-//  5. Rewires model.norm to consume the MegaKernel hidden-state output directly
+//  3. Creates MegaKernel and hands it the 56 KV-cache variable ids.
+//  4. Rewires model.norm to consume the MegaKernel hidden-state output directly
 //     (a single Convert to f16 to match the downstream precision).
-//  6. Splits present_key / present_val (outputs 1/2) back to 28 slices and wires
-//     each directly to the matching Assign.
+//  5. Drops the 56 KV-cache Assign sinks, which also makes the 56 ReadValues
+//     unreachable — the MegaKernel keeps the growing KV cache in its own device
+//     buffers, and the network registers the variables from the primitive so they
+//     stay readable and writable through the variable-state API.
 //
 // The original 28-layer SDPA sub-graph is left with no consumers and therefore
 // becomes unreachable from Results/Sinks — it is never compiled, so there is no
 // duplicate weight memory and no runtime branching (Select) overhead.
 //
 // Two-model PoC: this pass produces the DECODE model. Prefill is served by a
-// separate, unmodified OpenVINO model (compile with OV_MEGAKERNEL_DISABLE=1) so
-// the MegaKernel never handles prefill and only decode latency is measured. The
-// pass is a no-op when OV_MEGAKERNEL_DISABLE=1, which yields that regular model.
+// separate copy of the same model compiled with ov::intel_gpu::enable_megakernel
+// turned off, so the MegaKernel never handles prefill and only decode latency is
+// measured. OV_MEGAKERNEL_DISABLE=1 is an equivalent environment override.
+//
+// The prefill KV cache is handed over through the ordinary OpenVINO variable
+// states: the host copies the prefill request's states into this model's states
+// and the MegaKernel impl imports them on the first decode step.
 
 #include "insert_megakernel.hpp"
 
@@ -29,18 +33,10 @@
 #include "openvino/core/graph_util.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/assign.hpp"
-#include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/read_value.hpp"
-#include "openvino/op/squeeze.hpp"
-#include "openvino/op/split.hpp"
-#include "openvino/op/unsqueeze.hpp"
-#include "openvino/op/gather.hpp"
-#include "openvino/op/equal.hpp"
-#include "openvino/op/select.hpp"
-#include "openvino/op/shape_of.hpp"
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/visualize_tree.hpp"
@@ -249,21 +245,6 @@ static void collect_sorted_assign(const ov::NodeVector& ops,
     }
 }
 
-// Build [28, B, num_kv_heads, S_past, head_dim] by stacking 28 ReadValue outputs
-// via Unsqueeze(axis=0) + Concat(axis=0).
-static ov::Output<ov::Node> build_stacked_kv(
-        const std::vector<std::shared_ptr<ov::op::v6::ReadValue>>& rvs) {
-    auto axis_const = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {0});
-    ov::OutputVector unsqueezed;
-    unsqueezed.reserve(rvs.size());
-    for (auto& rv : rvs) {
-        auto us = std::make_shared<ov::op::v0::Unsqueeze>(rv->output(0), axis_const);
-        unsqueezed.push_back(us->output(0));
-    }
-    auto cat = std::make_shared<ov::op::v0::Concat>(unsqueezed, 0);
-    return cat->output(0);
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -367,11 +348,21 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     std::vector<std::shared_ptr<ov::op::v6::Assign>> key_as, val_as;
     collect_sorted_assign(ops, key_as, val_as);
 
-    // --- 5. Stack KV caches ------------------------------------------------------
+    // --- 5. Past KV cache ---------------------------------------------------
+    // The MegaKernel keeps the KV cache in its own device buffers, so the ReadValue nodes
+    // are dropped from the graph along with the Assign sinks below; only the variable ids
+    // are handed to the primitive so the states stay reachable from the application.
     std::vector<std::shared_ptr<ov::op::v6::ReadValue>> key_rvs, val_rvs;
     collect_sorted_rv(ops, key_rvs, val_rvs);
-    auto past_key = build_stacked_kv(key_rvs);
-    auto past_val = build_stacked_kv(val_rvs);
+
+    op::MegaKernelKvVariables kv_variables;
+    kv_variables.shape = key_rvs[0]->get_output_partial_shape(0);
+    kv_variables.type = key_rvs[0]->get_output_element_type(0);
+    kv_variables.user_type = key_rvs[0]->get_variable()->get_info().data_type;
+    for (auto& rv : key_rvs)
+        kv_variables.ids.push_back(rv->get_variable_id());
+    for (auto& rv : val_rvs)
+        kv_variables.ids.push_back(rv->get_variable_id());
 
     // --- 6. Build MegaKernel -----------------------------------------------
     op::MegaKernelAttrs attrs;
@@ -381,23 +372,23 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
         embed_gather->output(0),               // 0  hidden_states
         pos_ids_node->output(0),               // 1  position_ids
         beam_idx_node->output(0),              // 2  beam_idx
-        past_key,                              // 3  past_key  [28,B,8,S,128]
-        past_val,                              // 4  past_val
-        stacked_proj["q_proj"]->output(0),     // 5
-        stacked_proj["k_proj"]->output(0),     // 6
-        stacked_proj["v_proj"]->output(0),     // 7
-        stacked_proj["o_proj"]->output(0),     // 8
-        stacked_proj["gate_proj"]->output(0),  // 9
-        stacked_proj["up_proj"]->output(0),    // 10
-        stacked_proj["down_proj"]->output(0),  // 11
-        stacked_norm["input_ln"]->output(0),   // 12
-        stacked_norm["post_attn_ln"]->output(0),// 13
-        stacked_norm["q_norm"]->output(0),     // 14
-        stacked_norm["k_norm"]->output(0),     // 15
-        rope_inv_freq,                         // 16
+        stacked_proj["q_proj"]->output(0),     // 3
+        stacked_proj["k_proj"]->output(0),     // 4
+        stacked_proj["v_proj"]->output(0),     // 5
+        stacked_proj["o_proj"]->output(0),     // 6
+        stacked_proj["gate_proj"]->output(0),  // 7
+        stacked_proj["up_proj"]->output(0),    // 8
+        stacked_proj["down_proj"]->output(0),  // 9
+        stacked_norm["input_ln"]->output(0),   // 10
+        stacked_norm["post_attn_ln"]->output(0),// 11
+        stacked_norm["q_norm"]->output(0),     // 12
+        stacked_norm["k_norm"]->output(0),     // 13
+        rope_inv_freq,                         // 14
     };
+    OPENVINO_ASSERT(mk_inputs.size() == op::mk_port::COUNT,
+                    "[MegaKernel] built ", mk_inputs.size(), " inputs, expected ", op::mk_port::COUNT);
 
-    auto mk_node = std::make_shared<op::MegaKernel>(mk_inputs, attrs);
+    auto mk_node = std::make_shared<op::MegaKernel>(mk_inputs, attrs, kv_variables);
     mk_node->set_friendly_name("MegaKernel");
     ov::copy_runtime_info(last_add, mk_node);
 
@@ -411,8 +402,9 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
     // --- 8. Drop the KV-cache Assign sinks --------------------------------------
     // The MegaKernel keeps the entire KV cache in its own persistent device buffers
     // (see MegaKernelFastImpl), so OpenVINO's per-layer KV Variables are redundant.
-    // Removing the Assign sinks eliminates 56 Reorder/Convert/Assign ops that
-    // otherwise run every decode step purely to feed unused state.
+    // Removing the Assign sinks also orphans the ReadValues, which eliminates 56
+    // Reorder/Convert/Assign ops plus 56 ReadValue instances that would otherwise run
+    // every decode step purely to feed unused state.
     for (auto& a : key_as)
         m->remove_sink(a);
     for (auto& a : val_as)
@@ -441,21 +433,23 @@ bool InsertMegaKernel::run_on_model(const std::shared_ptr<ov::Model>& m) {
         OPENVINO_ASSERT(mk_count == 1,
                         "[MegaKernel] post-insertion check FAILED: expected 1 MegaKernel node, found ", mk_count);
 
-        // 2. Confirm the 56 Assign sinks were removed (only ReadValues remain).
-        int assign_kv_count = 0;
+        // 2. Confirm the KV Assign sinks and ReadValues are gone from the graph.
+        int kv_state_op_count = 0;
         for (auto& op : m->get_ordered_ops()) {
             auto as = ov::as_type_ptr<ov::op::v6::Assign>(op);
-            if (as && as->get_variable_id().find("past_key_values") != std::string::npos)
-                ++assign_kv_count;
+            auto rv = ov::as_type_ptr<ov::op::v6::ReadValue>(op);
+            if ((as && as->get_variable_id().find("past_key_values") != std::string::npos) ||
+                (rv && rv->get_variable_id().find("past_key_values") != std::string::npos))
+                ++kv_state_op_count;
         }
-        OPENVINO_ASSERT(assign_kv_count == 0,
-                        "[MegaKernel] post-insertion check FAILED: ", assign_kv_count,
-                        " KV Assign sinks still present (expected 0)");
+        OPENVINO_ASSERT(kv_state_op_count == 0,
+                        "[MegaKernel] post-insertion check FAILED: ", kv_state_op_count,
+                        " KV ReadValue/Assign nodes still present (expected 0)");
 
         if (dump) {
             std::cout << "[MegaKernel] PASS: MegaKernel node successfully inserted (" << mk_count << " node)." << std::endl;
             std::cout << "[MegaKernel] PASS: all " << (2 * NUM_LAYERS)
-                      << " KV-cache Assign sinks removed." << std::endl;
+                      << " KV-cache state nodes removed." << std::endl;
 
             // 3. Dump transformed graph to SVG.
             // VisualizeTree always writes a .dot file; the built-in dot→SVG step is

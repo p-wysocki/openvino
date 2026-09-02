@@ -20,7 +20,7 @@ namespace ov::intel_gpu {
 
 static void CreateMegaKernelOp(ProgramBuilder& p,
                                       const std::shared_ptr<ov::intel_gpu::op::MegaKernel>& op) {
-    validate_inputs_count(op, {17});
+    validate_inputs_count(op, {op::mk_port::COUNT});
     auto inputs = p.GetInputInfo(op);
     const auto& attrs = op->get_attrs();
 
@@ -39,6 +39,12 @@ static void CreateMegaKernelOp(ProgramBuilder& p,
         attrs.num_attention_heads,
         attrs.intermediate_size,
         attrs.rms_norm_eps);
+
+    const auto& kv = op->get_kv_variables();
+    prim.kv_variable_ids = kv.ids;
+    prim.kv_variable_layout = cldnn::layout(kv.shape, kv.type,
+                                            cldnn::format::get_default_format(kv.shape.size()));
+    prim.kv_variable_user_type = kv.user_type;
 
     prim.output_data_types = get_output_data_types(op);
     p.add_primitive(*op, prim);

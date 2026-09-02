@@ -1,5 +1,12 @@
 """End-to-end MegaKernel decode performance measurement.
 
+The MegaKernel path runs on TWO compiled models built from the same IR: prefill is
+served by the unmodified OpenVINO model and decode by the MegaKernel model (selected
+with the GPU_ENABLE_MEGAKERNEL plugin option). After prefill the KV cache is handed
+over through the ordinary OpenVINO variable states (see ``handover_kv``), so the
+MegaKernel only ever sees single-token decode steps. The baseline path uses one
+unmodified model for both phases.
+
 Usage
 -----
     source /opt/home/pwysocki/openvino_dist/setupvars.sh
@@ -24,6 +31,7 @@ import numpy as np
 
 HERE = Path(__file__).parent
 DEFAULT_MODEL_DIR = HERE / "qwen3-0.6b-openvino-ir"
+GENAI_BUILD_DIR = Path("/opt/home/pwysocki/openvino.genai/build")
 DEFAULT_DEVICE = "GPU.1"
 BATCH = 1
 
@@ -146,42 +154,81 @@ def stats(latencies_ms: list[float]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Two-model plumbing
+# ---------------------------------------------------------------------------
+
+def ov_config(megakernel: bool) -> dict:
+    """Plugin config selecting the MegaKernel decode model or the plain model.
+
+    Both are compiled from the same IR; GPU_ENABLE_MEGAKERNEL decides whether the GPU
+    plugin folds the decoder into the decode-only MegaKernel primitive. CACHE_DIR=""
+    keeps the compiled-model blob cache out of the picture entirely.
+    """
+    return {"CACHE_DIR": "", "GPU_ENABLE_MEGAKERNEL": megakernel}
+
+
+def handover_kv(prefill_request, decode_request) -> float:
+    """Move the prompt KV cache from the prefill request to the decode request.
+
+    Both models keep the same 56 KV-cache variables, so the hand-over is a plain
+    variable-state copy. The MegaKernel impl imports them into its internal cache on
+    the first decode step. Returns the elapsed milliseconds.
+    """
+    t = time.perf_counter()
+    decode_request.reset_state()
+    destination = {s.name: s for s in decode_request.query_state()}
+    for state in prefill_request.query_state():
+        destination[state.name].state = state.state
+    return (time.perf_counter() - t) * 1e3
+
+
+# ---------------------------------------------------------------------------
 # Workers
 # ---------------------------------------------------------------------------
 
 def decode_only_worker(args) -> list[dict]:
     """Pure decode benchmark using the OV native API.
 
-    Prefill is run once (untimed) to warm the KV cache, then N identical
-    single-token decode steps are timed at a fixed position.  No prefill
-    latency is measured or reported.  A single fixed prompt is used; its
-    content does not affect the measured decode cost.
+    Prefill is run once (untimed) on the unmodified model, its KV cache is handed to
+    the decode model, then N identical single-token decode steps are timed at a fixed
+    KV-cache position.  No prefill latency is measured or reported.  A single fixed
+    prompt is used; its content does not affect the measured decode cost.
     """
     import openvino as ov
 
     core = ov.Core()
     dev_name = core.get_property(args.device, "FULL_DEVICE_NAME")
     model = core.read_model(str(Path(args.model_dir) / "openvino_model.xml"))
+    two_model = args.path == "megakernel"
+
     t0 = time.perf_counter()
-    compiled = core.compile_model(model, args.device)
+    prefill_cm = core.compile_model(model, args.device, ov_config(False))
+    decode_cm = core.compile_model(model, args.device, ov_config(True)) if two_model else prefill_cm
     compile_s = time.perf_counter() - t0
 
     tokenizer = load_tokenizer(Path(args.model_dir))
 
-    # Warmup – dummy prefill + a few decode steps
-    warm = compiled.create_infer_request()
-    warm.infer(prefill_inputs(np.ones((BATCH, 8), np.int64)))
+    def start_sequence(ids: np.ndarray):
+        """Prefill on the unmodified model and return (decode request, last logits)."""
+        prefill_req = prefill_cm.create_infer_request()
+        res = prefill_req.infer(prefill_inputs(ids))
+        logits = np.array(res[0])[0, -1, :].astype(np.float32)
+        if not two_model:
+            return prefill_req, logits
+        decode_req = decode_cm.create_infer_request()
+        handover_kv(prefill_req, decode_req)
+        return decode_req, logits
+
+    # Warmup - exercises the same two-model path as the measurement below.
+    warm_req, _ = start_sequence(np.ones((BATCH, 8), np.int64))
     for pos in range(8, 12):
-        warm.infer(single_token_inputs(1, pos))
+        warm_req.infer(single_token_inputs(1, pos))
 
     # Tokenize the fixed prompt (content is irrelevant to the timed section)
     ids = prompt_token_ids(tokenizer, DECODE_ONLY_PROMPT)
     prompt_len = int(ids.shape[1])
 
-    # Prefill to populate the KV cache (untimed)
-    req = compiled.create_infer_request()
-    res = req.infer(prefill_inputs(ids))
-    logits = np.array(res[0])[0, -1, :].astype(np.float32)
+    req, logits = start_sequence(ids)
     next_id = int(logits.argmax())
 
     # Optionally prime the KV cache to a longer context
@@ -202,8 +249,8 @@ def decode_only_worker(args) -> list[dict]:
         lat.append((time.perf_counter() - t) * 1e3)
 
     # Greedy-decode real text for baseline vs megakernel comparison (untimed,
-    # fresh request so the timed loop above is unaffected).
-    text_out = _native_generate_text(compiled, tokenizer, ids, prompt_len, args.tokens)
+    # fresh sequence so the timed loop above is unaffected).
+    text_out = _native_generate_text(start_sequence, tokenizer, ids, prompt_len, args.tokens)
 
     return [{
         "prompt": "decode",
@@ -219,12 +266,11 @@ def decode_only_worker(args) -> list[dict]:
     }]
 
 
-def _native_generate_text(compiled, tokenizer, ids: np.ndarray, prompt_len: int,
+def _native_generate_text(start_sequence, tokenizer, ids: np.ndarray, prompt_len: int,
                            n_tokens: int) -> str:
-    """Greedy-decode real tokens from a fresh request and detokenize."""
-    gen_req = compiled.create_infer_request()
-    r = gen_req.infer(prefill_inputs(ids))
-    cur = int(np.array(r[0])[0, -1, :].argmax())
+    """Greedy-decode real tokens from a fresh sequence and detokenize."""
+    gen_req, logits = start_sequence(ids)
+    cur = int(logits.argmax())
     pos = prompt_len
     eos = tokenizer.eos_token_id
     gen_ids: list[int] = []
@@ -253,13 +299,45 @@ def optimum_worker(args) -> list[dict]:
     n_threads = args.torch_threads or max(1, (os.cpu_count() or 8) // 4)
     torch.set_num_threads(n_threads)
 
+    class TwoModelOVModel(OVModelForCausalLM):
+        """Prefill on the unmodified model, decode on the MegaKernel model.
+
+        The two phases differ only in which ov.InferRequest ``forward()`` drives, so
+        the prefill request is swapped in for the first forward of a sequence and its
+        KV cache is handed over to the decode request afterwards. Everything else
+        (input preparation, sampling, cache bookkeeping) is stock optimum.
+        """
+
+        prefill_request = None
+        handover_ms = 0.0
+
+        def forward(self, input_ids, attention_mask=None, past_key_values=None,
+                    position_ids=None, token_type_ids=None, **kwargs):
+            if past_key_values is not None:
+                return super().forward(input_ids, attention_mask, past_key_values,
+                                       position_ids, token_type_ids, **kwargs)
+            decode_request, self.request = self.request, self.prefill_request
+            try:
+                out = super().forward(input_ids, attention_mask, None,
+                                      position_ids, token_type_ids, **kwargs)
+            finally:
+                self.request = decode_request
+            self.handover_ms = handover_kv(self.prefill_request, decode_request)
+            return out
+
+    two_model = args.path == "megakernel"
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     t0 = time.perf_counter()
-    # CACHE_DIR="" disables the compiled-model blob cache. The cache key does not
-    # include the OV_MEGAKERNEL_DISABLE env var, so leaving it on would make the
-    # MegaKernel run silently reuse the baseline blob (no transformation).
-    model = OVModelForCausalLM.from_pretrained(
-        args.model_dir, device=args.device, ov_config={"CACHE_DIR": ""})
+    prefill_model = OVModelForCausalLM.from_pretrained(
+        args.model_dir, device=args.device, ov_config=ov_config(False))
+    prefill_model.compile()
+    if two_model:
+        model = TwoModelOVModel.from_pretrained(
+            args.model_dir, device=args.device, ov_config=ov_config(True))
+        model.compile()
+        model.prefill_request = prefill_model.request
+    else:
+        model = prefill_model
     compile_s = time.perf_counter() - t0
 
     import openvino as ov
@@ -286,7 +364,8 @@ def optimum_worker(args) -> list[dict]:
         for _ in range(max(1, args.gen_warmup)):
             gen(model_inputs, args.tokens)
 
-        # TTFT (prefill only) = generate exactly one new token.
+        # TTFT (prefill only) = generate exactly one new token. In the two-model path
+        # this also covers the KV-cache hand-over, which is part of the prefill cost.
         ttft = []
         for _ in range(args.gen_iters):
             ms, _ = gen(model_inputs, 1)
@@ -313,6 +392,7 @@ def optimum_worker(args) -> list[dict]:
             "prompt": prompt["name"],
             "prompt_len": prompt_len,
             "prefill_ms": ttft_mean,
+            "handover_ms": getattr(model, "handover_ms", 0.0),
             "n_tok": actual_n_tok,
             "decode": {
                 "mean": per_tok_ms,
@@ -333,11 +413,11 @@ def genai_worker(args) -> list[dict]:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     t0 = time.perf_counter()
-    # CACHE_DIR="" disables the compiled-model blob cache (see optimum_worker).
-    # Baseline uses GenAI's default PagedAttention backend.
-    pipeline_kwargs: dict = {"CACHE_DIR": ""}
-    if args.path == "megakernel":
-        pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
+    # Both paths use the stateful SDPA pipeline (required by the MegaKernel decode model)
+    # so prefill is compared apples-to-apples; GenAI's default PagedAttention backend is
+    # not used by either path here.
+    pipeline_kwargs: dict = dict(ov_config(args.path == "megakernel"))
+    pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
     pipe = ov_genai.LLMPipeline(args.model_dir, args.device, **pipeline_kwargs)
     compile_s = time.perf_counter() - t0
 
@@ -401,8 +481,14 @@ WORKERS = {
 # ---------------------------------------------------------------------------
 
 def worker_env(framework: str, path: str) -> dict:
+    # The model variant is selected per compile through ov_config(); make sure a stale
+    # OV_MEGAKERNEL_DISABLE override from the caller's shell cannot leak in.
     env = os.environ.copy()
-    env["OV_MEGAKERNEL_DISABLE"] = "0" if path == "megakernel" else "1"
+    env.pop("OV_MEGAKERNEL_DISABLE", None)
+    if framework == "genai" and (GENAI_BUILD_DIR / "openvino_genai").is_dir():
+        # Only the locally built genai knows how to prefill on a separate model.
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (str(GENAI_BUILD_DIR), env.get("PYTHONPATH")) if p)
     return env
 
 
@@ -455,7 +541,9 @@ def print_decode_only_table(base: list[dict], mega: list[dict]) -> None:
     print(" DECODE-ONLY  (OV native API)")
     print("=" * W)
     print(" How it works:")
-    print("   Prefill is executed once (untimed) to warm the KV cache.")
+    print("   Prefill is executed once (untimed) on the unmodified model; in the")
+    print("   megakernel path its KV cache is then handed over to the MegaKernel")
+    print("   decode model through the OpenVINO variable states.")
     print("   Then N identical single-token decode steps are timed at a fixed")
     print("   KV-cache position.  No prefill latency is measured or reported.")
     print("   Prompt content does not affect the measured decode cost.")
@@ -489,12 +577,17 @@ def print_decode_only_table(base: list[dict], mega: list[dict]) -> None:
 
 
 def print_optimum_table(base: list[dict], mega: list[dict], n_tokens: int) -> None:
-    W = 98
+    W = 118
     print()
     print("=" * W)
     print(" OPTIMUM-INTEL  (HF OVModelForCausalLM.generate)")
     print("=" * W)
     print(" How it works:")
+    print("   Both paths prefill on the unmodified model; the megakernel path then")
+    print("   hands the KV cache to the MegaKernel decode model, so its ttft also")
+    print("   covers that hand-over (reported separately as hover). pf_x is the")
+    print("   raw ttft ratio (includes hover); pf_only_x excludes hover and is the")
+    print("   apples-to-apples prefill-compute ratio (expected ~1x).")
     print("   TTFT = time to first token (prefill latency), measured by generating")
     print("   exactly 1 new token.  ms/tok = per-decode-token latency estimated as")
     print("   (full_generate_ms - ttft_ms) / (n_generated - 1), averaged over")
@@ -502,9 +595,9 @@ def print_optimum_table(base: list[dict], mega: list[dict], n_tokens: int) -> No
     print()
 
     hdr = (f"  {'prompt':<8}  {'in_tok':>6} | "
-           f"{'base ttft':>9}  {'mk ttft':>7} | "
+           f"{'base ttft':>9}  {'mk ttft':>7}  {'mk hover':>8} | "
            f"{'base ms/tok':>11}  {'mk ms/tok':>9} | "
-           f"{'decode_x':>8}  {'pf_x':>5}  {f'e2e_x@{n_tokens}':>10}")
+           f"{'decode_x':>8}  {'pf_x':>5}  {'pf_only_x':>9}  {f'e2e_x@{n_tokens}':>10}")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
@@ -513,14 +606,17 @@ def print_optimum_table(base: list[dict], mega: list[dict], n_tokens: int) -> No
         md = m["decode"]["mean"]
         bpf = b.get("prefill_ms", float("nan"))
         mpf = m.get("prefill_ms", float("nan"))
+        hov = m.get("handover_ms", float("nan"))
         dec_x = bd / md if md else float("nan")
         pf_x = bpf / mpf if mpf else float("nan")
+        mpf_only = mpf - hov
+        pf_only_x = bpf / mpf_only if mpf_only else float("nan")
         n_dec = max(n_tokens - 1, 0)
         e2e = (bpf + n_dec * bd) / (mpf + n_dec * md) if mpf and md else float("nan")
         print(f"  {b['prompt']:<8}  {b['prompt_len']:>6} | "
-              f"{bpf:>9.3f}  {mpf:>7.3f} | "
+              f"{bpf:>9.3f}  {mpf:>7.3f}  {hov:>8.3f} | "
               f"{bd:>11.3f}  {md:>9.3f} | "
-              f"{dec_x:>7.2f}x  {pf_x:>4.2f}x  {e2e:>9.2f}x")
+              f"{dec_x:>7.2f}x  {pf_x:>4.2f}x  {pf_only_x:>8.2f}x  {e2e:>9.2f}x")
 
     _maybe_print_text(base, mega)
 
@@ -532,7 +628,10 @@ def print_genai_table(base: list[dict], mega: list[dict], n_tokens: int) -> None
     print(" OPENVINO GENAI  (ov_genai.LLMPipeline.generate)")
     print("=" * W)
     print(" How it works:")
-    print("   Baseline path uses the PagedAttention backend.")
+    print("   Both paths use the stateful SDPA pipeline (not GenAI's default PagedAttention)")
+    print("   so prefill is apples-to-apples. The megakernel path prefills on the plain")
+    print("   model and hands the KV cache to the MegaKernel decode model, so its ttft")
+    print("   covers prefill plus that hand-over.")
     print("   TTFT and TPOT come from ov_genai perf_metrics, averaged over")
     print("   multiple generate() calls.  decode_x is the primary speedup metric.")
     print()
