@@ -34,7 +34,8 @@ main() {
         -DENABLE_OV_TF_LITE_FRONTEND=OFF \
         -DENABLE_JS=OFF \
         -DENABLE_WHEEL=ON \
-        -DENABLE_TEMPLATE_REGISTRATION=OFF
+        -DENABLE_TEMPLATE_REGISTRATION=OFF \
+        -DMEGAKERNEL_IMPLEMENTATION=Qwen06BPOC
     cmake --build "${build_dir}" --parallel 16
 }
 
