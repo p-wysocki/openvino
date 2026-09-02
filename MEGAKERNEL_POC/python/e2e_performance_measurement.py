@@ -336,8 +336,8 @@ def genai_worker(args) -> list[dict]:
     # CACHE_DIR="" disables the compiled-model blob cache (see optimum_worker).
     # Baseline uses GenAI's default PagedAttention backend.
     pipeline_kwargs: dict = {"CACHE_DIR": ""}
-    if args.path == "megakernel":
-        pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
+    #if args.path == "megakernel":
+    pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
     pipe = ov_genai.LLMPipeline(args.model_dir, args.device, **pipeline_kwargs)
     compile_s = time.perf_counter() - t0
 
@@ -535,6 +535,13 @@ def print_genai_table(base: list[dict], mega: list[dict], n_tokens: int) -> None
     print("   Baseline path uses the PagedAttention backend.")
     print("   TTFT and TPOT come from ov_genai perf_metrics, averaged over")
     print("   multiple generate() calls.  decode_x is the primary speedup metric.")
+    print("   pf_x is NOT an apples-to-apples backend comparison: the megakernel")
+    print("   pipeline is forced onto ATTENTION_BACKEND=SDPA (InsertMegaKernel only")
+    print("   pattern-matches the per-layer ReadValue/Assign KV state used by SDPA,")
+    print("   not PagedAttention's fused kv-cache), so its prefill runs the plain")
+    print("   SDPA reference kernel while baseline gets PagedAttention's optimized,")
+    print("   length-scaling prefill. A low/negative pf_x here reflects that backend")
+    print("   gap, not megakernel overhead.")
     print()
 
     hdr = (f"  {'prompt':<8}  {'in_tok':>6} | "
@@ -585,7 +592,7 @@ def main() -> None:
                          "(isolates kernel cost from O(context) attention growth). "
                          "decode_only path only.")
     # optimum / genai generate() benchmark
-    ap.add_argument("--torch-threads", type=int, default=23,
+    ap.add_argument("--torch-threads", type=int, default=0,
                     help="Cap torch intra-op threads in the optimum path "
                          "(0 = auto: ~cores/4).")
     ap.add_argument("--gen-warmup", type=int, default=1,
