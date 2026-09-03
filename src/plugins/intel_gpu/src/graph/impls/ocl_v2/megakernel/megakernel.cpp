@@ -207,10 +207,10 @@ public:
         // replay of the previous step (used by the decode microbenchmark); anything
         // else means our internal cache does not cover [0, pos) and must be reloaded.
         const auto& key_layout = kv_key_vars_[0]->get_layout();
-        const auto kv_shape = key_layout.get_shape();
-        OPENVINO_ASSERT(kv_shape.size() == 4, "[MegaKernel] unexpected KV cache rank ", kv_shape.size());
-        const int64_t kv_len = static_cast<int64_t>(kv_shape[2]);
-        const bool import_past = (kv_len != last_kv_len_) || (pos != cache_len_ && pos + 1 != cache_len_);
+        const bool has_prefill_kv = key_layout.get_partial_shape().is_static();
+        const int64_t kv_len = has_prefill_kv ? static_cast<int64_t>(key_layout.get_shape()[2]) : 0;
+        const bool import_past =
+            has_prefill_kv && ((kv_len != last_kv_len_) || (pos != cache_len_ && pos + 1 != cache_len_));
 
         std::vector<const void*> past_key, past_value;
         std::vector<int> past_key_stride, past_value_stride;
