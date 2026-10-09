@@ -55,4 +55,20 @@ inline void repack_row_blocks(const uint8_t* w, const uint16_t* scale, const uin
     }
 }
 
+// u8 lm_head [V, K] with per-row scale / zero point -> records of 16 rows x 64
+// bytes: dword j * 16 + l = row rb * 16 + l, bytes 4j .. 4j + 3 of the record's
+// 64-column group (read by lm_row_dot in gemma4ModelKernels.h).
+inline void repack_lm_head(const uint8_t* w, size_t K, size_t rb_begin, size_t rb_end, uint8_t* out) {
+    const size_t G = K / 64;
+    for (size_t rb = rb_begin; rb < rb_end; ++rb)
+        for (size_t g = 0; g < G; ++g) {
+            uint32_t* rec = reinterpret_cast<uint32_t*>(out + (rb * G + g) * 1024);
+            for (int l = 0; l < kRepackRows; ++l) {
+                const uint8_t* src = w + (rb * kRepackRows + l) * K + g * 64;
+                for (int j = 0; j < 16; ++j)
+                    std::memcpy(&rec[j * 16 + l], src + 4 * j, 4);
+            }
+        }
+}
+
 }  // namespace mk

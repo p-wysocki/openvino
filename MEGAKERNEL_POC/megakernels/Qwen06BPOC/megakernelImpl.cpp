@@ -1,4 +1,5 @@
 #include "megakernelImpl.h"
+#include "megakernelImpl.h"
 
 #include "impl/qwen06BPOCRuntime.h"
 

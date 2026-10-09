@@ -12,6 +12,7 @@ enum Gemma4Kind : int {
     kAttnIn = 2,  // input_layernorm .. q/k/v projections, norms and RoPE
     kMaskFull = 3,     // attention mask of the full-attention layers
     kMaskSliding = 4,  // attention mask of the sliding-window layers
+    kModel = 5,        // the whole language model: embeddings in, logits out
 };
 
 // Shapes of the Gemma-4-26B-A4B FFN block; the transformation refuses layers
@@ -71,6 +72,39 @@ enum MaskPort : int {
     kMaskPorts
 };
 
+// Graph port order of a kModel MegaKernel; output f32 logits [B, S, V] (or
+// [B, 1, V] when the graph only asks for the last token). Layer l's weights
+// follow at kModelLayer0 + l * kModelLayerPorts: the kAttnWIn.. ports of its
+// kAttnIn MegaKernel, then the kFfnWPostAttn.. ports of its kFfn MegaKernel.
+enum ModelPort : int {
+    kModelEmbeds = 0,   // f32 [B,S,H]   inputs_embeds
+    kModelPos,          // i32/i64 [B,S] position_ids
+    kModelAm,           // i32/i64 [B,L] attention_mask
+    kModelTti,          // i32/i64 [B,S] token_type_ids
+    kModelMaskMeta,     // f32 [16]      mask_fill meta
+    kModelMeta,         // f32 [kModelMetaLayer0 + layers], see ModelMeta
+    kModelFinalNorm,    // f16 [H]
+    kModelLmW,          // u8 lm_head records (repack_lm_head)
+    kModelLmScale,      // f16 [V]
+    kModelLmZp,         // u8  [V]
+    kModelLayer0
+};
+constexpr int kModelAttnPorts = kAttnPorts - kAttnWIn;
+constexpr int kModelFfnPorts = kFfnPorts - kFfnWPostAttn;
+constexpr int kModelLayerPorts = kModelAttnPorts + kModelFfnPorts;
+constexpr int kModelMaxLayers = 64;
+
+// kModelMeta entries.
+enum ModelMeta : int {
+    kMetaLayers = 0,    // decoder layers
+    kMetaVocab,         // V
+    kMetaCapDiv,        // logits = tanh(y / cap_div) * cap_mul; cap_div 0 = no soft-cap
+    kMetaCapMul,
+    kMetaAttnScale,     // SDPA scale
+    kMetaLastOnly,      // 1: logits of the last token only
+    kMetaLayer0 = 16,   // per layer: 1 = sliding-window attention
+};
+
 class Gemma4ConstantParams : public IConstantParams {
 public:
     int kind = kLmHead;
@@ -90,17 +124,25 @@ public:
     int attn_rows = 0;  // rows of the kAttnQkv matrix
 
     void* mask_meta = nullptr;  // kMask*
+
+    // kModel: device pointers of every port (activation ports stay null).
+    int layers = 0;
+    void* model[kModelLayer0] = {};
+    void* layer[kModelMaxLayers][kModelLayerPorts] = {};
+    int layer_qkv_rows[kModelMaxLayers] = {};
 };
 
 class Gemma4RuntimeParams : public IRuntimeParams {
 public:
     void* in = nullptr;    // kLmHead: f16 [tokens, K]   kFfn: attention output [tokens, ka]   kAttnIn: x
     void* in2 = nullptr;   // kFfn: residual   kAttnIn: position_ids
-    void* in3 = nullptr;
+    void* in3 = nullptr;   // kModel: attention_mask
+    void* in4 = nullptr;   // kModel: token_type_ids
     void* out = nullptr;   // kLmHead: f32 [tokens, N]   kFfn: f16 [tokens, H]
     int tokens = 0;        // kMask*: batch
-    int ka = 0;            // kFfn: o_proj input width   kAttnIn: RoPE table width   kMask*: L
+    int ka = 0;            // kFfn: o_proj input width   kAttnIn: RoPE table width   kMask*, kModel: L
     int s = 0;             // kMask*: query length
+    int batch = 1;         // kModel
 };
 
 class Gemma4PlatformParams : public IPlatformParams {

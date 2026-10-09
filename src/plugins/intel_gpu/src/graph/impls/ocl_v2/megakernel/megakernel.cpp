@@ -50,22 +50,33 @@ void* usm_raw(cldnn::memory& m, int port) {
     return m.buffer_ptr();
 }
 
-mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
+// Accessor context: the instance plus USM copies of inputs that arrived in a
+// non-USM allocation (e.g. a cl_mem tensor handed over by GenAI).
+struct IoCtx {
+    cldnn::primitive_inst* inst;
+    const std::vector<cldnn::memory::ptr>* staging;
+};
+
+mk::MegakernelIo make_io(IoCtx& c) {
+    auto& instance = *c.inst;
     mk::MegakernelIo io{};
-    io.ctx = &instance;
+    io.ctx = &c;
     io.input_ptr = [](void* ctx, int port) -> void* {
-        auto& inst = *static_cast<cldnn::primitive_inst*>(ctx);
-        return usm_raw(inst.input_memory(port), port);
+        auto& ic = *static_cast<IoCtx*>(ctx);
+        if (ic.staging && static_cast<size_t>(port) < ic.staging->size() && (*ic.staging)[port])
+            return (*ic.staging)[port]->buffer_ptr();
+        return usm_raw(ic.inst->input_memory(port), port);
     };
     io.output_ptr = [](void* ctx, int port) -> void* {
-        auto& inst = *static_cast<cldnn::primitive_inst*>(ctx);
+        auto& inst = *static_cast<IoCtx*>(ctx)->inst;
         return inst.output_memory(port).buffer_ptr();
     };
     io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
-        auto& inst = *static_cast<cldnn::primitive_inst*>(ctx);
+        auto& inst = *static_cast<IoCtx*>(ctx)->inst;
         return inst.input_memory(port).get_layout().get<ov::PartialShape>()[axis].get_length();
     };
     io.kind = instance.get_impl_params()->typed_desc<cldnn::megakernel>()->kind;
+    io.num_inputs = static_cast<int64_t>(instance.inputs_memory_count());
     return io;
 }
 
@@ -118,7 +129,8 @@ public:
         // Resolve the raw USM device pointers for every model input/output. The
         // task-system tasks dereference these directly out of the context struct,
         // which requires genuine USM device allocations (asserted below).
-        mk::MegakernelIo io = make_io(instance);
+        IoCtx ic{&instance, nullptr};
+        mk::MegakernelIo io = make_io(ic);
 
         mk::ConstantParamsImpl weights{};
         FillMegaKernelConstantParams(&weights, &io);
@@ -128,7 +140,8 @@ public:
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        megakernelRuntime_->Init(&weights, &platformParams);
+        const mk::TErrorcode rc = megakernelRuntime_->Init(&weights, &platformParams);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
     cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
@@ -145,11 +158,30 @@ public:
                 strm.wait_for_events({e});
         }
 
-        mk::MegakernelIo io_acc = make_io(instance);
+        // Runtime inputs that are not USM (cl_mem) are copied into USM staging
+        // buffers on the same queue; constants were validated as USM in Init.
+        const size_t n_in = instance.inputs_memory_count();
+        staging_.resize(n_in);
+        for (size_t p = 0; p < n_in; ++p) {
+            auto& m = instance.input_memory(p);
+            if (cldnn::memory_capabilities::is_usm_type(m.get_allocation_type())) {
+                staging_[p] = nullptr;
+                continue;
+            }
+            if (!staging_[p] || staging_[p]->size() < m.size()) {
+                cldnn::layout l({static_cast<int64_t>(m.size())}, ov::element::u8, cldnn::format::bfyx);
+                staging_[p] = instance.get_network().get_engine().allocate_memory(l, cldnn::allocation_type::usm_device, false);
+            }
+            staging_[p]->copy_from(strm, m, 0, 0, m.size(), strm.get_queue_type() != QueueTypes::in_order);
+        }
+
+        IoCtx ic{&instance, &staging_};
+        mk::MegakernelIo io_acc = make_io(ic);
         mk::RuntimeParamsImpl io{};
         FillMegaKernelRuntimeParams(&io, &io_acc);
 
-        megakernelRuntime_->Execute(&io);
+        const mk::TErrorcode rc = megakernelRuntime_->Execute(&io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
         if (strm.get_queue_type() == QueueTypes::in_order && !instance.needs_completion_event() && !instance.is_output())
             return ocls.create_base_event();
@@ -167,6 +199,7 @@ public:
 private:
     std::mutex mu_;
     mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
+    std::vector<cldnn::memory::ptr> staging_;
 };
 
 }  // namespace

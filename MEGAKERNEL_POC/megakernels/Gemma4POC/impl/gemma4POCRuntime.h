@@ -3,9 +3,13 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 
+#include <memory>
+
 #include "../gemma4POCParams.h"
 
 namespace mk {
+
+class Gemma4ModelRuntime;
 
 // Runtime behind every Gemma-4 MegaKernel op; MegaKernelAttrs::kind selects
 // what it replaces (see gemma4POCParams.h).
@@ -20,8 +24,8 @@ namespace mk {
 // kLmHead (opt-in, measured slower than stock): u8 lm_head GEMV.
 class Gemma4POCRuntime : public IMegakernelRuntime {
 public:
-    Gemma4POCRuntime() = default;
-    ~Gemma4POCRuntime() override { Destroy(); }
+    Gemma4POCRuntime();
+    ~Gemma4POCRuntime() override;
 
     TErrorcode Init(const IConstantParams* weights, const IPlatformParams* platform) override;
     TErrorcode Execute(const IRuntimeParams* io) override;
@@ -72,6 +76,8 @@ private:
     int scratch_tokens_ = 0;
 
     void ensure_scratch(int tokens);
+
+    std::unique_ptr<Gemma4ModelRuntime> model_;  // kModel
 };
 
 }  // namespace mk

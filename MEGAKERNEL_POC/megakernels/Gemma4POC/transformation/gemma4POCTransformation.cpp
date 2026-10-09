@@ -41,13 +41,17 @@
 #include "openvino/core/parallel.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/add.hpp"
+#include "openvino/op/assign.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/gelu.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/power.hpp"
 #include "openvino/op/reduce_mean.hpp"
+#include "openvino/op/parameter.hpp"
 #include "openvino/op/reshape.hpp"
+#include "openvino/op/result.hpp"
+#include "openvino/op/scaled_dot_product_attention.hpp"
 #include "openvino/op/transpose.hpp"
 #include "openvino/op/variadic_split.hpp"
 #include "openvino/pass/manager.hpp"
@@ -1194,6 +1198,276 @@ int replace_attention_masks(const std::shared_ptr<ov::Model>& m, bool dbg) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Pass 7: collapse the whole language model into one MegaKernel (kModel)
+// ---------------------------------------------------------------------------
+// Runs on the output of passes 4-6: per layer one kAttnIn MegaKernel feeding
+// q|k|v through the stock KV cache + SDPA into one kFfn MegaKernel, then the
+// final norm, lm_head and the logit soft-cap. Every link is checked; the
+// weights of the per-layer MegaKernels, the final norm and a repacked lm_head
+// become inputs of one kModel MegaKernel, which owns the KV cache, so the KV
+// state (ReadValue/Assign) disappears and decode is a single kernel launch.
+namespace {
+
+using MKOp = ov::intel_gpu::op::MegaKernel;
+
+int64_t mk_kind(const ov::Node* n) {
+    auto m = dynamic_cast<const MKOp*>(n);
+    return m ? m->get_attrs().kind : -1;
+}
+
+ov::Output<ov::Node> skip_ops(ov::Output<ov::Node> v, std::initializer_list<const char*> types) {
+    for (bool moved = true; moved;) {
+        moved = false;
+        for (const char* t : types)
+            if (is_op(v, t)) {
+                v = v.get_node()->input_value(0);
+                moved = true;
+                break;
+            }
+    }
+    return v;
+}
+
+// A Parameter behind an optional precision Convert; *stride is its element
+// size in ints (i64 = 2).
+ov::Output<ov::Node> raw_int_param(const ov::Output<ov::Node>& v, float* stride) {
+    ov::Output<ov::Node> p = skip_ops(v, {"Convert"});
+    if (!ov::is_type<ov::op::v0::Parameter>(p.get_node()) ||
+        (p.get_element_type() != ov::element::i64 && p.get_element_type() != ov::element::i32))
+        p = v;
+    *stride = p.get_element_type() == ov::element::i64 ? 2.0f : 1.0f;
+    return p;
+}
+
+// The single consumer of v, or nullptr.
+ov::Node* only_consumer(const ov::Output<ov::Node>& v) {
+    auto t = v.get_target_inputs();
+    return t.size() == 1 ? t.begin()->get_node() : nullptr;
+}
+
+bool collapse_to_model(const std::shared_ptr<ov::Model>& m, bool dbg) {
+    auto reject = [&](const std::string& why) {
+        if (dbg)
+            std::cerr << "[Gemma4]   model-skip: " << why << std::endl;
+        return false;
+    };
+    std::vector<std::shared_ptr<ov::Node>> attn, ffn;
+    for (auto& op : m->get_ordered_ops()) {
+        const auto k = mk_kind(op.get());
+        if (k == kAttnIn)
+            attn.push_back(op);
+        else if (k == kFfn)
+            ffn.push_back(op);
+    }
+    const size_t NL = attn.size();
+    if (!NL || ffn.size() != NL || NL > static_cast<size_t>(kModelMaxLayers))
+        return reject("per-layer MegaKernels " + std::to_string(NL) + "/" + std::to_string(ffn.size()));
+    if (m->get_results().size() != 1)
+        return reject("results");
+
+    // Inputs of the first layer.
+    auto embeds = skip_ops(attn[0]->input_value(kAttnX), {"Convert"});
+    if (!ov::is_type<ov::op::v0::Parameter>(embeds.get_node()) || embeds.get_element_type() != ov::element::f32 ||
+        embeds.get_partial_shape().size() != 3 || embeds.get_partial_shape()[2] != kHidden)
+        return reject("inputs_embeds");
+
+    std::vector<float> sliding(NL, 0.0f);
+    float scale = 0.0f;
+    std::shared_ptr<ov::Node> mask_mk[2];
+    for (size_t l = 0; l < NL; ++l) {
+        const auto& a = attn[l];
+        const auto& f = ffn[l];
+        const auto x = a->input_value(kAttnX);
+        if (f->input_value(kFfnH) != x)
+            return reject("residual of layer " + std::to_string(l));
+        if (l ? x != ffn[l - 1]->output(0) : skip_ops(x, {"Convert"}) != embeds)
+            return reject("layer chain at " + std::to_string(l));
+        // attention output = Reshape(Transpose(SDPA(q, k, v, mask, scale)))
+        auto sv = skip_ops(f->input_value(kFfnO), {"Reshape", "Transpose"});
+        auto sdpa = ov::as_type_ptr<ov::op::v13::ScaledDotProductAttention>(sv.get_node_shared_ptr());
+        if (!sdpa || sdpa->get_causal() || sdpa->get_input_size() != 5)
+            return reject("SDPA of layer " + std::to_string(l));
+        auto split = sdpa->input_value(0);
+        if (!ov::is_type<v1::VariadicSplit>(split.get_node()) || split.get_index() != 0 ||
+            split.get_node()->input_value(0) != a->output(0))
+            return reject("q of layer " + std::to_string(l));
+        for (size_t i = 1; i <= 2; ++i) {
+            auto cat = skip_ops(sdpa->input_value(i), {"Reshape", "Broadcast", "Unsqueeze"});
+            if (!is_op(cat, "Concat") || cat.get_node()->get_input_size() != 2 ||
+                cat.get_node()->input_value(1) != split.get_node()->output(i) ||
+                !is_op(skip_ops(cat.get_node()->input_value(0), {"Gather", "Convert"}), "ReadValue"))
+                return reject("k/v cache of layer " + std::to_string(l));
+        }
+        auto msk = skip_ops(sdpa->input_value(3), {"StridedSlice", "Slice", "Convert"});
+        const auto mk = mk_kind(msk.get_node());
+        if (mk != kMaskFull && mk != kMaskSliding)
+            return reject("mask of layer " + std::to_string(l));
+        mask_mk[mk == kMaskSliding] = msk.get_node_shared_ptr();
+        sliding[l] = mk == kMaskSliding ? 1.0f : 0.0f;
+        float s = 0.0f;
+        if (!scalar_const(sdpa->input_value(4), s) || (l && s != scale))
+            return reject("SDPA scale");
+        scale = s;
+    }
+    auto mmk = mask_mk[1] ? mask_mk[1] : mask_mk[0];
+
+    // Tail: RMS -> [last-token slice] -> lm_head -> soft-cap -> Result.
+    auto norm = only_consumer(ffn[NL - 1]->output(0));
+    auto rms = norm ? ov::as_type_ptr<RMSOp>(norm->shared_from_this()) : nullptr;
+    if (!rms || !as_rms(rms) || !f16_gamma(rms).get_node())
+        return reject("final norm");
+    ov::Node* lm = only_consumer(rms->output(0));
+    bool last_only = false;
+    if (lm && (is_op(lm->output(0), "Slice") || is_op(lm->output(0), "StridedSlice"))) {
+        // Slice(start={-1}, axes={1}) from optimum, or the GPU's StridedSlice
+        // form (begin=[0,-1], ...) that genai's slice-before-matmul becomes.
+        // Either way the output must be a single token along axis 1.
+        const auto ps = lm->get_output_partial_shape(0);
+        auto b = as_constant(lm->input_value(1));
+        const auto bv = b ? b->cast_vector<int64_t>() : std::vector<int64_t>{};
+        const bool strided = is_op(lm->output(0), "StridedSlice");
+        const bool one = ps.rank().is_static() && ps.rank().get_length() == 3 && ps[1].get_max_length() == 1 && ps[2] == ov::Dimension(kHidden);
+        const bool last = strided ? (bv.size() >= 2 && bv[1] == -1) : (bv.size() == 1 && bv[0] == -1);
+        if (!one || !last) {
+            if (is_dbg()) {
+                std::cerr << "[Gemma4]   slice out " << ps << " begin";
+                for (auto x : bv)
+                    std::cerr << ' ' << x;
+                std::cerr << std::endl;
+                for (size_t i = 0; i < lm->get_input_size(); ++i)
+                    dump_inputs(lm->input_value(i), 1, 2);
+            }
+            return reject("last-token slice");
+        }
+        last_only = true;
+        lm = only_consumer(lm->output(0));
+    }
+    if (!lm || !ov::is_type<FCC>(lm) || lm->get_input_element_type(1) != ov::element::u8 ||
+        lm->get_input_partial_shape(1).is_dynamic() || lm->get_input_shape(1).size() != 2 ||
+        lm->get_input_shape(1)[1] != static_cast<size_t>(kHidden) || lm->get_input_shape(1)[0] % kRepackRows)
+        return reject("lm_head");
+    const size_t V = lm->get_input_shape(1)[0];
+    std::shared_ptr<v0::Constant> lw = as_constant(lm->input_value(1)), ls, lz;
+    for (size_t i = 2; i < lm->get_input_size(); ++i) {
+        auto c = as_constant(lm->input_value(i));
+        if (!c)
+            continue;
+        if (c->get_element_type().is_real() && !ls)
+            ls = c;
+        else if ((c->get_element_type() == ov::element::u8 || c->get_element_type() == ov::element::u4) && !lz)
+            lz = c;
+    }
+    if (!lw || !ls || !lz || ov::shape_size(ls->get_shape()) != V ||
+        (ov::shape_size(lz->get_shape()) != V && ov::shape_size(lz->get_shape()) != 1))
+        return reject("lm_head decompression");
+    float cap_div = 0.0f, cap_mul = 0.0f;
+    ov::Node* t = only_consumer(lm->output(0));
+    if (t && is_op(t->output(0), "Convert"))
+        t = only_consumer(t->output(0));
+    float c = 0;
+    const bool is_div = t && is_op(t->output(0), "Divide");
+    if (t && (is_div || is_op(t->output(0), "Multiply")) && (is_div ? const_input(t, c) == 1 : const_input(t, c) >= 0)) {
+        cap_div = is_op(t->output(0), "Divide") ? c : 1.0f / c;
+        ov::Node* th = only_consumer(t->output(0));
+        ov::Node* mu = th && is_op(th->output(0), "Tanh") ? only_consumer(th->output(0)) : nullptr;
+        if (!mu || !is_op(mu->output(0), "Multiply") || const_input(mu, cap_mul) < 0)
+            return reject("soft-cap");
+        t = only_consumer(mu->output(0));
+    }
+    if (t && is_op(t->output(0), "Convert"))
+        t = only_consumer(t->output(0));
+    auto result = t ? ov::as_type_ptr<ov::op::v0::Result>(t->shared_from_this()) : nullptr;
+    if (!result || result->get_input_element_type(0) != ov::element::f32)
+        return reject("logits result");
+
+    // Constants. Activations are bound to the raw Parameters (no precision
+    // Converts left in the graph), with their element strides in the metas.
+    float pos_stride = 1, am_stride = 1, tti_stride = 1;
+    auto pos = raw_int_param(attn[0]->input_value(kAttnPos), &pos_stride);
+    auto am = raw_int_param(mmk->input_value(kMaskAm), &am_stride);
+    auto tti = raw_int_param(mmk->input_value(kMaskTti), &tti_stride);
+    auto mm = as_constant(mmk->input_value(kMaskMeta))->cast_vector<float>();
+    mm[8] = am_stride;
+    mm[9] = tti_stride;
+    std::vector<float> meta(kMetaLayer0 + NL, 0.0f);
+    meta[kMetaLayers] = static_cast<float>(NL);
+    meta[kMetaVocab] = static_cast<float>(V);
+    meta[kMetaCapDiv] = cap_div;
+    meta[kMetaCapMul] = cap_mul;
+    meta[kMetaAttnScale] = scale;
+    meta[kMetaLastOnly] = last_only ? 1.0f : 0.0f;
+    for (size_t l = 0; l < NL; ++l)
+        meta[kMetaLayer0 + l] = sliding[l];
+
+    auto lm_rec = std::make_shared<v0::Constant>(ov::element::u8, ov::Shape{V * kHidden});
+    {
+        auto* dst = static_cast<uint8_t*>(const_cast<void*>(lm_rec->get_data_ptr()));
+        const auto* src = static_cast<const uint8_t*>(lw->get_data_ptr());
+        const size_t blocks = V / kRepackRows, chunk = 256;
+        ov::parallel_for((blocks + chunk - 1) / chunk, [&](size_t i) {
+            repack_lm_head(src, kHidden, i * chunk, std::min(blocks, (i + 1) * chunk), dst);
+        });
+    }
+    std::vector<uint8_t> zp(V);
+    {
+        const auto zv = lz->cast_vector<int32_t>();
+        for (size_t i = 0; i < V; ++i)
+            zp[i] = static_cast<uint8_t>(zv.size() == 1 ? zv[0] : zv[i]);
+    }
+
+    ov::OutputVector in(kModelLayer0);
+    in[kModelEmbeds] = embeds;
+    in[kModelPos] = pos;
+    in[kModelAm] = am;
+    in[kModelTti] = tti;
+    in[kModelMaskMeta] = v0::Constant::create(ov::element::f32, {mm.size()}, mm)->output(0);
+    in[kModelMeta] = v0::Constant::create(ov::element::f32, {meta.size()}, meta)->output(0);
+    in[kModelFinalNorm] = f16_gamma(rms);
+    in[kModelLmW] = lm_rec->output(0);
+    in[kModelLmScale] = mk::util::get_f16_constant(ls)->output(0);
+    in[kModelLmZp] = v0::Constant::create(ov::element::u8, {V}, zp)->output(0);
+    for (size_t l = 0; l < NL; ++l) {
+        for (int p = kAttnWIn; p < kAttnPorts; ++p) {
+            auto v = attn[l]->input_value(p);
+            if (p == kAttnMeta) {
+                auto am_meta = as_constant(v)->cast_vector<int32_t>();
+                am_meta[7] = static_cast<int32_t>(pos_stride);
+                v = v0::Constant::create(ov::element::i32, {am_meta.size()}, am_meta)->output(0);
+            }
+            in.push_back(v);
+        }
+        for (int p = kFfnWPostAttn; p < kFfnPorts; ++p)
+            in.push_back(ffn[l]->input_value(p));
+    }
+
+    ov::intel_gpu::op::MegaKernelAttrs attrs;
+    attrs.kind = kModel;
+    attrs.num_layers = static_cast<int64_t>(NL);
+    attrs.hidden_size = last_only ? ov::intel_gpu::op::kMegaKernelLastTokenShape : static_cast<int64_t>(V);
+    attrs.head_dim = static_cast<int64_t>(V);
+    attrs.out_type = ov::element::f32;
+    auto mkn = std::make_shared<MKOp>(in, attrs);
+    mkn->set_friendly_name("MegaKernelGemma4Model");
+    ov::copy_runtime_info(lm->shared_from_this(), mkn);
+    result->input(0).replace_source_output(mkn->output(0));
+    int sinks = 0;
+    const auto all_sinks = m->get_sinks();
+    for (auto& s : all_sinks)
+        if (ov::is_type<ov::op::v6::Assign>(s)) {
+            m->remove_sink(s);
+            ++sinks;
+        }
+    if (dbg)
+        std::cerr << "[Gemma4] whole model -> one MegaKernel: " << NL << " layers, V=" << V << ", "
+                  << in.size() << " inputs, soft-cap " << cap_div << "/" << cap_mul << ", scale " << scale
+                  << ", last-only " << last_only << ", pos " << pos.get_element_type() << " am "
+                  << am.get_element_type() << ", " << sinks << " KV sinks removed" << std::endl;
+    return true;
+}
+
+}  // namespace
+
 // The rewrites below are mathematically exact and would be valid anywhere, but
 // iMegakernelTransformation.h requires an implementation to leave models it was
 // not written for completely untouched. Gemma-4 is recognised by its 30 layers
@@ -1218,9 +1492,10 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
     // Bit mask selecting which rewrites run, for bisecting a regression:
     //   1 = gamma-less RMS fusion, 2 = sibling gamma folding,
     //   4 = post-RoPE transpose absorption, 8 = FFN-block MegaKernel,
-    //   16 = attention-input MegaKernel, 32 = attention-mask MegaKernel.
+    //   16 = attention-input MegaKernel, 32 = attention-mask MegaKernel,
+    //   64 = collapse everything into one whole-model MegaKernel (needs 8|16|32).
     const char* mask_env = std::getenv("OV_MEGAKERNEL_PASSES");
-    const int mask = mask_env ? std::atoi(mask_env) : 63;
+    const int mask = mask_env ? std::atoi(mask_env) : 127;
 
     bool changed = false;
     if (mask & 1) {
@@ -1241,6 +1516,10 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
         changed |= replace_attn_inputs(m, dbg) > 0;
     if (mask & 32)
         changed |= replace_attention_masks(m, dbg) > 0;
+    if ((mask & 64) && changed) {
+        m->validate_nodes_and_infer_types();
+        changed |= collapse_to_model(m, dbg);
+    }
 
     if (const char* opt_in = std::getenv("OV_MEGAKERNEL_LMHEAD"); opt_in && opt_in[0] == '1') {
         if (replace_lm_head(m, dbg)) {

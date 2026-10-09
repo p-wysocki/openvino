@@ -16,6 +16,8 @@ struct MegakernelIo {
   int64_t (*input_dim)(void* ctx, int port, int axis);
   // MegaKernelAttrs::kind of the op being bound.
   int64_t kind;
+  // Number of graph inputs of the op.
+  int64_t num_inputs;
 };
 
 }  // namespace mk

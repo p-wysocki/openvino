@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "gemma4FfnKernels.h"
+#include "gemma4ModelRuntime.h"
 #include "gemma4PrefillKernels.h"
 
 namespace mk {
@@ -214,6 +215,12 @@ const char* const kFfnKernelNames[kFfnKernels] = {"ffn_oproj", "ffn_in", "ffn_mi
 
 }  // namespace
 
+Gemma4POCRuntime::Gemma4POCRuntime() = default;
+
+Gemma4POCRuntime::~Gemma4POCRuntime() {
+    Destroy();
+}
+
 TErrorcode Gemma4POCRuntime::Init(const IConstantParams* weights, const IPlatformParams* platform) {
     w_ = *static_cast<const Gemma4ConstantParams*>(weights);
     const auto* pp = static_cast<const Gemma4PlatformParams*>(platform);
@@ -234,6 +241,17 @@ TErrorcode Gemma4POCRuntime::Init(const IConstantParams* weights, const IPlatfor
     if (!usmAlloc_ || !usmFree_ || !setUsmArg_) {
         std::fprintf(stderr, "[Gemma4] Intel USM extensions unavailable\n");
         return CL_INVALID_PLATFORM;
+    }
+    if (w_.kind == kModel) {
+        Gemma4ModelRuntime::Usm u{};
+        u.alloc = usmAlloc_;
+        u.free = usmFree_;
+        u.blocking_free = usmBlockingFree_;
+        u.set_arg = setUsmArg_;
+        u.memcpy = reinterpret_cast<clEnqueueMemcpyINTEL_fn>(
+            clGetExtensionFunctionAddressForPlatform(plat, "clEnqueueMemcpyINTEL"));
+        model_ = std::make_unique<Gemma4ModelRuntime>();
+        return model_->Init(w_, ctx_, dev_, stream_, u);
     }
     if (w_.kind == kAttnIn)
         return InitAttn();
@@ -632,6 +650,8 @@ TErrorcode Gemma4POCRuntime::Execute(const IRuntimeParams* io) {
         std::fprintf(stderr, "[Gemma4] runtime not initialised\n");
         return CL_INVALID_KERNEL;
     }
+    if (w_.kind == kModel)
+        return model_ ? model_->Execute(*p) : CL_INVALID_KERNEL;
     if (w_.kind == kFfn)
         return kFfn_[kOut] ? ExecuteFfn(*p) : CL_INVALID_KERNEL;
     if (w_.kind == kAttnIn)
@@ -779,6 +799,7 @@ TErrorcode Gemma4POCRuntime::ExecuteLmHead(const Gemma4RuntimeParams& pr) {
 }
 
 TErrorcode Gemma4POCRuntime::Destroy() {
+    model_.reset();
     for (cl_kernel* k : {&kGemv_, &kSumx_}) {
         if (*k)
             clReleaseKernel(*k);

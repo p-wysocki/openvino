@@ -28,10 +28,18 @@ constexpr int64_t kMegaKernelMaskShape = -1;
 // hidden_size value selecting a head-major output [B, heads, S, head_dim] from
 // port 0 [B, S, ...]; heads and head_dim are passed in the same call.
 constexpr int64_t kMegaKernelHeadsShape = -2;
+// hidden_size value selecting [B, 1, width] from port 0 [B, S, ...] (only the
+// last position is produced); width is passed as head_dim.
+constexpr int64_t kMegaKernelLastTokenShape = -3;
 
 template <typename PS>
 PS megakernel_output_shape(const PS& in0, const PS& in1, int64_t hidden_size, int64_t heads = 0, int64_t head_dim = 0) {
     PS ps = in0;
+    if (hidden_size == kMegaKernelLastTokenShape) {
+        if (in0.rank().is_static() && in0.size() >= 1)
+            return PS{in0[0], 1, head_dim};
+        return PS::dynamic(3);
+    }
     if (hidden_size == kMegaKernelHeadsShape) {
         if (in0.rank().is_static() && in0.size() >= 2)
             return PS{in0[0], heads, in0[1], head_dim};

@@ -20,6 +20,22 @@ extern "C" void FillMegaKernelConstantParams(mk::IConstantParams* params,
                                              const mk::MegakernelIo* io) {
   auto& w = *static_cast<mk::Gemma4ConstantParams*>(params);
   w.kind = static_cast<int>(io->kind);
+  if (w.kind == mk::kModel) {
+    for (int p = mk::kModelMaskMeta; p < mk::kModelLayer0; ++p)
+      w.model[p] = io->input_ptr(io->ctx, p);
+    w.layers = static_cast<int>((io->num_inputs - mk::kModelLayer0) / mk::kModelLayerPorts);
+    if (w.layers > mk::kModelMaxLayers)
+      w.layers = 0;  // rejected by Init
+    for (int l = 0; l < w.layers; ++l) {
+      const int base = mk::kModelLayer0 + l * mk::kModelLayerPorts;
+      for (int p = 0; p < mk::kModelLayerPorts; ++p)
+        w.layer[l][p] = io->input_ptr(io->ctx, base + p);
+      // Repacked records: 36 bytes per row and 64-element group.
+      w.layer_qkv_rows[l] = static_cast<int>(io->input_dim(io->ctx, base + (mk::kAttnQkv - mk::kAttnWIn), 0) /
+                                             (HIDDEN / 64 * 36));
+    }
+    return;
+  }
   if (w.kind == mk::kFfn) {
     for (int p = mk::kFfnWPostAttn; p < mk::kFfnPorts; ++p)
       w.ffn[p] = io->input_ptr(io->ctx, p);
@@ -46,6 +62,18 @@ extern "C" void FillMegaKernelConstantParams(mk::IConstantParams* params,
 extern "C" void FillMegaKernelRuntimeParams(mk::IRuntimeParams* params,
                                             const mk::MegakernelIo* io) {
   auto& p = *static_cast<mk::Gemma4RuntimeParams*>(params);
+  if (io->kind == mk::kModel) {
+    p.in = io->input_ptr(io->ctx, mk::kModelEmbeds);
+    p.in2 = io->input_ptr(io->ctx, mk::kModelPos);
+    p.in3 = io->input_ptr(io->ctx, mk::kModelAm);
+    p.in4 = io->input_ptr(io->ctx, mk::kModelTti);
+    p.out = io->output_ptr(io->ctx, 0);
+    p.batch = static_cast<int>(io->input_dim(io->ctx, mk::kModelEmbeds, 0));
+    p.tokens = static_cast<int>(io->input_dim(io->ctx, mk::kModelEmbeds, 1));
+    p.s = p.tokens;
+    p.ka = static_cast<int>(io->input_dim(io->ctx, mk::kModelAm, 1));
+    return;
+  }
   p.in = io->input_ptr(io->ctx, 0);
   p.in2 = io->kind == mk::kFfn ? io->input_ptr(io->ctx, mk::kFfnH) : nullptr;
   p.out = io->output_ptr(io->ctx, 0);
