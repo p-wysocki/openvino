@@ -28,72 +28,6 @@ namespace {
         }                                                                  \
     } while (0)
 
-constexpr int SG = 16;    // one output row per sub-group
-constexpr int LWS = 256;  // 16 sub-groups per work-group
-
-// lm_head is u8 with a per-row scale and zero point (it is tied to the int8
-// embedding table), so the whole row is a single quantisation group:
-//     y[n] = scale[n] * ( dot(q[n,:], x) - zp[n] * sum(x) )
-// sum(x) is computed once per token, which keeps the inner loop a plain
-// multiply-accumulate over bytes with no per-element subtract.
-const char* kSource = R"CLC(
-#pragma OPENCL EXTENSION cl_khr_fp16 : enable
-#pragma OPENCL EXTENSION cl_intel_subgroups : enable
-
-__kernel void sum_x(__global const half* x, __global float* sumx, int tokens) {
-    int t = get_global_id(0);
-    if (t >= tokens) return;
-    __global const half* xt = x + (long)t * K_;
-    float s = 0.0f;
-    for (int i = 0; i < K_; ++i) s += (float)xt[i];
-    sumx[t] = s;
-}
-
-__attribute__((intel_reqd_sub_group_size(SG_)))
-__kernel __attribute__((reqd_work_group_size(LWS_, 1, 1)))
-void lm_head_gemv(__global const half* x,
-                  __global const uchar* q,
-                  __global const uchar* zp,
-                  __global const half* sc,
-                  __global const float* sumx,
-                  __global float* out,
-                  int tokens) {
-    const int lid = get_local_id(0);
-    const int sg_id = lid / SG_;
-    const int lane = lid % SG_;
-    const int nsg = LWS_ / SG_;
-
-    for (int t = 0; t < tokens; ++t) {
-        __global const half* xt = x + (long)t * K_;
-        const float sx = sumx[t];
-
-        for (long row = (long)get_group_id(0) * nsg + sg_id;
-             row < N_;
-             row += (long)get_num_groups(0) * nsg) {
-
-            __global const uchar* qr = q + row * (long)K_;
-            float acc = 0.0f;
-
-            // 16 lanes x uchar4 == 64 contiguous bytes per step.
-            for (int k = lane * 4; k < K_; k += SG_ * 4) {
-                uchar4 v = vload4(0, qr + k);
-                half4 h = vload4(0, xt + k);
-                acc += (float)v.x * (float)h.x
-                     + (float)v.y * (float)h.y
-                     + (float)v.z * (float)h.z
-                     + (float)v.w * (float)h.w;
-            }
-            acc = sub_group_reduce_add(acc);
-
-            if (lane == 0) {
-                float zv = (float)zp[row];
-                out[(long)t * N_ + row] = (float)sc[row] * (acc - zv * sx);
-            }
-        }
-    }
-}
-)CLC";
-
 cl_program build_sources(cl_context ctx, cl_device_id dev, std::initializer_list<const char*> srcs, const char* opts,
                          cl_int* err) {
     std::vector<const char*> v(srcs);
@@ -257,7 +191,7 @@ TErrorcode Gemma4POCRuntime::Init(const IConstantParams* weights, const IPlatfor
         return InitAttn();
     if (w_.kind == kMaskFull || w_.kind == kMaskSliding)
         return InitMask();
-    return w_.kind == kFfn ? InitFfn() : InitLmHead();
+    return InitFfn();
 }
 
 TErrorcode Gemma4POCRuntime::InitFfn() {
@@ -618,32 +552,6 @@ TErrorcode Gemma4POCRuntime::ExecuteFfn(const Gemma4RuntimeParams& p) {
     return CL_SUCCESS;
 }
 
-TErrorcode Gemma4POCRuntime::InitLmHead() {
-    char opts[512];
-    std::snprintf(opts, sizeof(opts),
-                  "-DSG_=%d -DLWS_=%d -DN_=%d -DK_=%d -cl-fast-relaxed-math",
-                  SG, LWS, w_.N, w_.K);
-
-    cl_int err = CL_SUCCESS;
-    prog_ = build(ctx_, dev_, kSource, opts, &err);
-    CL_OK(err, "build lm_head program");
-
-    kGemv_ = clCreateKernel(prog_, "lm_head_gemv", &err);
-    CL_OK(err, "clCreateKernel(lm_head_gemv)");
-    kSumx_ = clCreateKernel(prog_, "sum_x", &err);
-    CL_OK(err, "clCreateKernel(sum_x)");
-    return CL_SUCCESS;
-}
-
-void Gemma4POCRuntime::ensure_scratch(int tokens) {
-    if (tokens <= scratch_tokens_ && mSumx_) return;
-    if (!usmAlloc_) return;
-    if (mSumx_) usmFree_(ctx_, mSumx_);
-    cl_int e = CL_SUCCESS;
-    mSumx_ = usmAlloc_(ctx_, dev_, nullptr, (size_t)tokens * sizeof(float), 0, &e);
-    scratch_tokens_ = tokens;
-}
-
 TErrorcode Gemma4POCRuntime::Execute(const IRuntimeParams* io) {
     const auto* p = static_cast<const Gemma4RuntimeParams*>(io);
     if (!setUsmArg_) {
@@ -658,7 +566,7 @@ TErrorcode Gemma4POCRuntime::Execute(const IRuntimeParams* io) {
         return kAttn_[1] ? ExecuteAttn(*p) : CL_INVALID_KERNEL;
     if (w_.kind == kMaskFull || w_.kind == kMaskSliding)
         return kMask_[1] ? ExecuteMask(*p) : CL_INVALID_KERNEL;
-    return ExecuteLmHead(*p);
+    return CL_INVALID_KERNEL;
 }
 
 TErrorcode Gemma4POCRuntime::InitMask() {
@@ -762,49 +670,8 @@ TErrorcode Gemma4POCRuntime::ExecuteAttn(const Gemma4RuntimeParams& p) {
     return CL_SUCCESS;
 }
 
-TErrorcode Gemma4POCRuntime::ExecuteLmHead(const Gemma4RuntimeParams& pr) {
-    const auto* p = &pr;
-    if (!kGemv_ || !kSumx_)
-        return CL_INVALID_KERNEL;
-    ensure_scratch(p->tokens);
-    if (!mSumx_) return CL_OUT_OF_RESOURCES;
-
-    auto setUsm = setUsmArg_;
-
-    setUsm(kSumx_, 0, p->in);
-    setUsm(kSumx_, 1, mSumx_);
-    clSetKernelArg(kSumx_, 2, sizeof(int), &p->tokens);
-    size_t s_gws = ((size_t)p->tokens + 15) / 16 * 16;
-    size_t s_lws = 16;
-    CL_OK(clEnqueueNDRangeKernel(stream_, kSumx_, 1, nullptr, &s_gws, &s_lws, 0, nullptr, nullptr),
-          "enqueue sum_x");
-
-    int a = 0;
-    setUsm(kGemv_, a++, p->in);
-    setUsm(kGemv_, a++, w_.lm_head_q);
-    setUsm(kGemv_, a++, w_.lm_head_zp);
-    setUsm(kGemv_, a++, w_.lm_head_scale);
-    setUsm(kGemv_, a++, mSumx_);
-    setUsm(kGemv_, a++, p->out);
-    clSetKernelArg(kGemv_, a++, sizeof(int), &p->tokens);
-
-    cl_uint cus = 0;
-    clGetDeviceInfo(dev_, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cus), &cus, nullptr);
-    size_t wgs = cus ? (size_t)cus * 4 : 256;
-    size_t gws = wgs * LWS;
-    size_t lws = LWS;
-    CL_OK(clEnqueueNDRangeKernel(stream_, kGemv_, 1, nullptr, &gws, &lws, 0, nullptr, nullptr),
-          "enqueue lm_head_gemv");
-    return CL_SUCCESS;
-}
-
 TErrorcode Gemma4POCRuntime::Destroy() {
     model_.reset();
-    for (cl_kernel* k : {&kGemv_, &kSumx_}) {
-        if (*k)
-            clReleaseKernel(*k);
-        *k = nullptr;
-    }
     for (cl_kernel& k : kFfn_) {
         if (k)
             clReleaseKernel(k);
@@ -838,15 +705,11 @@ TErrorcode Gemma4POCRuntime::Destroy() {
         }
         pfShared_ = false;
     }
-    if (prog_) clReleaseProgram(prog_);
-    prog_ = nullptr;
     // In-flight kernels may still read the scratch; the blocking free waits for
     // them without touching the queue, which may already be gone.
-    for (void** m : {&scratch_, &mSumx_}) {
-        if (*m && usmBlockingFree_)
-            usmBlockingFree_(ctx_, *m);
-        *m = nullptr;
-    }
+    if (scratch_ && usmBlockingFree_)
+        usmBlockingFree_(ctx_, scratch_);
+    scratch_ = nullptr;
     return CL_SUCCESS;
 }
 

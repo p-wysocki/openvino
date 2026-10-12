@@ -14,8 +14,9 @@
 // was measured to be worth 0.5 ms, i.e. ~4.6 us of wall time each.
 //
 // Consequences, all measured rather than assumed:
-//   * lm_head (1.9 ms, one kernel) runs at ~85% of the memory roofline, and a
-//     hand-written replacement came out slower - see OV_MEGAKERNEL_LMHEAD below.
+//   * lm_head (1.9 ms, one kernel) runs at ~85% of the memory roofline; a
+//     hand-written replacement was tried and measured SLOWER, so it is not
+//     part of this pass.
 //   * MOECompressed is 0.3 ms over 30 kernels; already fused upstream.
 //   * The int4 projections are 2-3x off roofline but are only 156 kernels.
 //   * ~530 of the 1002 kernels are norms and element-wise glue moving a few KB
@@ -75,8 +76,6 @@ namespace v1 = ov::op::v1;
 
 namespace mk {
 namespace {
-
-constexpr char LM_HEAD[] = "__module.lm_head/ov_ext::linear/MatMul";
 
 bool is_dbg() {
     const char* v = std::getenv("OV_MEGAKERNEL_DUMP");
@@ -336,93 +335,6 @@ int fold_transpose_into_rope(const std::shared_ptr<ov::Model>& m, bool dbg) {
     return folded;
 }
 
-
-// ---------------------------------------------------------------------------
-// Opt-in: replace lm_head with the hand-written INT8 GEMV
-// ---------------------------------------------------------------------------
-// MEASURED: this replacement is a REGRESSION and is therefore opt-in.
-//   baseline lm_head (OpenVINO)  1.92 ms   = ~85% of the memory roofline
-//   this kernel, 3 variants      ~2.5 ms
-//   end-to-end decode            11.65 -> 12.08 ms/tok (-3.8%)
-// Accuracy is fine (cosine 0.999999, argmax match, top-10 10/10), so the kernel
-// is correct - it simply loses to the stock int8 path, which almost certainly
-// uses dp4a-style integer dot products rather than float MACs. Kept because it
-// is a working, validated INT8 GEMV to build on; enable with
-// OV_MEGAKERNEL_LMHEAD=1.
-bool replace_lm_head(const std::shared_ptr<ov::Model>& m, bool dbg) {
-    namespace mku = mk::util;
-    using ov::intel_gpu::op::MegaKernel;
-    using ov::intel_gpu::op::MegaKernelAttrs;
-
-    auto lm = mku::find_node(m->get_ordered_ops(), LM_HEAD);
-    if (!lm) {
-        if (dbg)
-            std::cerr << "[Gemma4] lm_head not found; skipping" << std::endl;
-        return false;
-    }
-
-    // Port 0 is the activation and port 1 the packed weights; the decompression
-    // operands are identified by element type rather than by a fixed index.
-    ov::Output<ov::Node> act = lm->input_value(0);
-    ov::Output<ov::Node> wq = lm->input_value(1);
-    ov::Output<ov::Node> wscale, wzp;
-
-    for (size_t i = 2; i < lm->get_input_size(); ++i) {
-        auto src = lm->input_value(i);
-        const auto et = src.get_element_type();
-        if (et == ov::element::f16 || et == ov::element::f32 || et == ov::element::bf16) {
-            if (!wscale.get_node())
-                wscale = src;
-        } else if (et == ov::element::u4 || et == ov::element::u8 || et == ov::element::i4) {
-            if (!wzp.get_node())
-                wzp = src;
-        }
-    }
-
-    if (wq.get_element_type() != ov::element::u8 || !wscale.get_node() || !wzp.get_node()) {
-        if (dbg)
-            std::cerr << "[Gemma4] lm_head is not u8+scale+zp; skipping" << std::endl;
-        return false;
-    }
-
-    const auto wshape = wq.get_partial_shape();
-    if (wshape.rank().is_dynamic() || wshape.rank().get_length() != 2 || wshape.is_dynamic()) {
-        if (dbg)
-            std::cerr << "[Gemma4] lm_head weight shape not static 2D; skipping" << std::endl;
-        return false;
-    }
-
-    const int64_t N = wshape[0].get_length();
-    const int64_t K = wshape[1].get_length();
-
-    // Only the per-row (single group) form is handled; anything else falls back.
-    const auto sshape = wscale.get_partial_shape();
-    if (sshape.rank().is_dynamic() || ov::shape_size(sshape.to_shape()) != static_cast<size_t>(N)) {
-        if (dbg)
-            std::cerr << "[Gemma4] lm_head scale is not per-row; skipping" << std::endl;
-        return false;
-    }
-
-    MegaKernelAttrs attrs;
-    attrs.hidden_size = N;        // output width
-    attrs.intermediate_size = K;  // reduction depth
-
-    auto mk_node = std::make_shared<MegaKernel>(ov::OutputVector{act, wq, wzp, wscale}, attrs);
-    mk_node->set_friendly_name("MegaKernelLMHead");
-    ov::copy_runtime_info(lm, mk_node);
-
-    // The op emits f32; lm_head's consumers (logit soft-capping) are f16.
-    auto mk_cvt = std::make_shared<v0::Convert>(mk_node->output(0), lm->output(0).get_element_type());
-    mk_cvt->set_friendly_name("lm_head_mk_cvt");
-
-    for (auto& c : lm->output(0).get_target_inputs())
-        c.replace_source_output(mk_cvt->output(0));
-
-    if (dbg)
-        std::cerr << "[Gemma4] lm_head replaced: N=" << N << " K=" << K << std::endl;
-    return true;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -509,6 +421,7 @@ ov::Output<ov::Node> repack(const ov::Output<ov::Node>& w, const ov::Output<ov::
 bool replace_ffn_block(const std::shared_ptr<MOEC>& moe, bool dbg) {
     using ov::intel_gpu::op::MegaKernel;
     using ov::intel_gpu::op::MegaKernelAttrs;
+    using ov::intel_gpu::op::MegaKernelDim;
     auto reject = [&](const char* why) {
         if (dbg)
             std::cerr << "[Gemma4]   ffn-skip " << moe->get_friendly_name() << ": " << why << std::endl;
@@ -671,10 +584,10 @@ bool replace_ffn_block(const std::shared_ptr<MOEC>& moe, bool dbg) {
                           .c_str());
 
     MegaKernelAttrs attrs;
-    attrs.kind = kFfn;
-    attrs.hidden_size = kHidden;
-    attrs.intermediate_size = kInter;
-    attrs.out_type = ov::element::f16;
+    attrs.params = mk::util::make_params(Gemma4KindMeta{kFfn});
+    // Output f16 [B, S, kHidden]: in[kFfnO] (port 0) with the last dim replaced.
+    attrs.outputs = {{ov::element::f16,
+                      {MegaKernelDim::of_input(0, 0), MegaKernelDim::of_input(0, 1), MegaKernelDim::constant(kHidden)}}};
     auto mkn = std::make_shared<MegaKernel>(in, attrs);
     mkn->set_friendly_name(block_out.get_node()->get_friendly_name() + "/MegaKernelFfn");
     ov::copy_runtime_info({oproj, moe, router, rfc, down, gate, up, add1, add2, rms_post, rms_pf1, rms_pf2post}, mkn);
@@ -740,6 +653,7 @@ void dump_inputs(const ov::Output<ov::Node>& v, int d, int max_d);
 bool replace_attn_in(const std::shared_ptr<RMSOp>& rms_in, bool dbg) {
     using ov::intel_gpu::op::MegaKernel;
     using ov::intel_gpu::op::MegaKernelAttrs;
+    using ov::intel_gpu::op::MegaKernelDim;
     const bool loud = dbg && rms_in->get_friendly_name().find("input_layernorm") != std::string::npos;
     auto reject = [&](const std::string& why) {
         if (loud)
@@ -943,13 +857,12 @@ bool replace_attn_in(const std::shared_ptr<RMSOp>& rms_in, bool dbg) {
     in[kAttnMeta] = v0::Constant::create(ov::element::i32, {meta.size()}, meta)->output(0);
 
     MegaKernelAttrs attrs;
-    attrs.kind = kAttnIn;
-    attrs.hidden_size = ov::intel_gpu::op::kMegaKernelHeadsShape;
-    attrs.num_attention_heads = q.heads + 2 * k.heads;
-    attrs.num_kv_heads = k.heads;
-    attrs.head_dim = D;
-    attrs.intermediate_size = static_cast<int64_t>(qc.rotary_ndims);
-    attrs.out_type = ov::element::f16;
+    attrs.params = mk::util::make_params(Gemma4KindMeta{kAttnIn});
+    // Output f16 [B, heads, S, D]: in[kAttnX] (port 0) is [B,S,H].
+    const int64_t heads = q.heads + 2 * k.heads;
+    attrs.outputs = {{ov::element::f16,
+                      {MegaKernelDim::of_input(0, 0), MegaKernelDim::constant(heads), MegaKernelDim::of_input(0, 1),
+                       MegaKernelDim::constant(D)}}};
     auto mkn = std::make_shared<MegaKernel>(in, attrs);
     mkn->set_friendly_name(rms_in->get_friendly_name() + "/MegaKernelAttnIn");
     ov::copy_runtime_info({rms_in, q.rope, k.rope, q.rms, k.rms}, mkn);
@@ -1026,6 +939,7 @@ void dump_inputs(const ov::Output<ov::Node>& v, int d, int max_d) {
 int replace_attention_masks(const std::shared_ptr<ov::Model>& m, bool dbg) {
     using ov::intel_gpu::op::MegaKernel;
     using ov::intel_gpu::op::MegaKernelAttrs;
+    using ov::intel_gpu::op::MegaKernelDim;
     auto reject = [&](const std::string& why) {
         if (dbg)
             std::cerr << "[Gemma4]   mask-skip: " << why << std::endl;
@@ -1179,9 +1093,10 @@ int replace_attention_masks(const std::shared_ptr<ov::Model>& m, bool dbg) {
     int n = 0;
     for (const auto& [node, kind] : {std::pair<std::shared_ptr<ov::Node>, int>{full, kMaskFull}, {sel1, kMaskSliding}}) {
         MegaKernelAttrs attrs;
-        attrs.kind = kind;
-        attrs.hidden_size = ov::intel_gpu::op::kMegaKernelMaskShape;
-        attrs.out_type = out_t;
+        attrs.params = mk::util::make_params(Gemma4KindMeta{kind});
+        // Output [B, 1, S, L]: in0=am [B,L] (port 0), in1=tti [B,S] (port 1).
+        attrs.outputs = {{out_t, {MegaKernelDim::of_input(0, 0), MegaKernelDim::constant(1), MegaKernelDim::of_input(1, 1),
+                          MegaKernelDim::of_input(0, 1)}}};
         auto mkn = std::make_shared<MegaKernel>(ov::OutputVector{am, tti, meta_c}, attrs);
         mkn->set_friendly_name(node->get_friendly_name() + "/MegaKernelMask");
         ov::copy_runtime_info(node, mkn);
@@ -1211,9 +1126,15 @@ namespace {
 
 using MKOp = ov::intel_gpu::op::MegaKernel;
 
+// A MegaKernel op's kind is the first field of its (opaque to the plugin)
+// MegaKernelAttrs::params blob, always a Gemma4KindMeta (see gemma4POCParams.h).
 int64_t mk_kind(const ov::Node* n) {
     auto m = dynamic_cast<const MKOp*>(n);
-    return m ? m->get_attrs().kind : -1;
+    if (!m || m->get_attrs().params.size() < sizeof(Gemma4KindMeta))
+        return -1;
+    Gemma4KindMeta km;
+    std::memcpy(&km, m->get_attrs().params.data(), sizeof(km));
+    return km.kind;
 }
 
 ov::Output<ov::Node> skip_ops(ov::Output<ov::Node> v, std::initializer_list<const char*> types) {
@@ -1442,11 +1363,16 @@ bool collapse_to_model(const std::shared_ptr<ov::Model>& m, bool dbg) {
     }
 
     ov::intel_gpu::op::MegaKernelAttrs attrs;
-    attrs.kind = kModel;
-    attrs.num_layers = static_cast<int64_t>(NL);
-    attrs.hidden_size = last_only ? ov::intel_gpu::op::kMegaKernelLastTokenShape : static_cast<int64_t>(V);
-    attrs.head_dim = static_cast<int64_t>(V);
-    attrs.out_type = ov::element::f32;
+    attrs.params = mk::util::make_params(Gemma4KindMeta{kModel, static_cast<int32_t>(NL)});
+    // Output f32: in[kModelEmbeds] (port 0) is [B,S,H]; either all tokens' logits
+    // [B,S,V] or, when the graph only asks for the last token, [B,1,V].
+    using ov::intel_gpu::op::MegaKernelDim;
+    attrs.outputs = {{ov::element::f32,
+                      last_only ? std::vector<MegaKernelDim>{MegaKernelDim::of_input(kModelEmbeds, 0),
+                                                              MegaKernelDim::constant(1), MegaKernelDim::constant(V)}
+                                : std::vector<MegaKernelDim>{MegaKernelDim::of_input(kModelEmbeds, 0),
+                                                              MegaKernelDim::of_input(kModelEmbeds, 1),
+                                                              MegaKernelDim::constant(V)}}};
     auto mkn = std::make_shared<MKOp>(in, attrs);
     mkn->set_friendly_name("MegaKernelGemma4Model");
     ov::copy_runtime_info(lm->shared_from_this(), mkn);
@@ -1519,14 +1445,6 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
     if ((mask & 64) && changed) {
         m->validate_nodes_and_infer_types();
         changed |= collapse_to_model(m, dbg);
-    }
-
-    if (const char* opt_in = std::getenv("OV_MEGAKERNEL_LMHEAD"); opt_in && opt_in[0] == '1') {
-        if (replace_lm_head(m, dbg)) {
-            changed = true;
-            m->validate_nodes_and_infer_types();
-            mk::util::verify_and_dump(m, 60, 1, "MegaKernelLMHead");
-        }
     }
 
     if (changed)

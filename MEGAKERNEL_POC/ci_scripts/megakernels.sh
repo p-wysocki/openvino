@@ -6,6 +6,7 @@ megakernels=(
     "Qwen06BPOC_prefill_separate_kernels Qwen/Qwen3-0.6B"
     "Qwen06BPOC_prefill_megakernel       Qwen/Qwen3-0.6B"
     "Qwen06BPOC                          Qwen/Qwen3-0.6B"
+    "Gemma4POC                           google/gemma-4-26B-A4B-it"
 )
 
 # OpenVINO IR directory of a Hugging Face model id, e.g. Qwen/Qwen3-0.6B -> .../qwen3-0.6b-openvino-ir.

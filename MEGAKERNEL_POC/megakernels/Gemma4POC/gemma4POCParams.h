@@ -5,14 +5,22 @@
 
 namespace mk {
 
-// Which subgraph a MegaKernel op replaces (MegaKernelAttrs::kind).
+// Which subgraph a MegaKernel op replaces. Carried in MegaKernelAttrs::params
+// (see Gemma4KindMeta below), since the generic MegaKernelAttrs no longer has
+// a model-specific kind field.
 enum Gemma4Kind : int {
-    kLmHead = 0,  // opt-in INT8 lm_head GEMV
     kFfn = 1,     // post-attention residual .. layer_scalar (dense MLP + MoE)
     kAttnIn = 2,  // input_layernorm .. q/k/v projections, norms and RoPE
     kMaskFull = 3,     // attention mask of the full-attention layers
     kMaskSliding = 4,  // attention mask of the sliding-window layers
     kModel = 5,        // the whole language model: embeddings in, logits out
+};
+
+// Packed into every Gemma4 MegaKernel's MegaKernelAttrs::params (first field
+// always `kind`, so mk_kind() in the transformation can read it generically).
+struct Gemma4KindMeta {
+    int32_t kind;
+    int32_t num_layers = 0;  // only meaningful for kModel
 };
 
 // Shapes of the Gemma-4-26B-A4B FFN block; the transformation refuses layers
@@ -107,14 +115,7 @@ enum ModelMeta : int {
 
 class Gemma4ConstantParams : public IConstantParams {
 public:
-    int kind = kLmHead;
-
-    // kLmHead
-    void* lm_head_q = nullptr;      // u8  [N, K]
-    void* lm_head_zp = nullptr;     // u8  [N]
-    void* lm_head_scale = nullptr;  // f16 [N]
-    int N = 0;
-    int K = 0;
+    int kind = kFfn;
 
     // kFfn, indexed by FfnPort; activation ports stay null.
     void* ffn[kFfnPorts] = {};

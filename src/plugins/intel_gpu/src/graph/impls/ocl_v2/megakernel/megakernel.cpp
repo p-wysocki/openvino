@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -41,33 +42,25 @@ using cldnn::ocl::ocl_stream;
 
 namespace {
 
+class MegaKernelFastImpl;
+
+// Some frameworks (e.g. genai's VLM pipeline, for inputs_embeds) hand the
+// MegaKernel a plain cl_mem input rather than a USM allocation. input_ptr()
+// stages those through a persistent per-port USM buffer owned by the impl;
+// output_ptr() keeps the strict USM requirement since the plugin allocates
+// MegaKernel outputs itself.
+struct IoCtx {
+    cldnn::primitive_inst* instance;
+    MegaKernelFastImpl* impl;
+};
+
 void* usm_raw(cldnn::memory& m) {
     OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
                     "[MegaKernel] port memory must be a USM allocation for the task-system path");
     return m.buffer_ptr();
 }
 
-// Lets the megakernel library map graph ports onto its own params without depending on cldnn
-mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
-    const auto& params = instance.get_typed_desc<cldnn::megakernel>()->attrs.params;
-    mk::MegakernelIo io{};
-    io.ctx = &instance;
-    io.input_ptr = [](void* ctx, int port) {
-        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->input_memory(port));
-    };
-    io.output_ptr = [](void* ctx, int port) {
-        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->output_memory(port));
-    };
-    io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
-        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_input_layout(port).get_shape().at(axis);
-    };
-    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
-        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_output_layout(port).get_shape().at(axis);
-    };
-    io.params = params.data();
-    io.params_size = params.size();
-    return io;
-}
+mk::MegakernelIo make_io(IoCtx& io_ctx);
 
 // ---------------------------------------------------------------------------
 // MegaKernelFastImpl
@@ -115,7 +108,8 @@ public:
         cl_device_id dl_device = eng.get_cl_device().get();
         cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
 
-        const mk::MegakernelIo io = make_io(instance);
+        IoCtx io_ctx{&instance, this};
+        const mk::MegakernelIo io = make_io(io_ctx);
         mk::ConstantParamsImpl weights{};
         mk::TErrorcode rc = FillMegaKernelConstantParams(&weights, &io);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelConstantParams failed: ", rc);
@@ -139,7 +133,8 @@ public:
         for (auto& e : events)
             strm.wait_for_events({e});  // inputs ready before we read them
 
-        const mk::MegakernelIo io = make_io(instance);
+        IoCtx io_ctx{&instance, this};
+        const mk::MegakernelIo io = make_io(io_ctx);
         mk::RuntimeParamsImpl params{};
         mk::TErrorcode rc = FillMegaKernelRuntimeParams(&params, &io);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelRuntimeParams failed: ", rc);
@@ -158,10 +153,50 @@ public:
         megakernelRuntime_ = nullptr;
     }
 
+    // Non-USM input ports (e.g. genai's VLM pipeline hands inputs_embeds in as a
+    // plain cl_mem) are copied once per execute() into a persistent per-port USM
+    // staging buffer, reallocated only if the port's size grows.
+    void* staged_input_ptr(cldnn::primitive_inst& instance, int port) {
+        auto mem = instance.input_memory_ptr(port);
+        if (cldnn::memory_capabilities::is_usm_type(mem->get_allocation_type()))
+            return mem->buffer_ptr();
+        std::lock_guard<std::mutex> g(stagingMu_);
+        auto& staged = staging_[port];
+        if (!staged || staged->size() < mem->size())
+            staged = instance.get_network().get_engine().allocate_memory(mem->get_layout(), cldnn::allocation_type::usm_device);
+        staged->copy_from(instance.get_network().get_stream(), *mem, true);
+        return staged->buffer_ptr();
+    }
+
 private:
     std::mutex mu_;
+    std::mutex stagingMu_;
+    std::map<int, cldnn::memory::ptr> staging_;
     mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
 };
+
+// Lets the megakernel library map graph ports onto its own params without depending on cldnn
+mk::MegakernelIo make_io(IoCtx& io_ctx) {
+    const auto& params = io_ctx.instance->get_typed_desc<cldnn::megakernel>()->attrs.params;
+    mk::MegakernelIo io{};
+    io.ctx = &io_ctx;
+    io.input_ptr = [](void* ctx, int port) {
+        auto* c = static_cast<IoCtx*>(ctx);
+        return c->impl->staged_input_ptr(*c->instance, port);
+    };
+    io.output_ptr = [](void* ctx, int port) {
+        return usm_raw(static_cast<IoCtx*>(ctx)->instance->output_memory(port));
+    };
+    io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<IoCtx*>(ctx)->instance->get_impl_params()->get_input_layout(port).get_shape().at(axis);
+    };
+    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<IoCtx*>(ctx)->instance->get_impl_params()->get_output_layout(port).get_shape().at(axis);
+    };
+    io.params = params.data();
+    io.params_size = params.size();
+    return io;
+}
 
 }  // namespace
 
