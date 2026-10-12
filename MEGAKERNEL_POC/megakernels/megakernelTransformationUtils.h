@@ -112,11 +112,10 @@ inline std::shared_ptr<ov::op::v0::Constant> squeeze_leading_ones(
 
 // Find the weight constant for a per-layer matmul weight.
 // The graph has pattern:  Constant (f16 compressed) -> Convert -> MatMul
-// The constant's friendly name is "<prefix><layer>.<weight_name_suffix>"
+// The constant's friendly name is "self.model.layers.<l>.<weight_name_suffix>"
 inline std::shared_ptr<ov::op::v0::Constant> get_proj_weight(
-        const ov::NodeVector& ops, int layer, const std::string& weight_name_suffix,
-        const std::string& prefix = "self.model.layers.") {
-    const std::string expected = prefix + std::to_string(layer) + "." + weight_name_suffix;
+        const ov::NodeVector& ops, int layer, const std::string& weight_name_suffix) {
+    const std::string expected = "self.model.layers." + std::to_string(layer) + "." + weight_name_suffix;
     auto node = find_node(ops, expected);
     OPENVINO_ASSERT(node != nullptr, "[MegaKernel] Cannot find weight node: ", expected);
     auto c = ov::as_type_ptr<ov::op::v0::Constant>(node);
@@ -252,37 +251,31 @@ inline ov::Output<ov::Node> find_rope_inv_freq(const ov::NodeVector& ops, size_t
     OPENVINO_THROW("[MegaKernel] rope inv_freq not found");
 }
 
-// Post-insertion sanity checks plus the optional graph dump.
-// Enabled with OV_MEGAKERNEL_DUMP=1, output directory via OV_MEGAKERNEL_DUMP_DIR.
-inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_removed_assigns,
-                            int expected_mk_nodes = 1, const std::string& mk_name_prefix = "MegaKernel") {
-    const bool dump = [] {
-        const char* v = std::getenv("OV_MEGAKERNEL_DUMP");
-        return v && v[0] == '1';
-    }();
-
+// Post-insertion sanity checks: exactly one node named "MegaKernel" and the
+// expected number of KV-cache Assign sinks left in the graph.
+// OV_MEGAKERNEL_DUMP=1 also dumps the graph to OV_MEGAKERNEL_DUMP_DIR (default ".").
+inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_kv_assigns) {
     int mk_count = 0;
     int assign_kv_count = 0;
     for (auto& op : m->get_ordered_ops()) {
-        if (op->get_friendly_name().rfind(mk_name_prefix, 0) == 0)
+        if (op->get_friendly_name() == "MegaKernel")
             ++mk_count;
         auto as = ov::as_type_ptr<ov::op::v6::Assign>(op);
         if (as && as->get_variable_id().find("past_key_values") != std::string::npos)
             ++assign_kv_count;
     }
-    OPENVINO_ASSERT(mk_count == expected_mk_nodes,
-                    "[MegaKernel] post-insertion check FAILED: expected ", expected_mk_nodes,
-                    " MegaKernel node(s), found ", mk_count);
-    OPENVINO_ASSERT(assign_kv_count == expected_removed_assigns,
+    OPENVINO_ASSERT(mk_count == 1,
+                    "[MegaKernel] post-insertion check FAILED: expected 1 MegaKernel node, found ", mk_count);
+    OPENVINO_ASSERT(assign_kv_count == expected_kv_assigns,
                     "[MegaKernel] post-insertion check FAILED: ", assign_kv_count,
-                    " KV Assign sinks present (expected ", expected_removed_assigns, ")");
+                    " KV Assign sinks present (expected ", expected_kv_assigns, ")");
 
-    if (!dump)
+    const char* dump = std::getenv("OV_MEGAKERNEL_DUMP");
+    if (!dump || dump[0] != '1')
         return;
 
-    std::cout << "[MegaKernel] PASS: MegaKernel node successfully inserted (" << mk_count << " node)." << std::endl;
-    std::cout << "[MegaKernel] PASS: all " << expected_removed_assigns
-              << " KV-cache Assign sinks removed." << std::endl;
+    std::cout << "[MegaKernel] PASS: MegaKernel node inserted, " << assign_kv_count
+              << " KV-cache Assign sinks left." << std::endl;
 
     // VisualizeTree always writes a .dot file; the built-in dot->SVG step is only
     // active when ENABLE_OPENVINO_DEBUG=ON, so invoke graphviz explicitly.
