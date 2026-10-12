@@ -29,7 +29,7 @@ main() {
 
     local entry megakernel model_id
     for entry in "${megakernels[@]}"; do
-        read -r megakernel model_id <<< "${entry}"
+        read -r megakernel model_id _ <<< "${entry}"
         echo "=== Megakernel ${megakernel} on ${model_id}"
         build_and_install "${megakernel}"
 

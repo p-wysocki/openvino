@@ -25,12 +25,12 @@ main() {
         "openvino-tokenizers==${tokenizers_version}" \
         --force-reinstall --no-deps
 
-    local entry megakernel model_id
+    local entry megakernel model_id task
     for entry in "${megakernels[@]}"; do
-        read -r megakernel model_id <<< "${entry}"
+        read -r megakernel model_id task <<< "${entry}"
         if [[ ! -d "$(model_dir "${model_id}")" ]]; then
             python "${repo_root}/MEGAKERNEL_POC/python/convert_to_openvino_ir.py" \
-                --model-id "${model_id}" --output-dir "$(model_dir "${model_id}")"
+                --model-id "${model_id}" --output-dir "$(model_dir "${model_id}")" --task "${task}"
         fi
     done
 
