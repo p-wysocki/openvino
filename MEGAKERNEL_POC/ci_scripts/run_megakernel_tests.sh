@@ -34,7 +34,7 @@ main() {
         build_and_install "${megakernel}"
 
         python -c "import openvino_genai; print(openvino_genai.__version__)"
-        bash "${repo_root}/MEGAKERNEL_POC/benchmark_app.sh" "$(model_dir "${model_id}")/openvino_model.xml"
+        bash "${repo_root}/MEGAKERNEL_POC/scripts/benchmark_app.sh" "$(model_dir "${model_id}")/openvino_model.xml"
         python "${repo_root}/MEGAKERNEL_POC/python/e2e_performance_measurement.py" \
             --model-dir "$(model_dir "${model_id}")" \
             --frameworks decode_only optimum genai \
