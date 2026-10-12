@@ -27,6 +27,9 @@ main() {
     export PYTHONPATH="${build_dir}${PYTHONPATH:+:${PYTHONPATH}}"
     export LD_LIBRARY_PATH="${build_dir}/openvino_genai${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
+    # MegaKernel op/primitive API; independent of the selected megakernel.
+    "${repo_root}/bin/intel64/Release/ov_gpu_unit_tests" --gtest_filter='megakernel_*'
+
     local entry megakernel model_id
     for entry in "${megakernels[@]}"; do
         read -r megakernel model_id <<< "${entry}"

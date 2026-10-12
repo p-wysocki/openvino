@@ -5,6 +5,7 @@
 // anything that depends on a particular model's layer count, weight names or
 // megakernel input order belongs in that model's transformation instead.
 
+#include "intel_gpu/op/megakernel.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/core/node.hpp"
 #include "openvino/op/assign.hpp"
@@ -18,12 +19,24 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace mk::util {
+
+// Packs a trivially copyable struct into MegaKernelAttrs::params; the megakernel
+// reads it back with mk::ReadParams (iMegakernelBinding.h).
+template <typename T>
+std::vector<uint8_t> make_params(const T& params) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::vector<uint8_t> bytes(sizeof(T));
+    std::memcpy(bytes.data(), &params, sizeof(T));
+    return bytes;
+}
 
 // Return the node with the given friendly name or nullptr.
 inline std::shared_ptr<ov::Node> find_node(const ov::NodeVector& ops, const std::string& name) {
@@ -251,21 +264,21 @@ inline ov::Output<ov::Node> find_rope_inv_freq(const ov::NodeVector& ops, size_t
     OPENVINO_THROW("[MegaKernel] rope inv_freq not found");
 }
 
-// Post-insertion sanity checks: exactly one node named "MegaKernel" and the
-// expected number of KV-cache Assign sinks left in the graph.
+// Post-insertion sanity checks: the expected number of MegaKernel ops and of
+// KV-cache Assign sinks left in the graph.
 // OV_MEGAKERNEL_DUMP=1 also dumps the graph to OV_MEGAKERNEL_DUMP_DIR (default ".").
-inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_kv_assigns) {
+inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_megakernels, int expected_kv_assigns) {
     int mk_count = 0;
     int assign_kv_count = 0;
     for (auto& op : m->get_ordered_ops()) {
-        if (op->get_friendly_name() == "MegaKernel")
+        if (ov::is_type<ov::intel_gpu::op::MegaKernel>(op))
             ++mk_count;
         auto as = ov::as_type_ptr<ov::op::v6::Assign>(op);
         if (as && as->get_variable_id().find("past_key_values") != std::string::npos)
             ++assign_kv_count;
     }
-    OPENVINO_ASSERT(mk_count == 1,
-                    "[MegaKernel] post-insertion check FAILED: expected 1 MegaKernel node, found ", mk_count);
+    OPENVINO_ASSERT(mk_count == expected_megakernels, "[MegaKernel] post-insertion check FAILED: expected ",
+                    expected_megakernels, " MegaKernel nodes, found ", mk_count);
     OPENVINO_ASSERT(assign_kv_count == expected_kv_assigns,
                     "[MegaKernel] post-insertion check FAILED: ", assign_kv_count,
                     " KV Assign sinks present (expected ", expected_kv_assigns, ")");
@@ -274,7 +287,7 @@ inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_kv
     if (!dump || dump[0] != '1')
         return;
 
-    std::cout << "[MegaKernel] PASS: MegaKernel node inserted, " << assign_kv_count
+    std::cout << "[MegaKernel] PASS: " << mk_count << " MegaKernel nodes inserted, " << assign_kv_count
               << " KV-cache Assign sinks left." << std::endl;
 
     // VisualizeTree always writes a .dot file; the built-in dot->SVG step is only

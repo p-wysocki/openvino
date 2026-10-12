@@ -51,6 +51,7 @@ void* usm_raw(cldnn::memory& m) {
 // Lets the megakernel library map graph ports onto its own params without
 // depending on cldnn.
 mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
+    const auto& params = instance.get_typed_desc<cldnn::megakernel>()->attrs.params;
     mk::MegakernelIo io{};
     io.ctx = &instance;
     io.input_ptr = [](void* ctx, int port) {
@@ -60,9 +61,13 @@ mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
         return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->output_memory(port));
     };
     io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
-        auto& inst = *static_cast<cldnn::primitive_inst*>(ctx);
-        return inst.input_memory(port).get_layout().get<ov::PartialShape>()[axis].get_length();
+        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_input_layout(port).get_shape().at(axis);
     };
+    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_output_layout(port).get_shape().at(axis);
+    };
+    io.params = params.data();
+    io.params_size = params.size();
     return io;
 }
 
@@ -114,14 +119,16 @@ public:
 
         const mk::MegakernelIo io = make_io(instance);
         mk::ConstantParamsImpl weights{};
-        FillMegaKernelConstantParams(&weights, &io);
+        mk::TErrorcode rc = FillMegaKernelConstantParams(&weights, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelConstantParams failed: ", rc);
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
         mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        megakernelRuntime_->Init(&weights, &platformParams);
+        rc = megakernelRuntime_->Init(&weights, &platformParams);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
     cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
@@ -136,9 +143,11 @@ public:
 
         const mk::MegakernelIo io = make_io(instance);
         mk::RuntimeParamsImpl params{};
-        FillMegaKernelRuntimeParams(&params, &io);
+        mk::TErrorcode rc = FillMegaKernelRuntimeParams(&params, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelRuntimeParams failed: ", rc);
 
-        megakernelRuntime_->Execute(&params);
+        rc = megakernelRuntime_->Execute(&params);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
