@@ -2,17 +2,14 @@
 
 #include "impl/qwen06BPOCRuntime.h"
 
-/////////////////////////////////////////////////////////////////////////
 extern "C" mk::IMegakernelRuntime* CreateMegaKernelPOCRuntime() {
   return new mk::Qwen06BPOCRuntime();
 }
 
-/////////////////////////////////////////////////////////////////////////
 extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime) {
   if (runtime) delete runtime;
 }
 
-/////////////////////////////////////////////////////////////////////////
 // Port order must match qwen06BPOCTransformation.cpp.
 extern "C" mk::TErrorcode FillMegaKernelConstantParams(mk::IConstantParams* params,
                                                      const mk::MegakernelIo* io) {
@@ -32,7 +29,6 @@ extern "C" mk::TErrorcode FillMegaKernelConstantParams(mk::IConstantParams* para
   return 0;
 }
 
-/////////////////////////////////////////////////////////////////////////
 extern "C" mk::TErrorcode FillMegaKernelRuntimeParams(mk::IRuntimeParams* params,
                                                     const mk::MegakernelIo* io) {
   auto& p = *static_cast<mk::Qwen06BRuntimeParams*>(params);

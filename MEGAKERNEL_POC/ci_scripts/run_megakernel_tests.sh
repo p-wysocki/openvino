@@ -8,17 +8,15 @@ venv_dir="${build_dir}/venv"
 
 source "${script_dir}/megakernels.sh"
 
-# The implementation is compiled into the GPU plugin, so switching it is an incremental rebuild.
 build_and_install() {
     cmake -S "${repo_root}" -B "${build_dir}" -DMEGAKERNEL_IMPLEMENTATION="$1"
-    # The wheel has no file dependency on the plugin, so remove it to have it repacked.
+    # The wheel has no file dependency on the plugin, so remove it to have it repacked
     rm -f "${build_dir}"/wheels/openvino-[0-9]*.whl
     cmake --build "${build_dir}" --parallel 16
     python -m pip install "${build_dir}"/wheels/*.whl --force-reinstall
 }
 
 main() {
-    # Fresh container: the incremental rebuilds need the same tools as build_megakernel.sh.
     bash "${repo_root}/install_build_dependencies.sh"
 
     python3 -m venv --system-site-packages "${venv_dir}"
@@ -27,7 +25,6 @@ main() {
     export PYTHONPATH="${build_dir}${PYTHONPATH:+:${PYTHONPATH}}"
     export LD_LIBRARY_PATH="${build_dir}/openvino_genai${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-    # MegaKernel op/primitive API; independent of the selected megakernel.
     "${repo_root}/bin/intel64/Release/ov_gpu_unit_tests" --gtest_filter='megakernel_*'
 
     local entry megakernel model_id

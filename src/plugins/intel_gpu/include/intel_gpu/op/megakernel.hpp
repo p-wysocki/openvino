@@ -13,7 +13,6 @@
 
 namespace ov::intel_gpu::op {
 
-/// One dimension of a MegaKernel output: dimension `axis` of input `input`, or `value` when input < 0.
 struct MegaKernelDim {
     int64_t input = -1;
     int64_t axis = 0;
@@ -33,8 +32,7 @@ struct MegaKernelOutput {
 };
 
 /// Everything model-specific about a MegaKernel op, set by the megakernel's transformation.
-/// The plugin only interprets `outputs`; `params` is an opaque blob (typically a trivially copyable
-/// struct from the megakernel's params header) handed to the megakernel library as-is.
+/// The plugin only interprets `outputs`; `params` is an opaque blob handed to the megakernel library as-is.
 struct MegaKernelAttrs {
     std::vector<MegaKernelOutput> outputs;
     std::vector<uint8_t> params;
@@ -63,8 +61,6 @@ inline ov::PartialShape megakernel_output_shape(const MegaKernelOutput& output,
     return shape;
 }
 
-/// A whole model (or part of it) replaced by a single megakernel. The inputs, outputs and params are
-/// defined by the megakernel's transformation (MEGAKERNEL_POC/megakernels/<name>/transformation).
 class MegaKernel : public ov::op::Op {
 public:
     OPENVINO_OP("MegaKernel", "gpu_opset");

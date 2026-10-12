@@ -41,15 +41,13 @@ using cldnn::ocl::ocl_stream;
 
 namespace {
 
-// The task-system tasks dereference port pointers directly, so they must be USM.
 void* usm_raw(cldnn::memory& m) {
     OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
                     "[MegaKernel] port memory must be a USM allocation for the task-system path");
     return m.buffer_ptr();
 }
 
-// Lets the megakernel library map graph ports onto its own params without
-// depending on cldnn.
+// Lets the megakernel library map graph ports onto its own params without depending on cldnn
 mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
     const auto& params = instance.get_typed_desc<cldnn::megakernel>()->attrs.params;
     mk::MegakernelIo io{};

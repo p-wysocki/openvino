@@ -13,10 +13,6 @@ if(NOT EXISTS "${MEGAKERNEL_IMPLEMENTATION_DIR}/CMakeLists.txt")
                 "Megakernel implementation '${MEGAKERNEL_IMPLEMENTATION}' was not found in ${MEGAKERNEL_IMPLEMENTATION_DIR}")
 endif()
 
-# The graph transformation is model-specific and ships with the megakernel, but
-# it needs the plugin-internal MegaKernel op, so it is compiled into the plugin
-# instead of into the megakernel's shared library. Exported as cache variables
-# because the plugin target is defined in a sibling directory.
 file(GLOB MEGAKERNEL_TRANSFORMATION_SOURCES
         "${MEGAKERNEL_IMPLEMENTATION_DIR}/transformation/*.cpp")
 if(NOT MEGAKERNEL_TRANSFORMATION_SOURCES)

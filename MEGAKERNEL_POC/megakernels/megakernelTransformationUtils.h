@@ -1,10 +1,5 @@
 #pragma once
 
-// Helpers shared by the per-model megakernel transformations
-// (see iMegakernelTransformation.h). Everything here is architecture-agnostic:
-// anything that depends on a particular model's layer count, weight names or
-// megakernel input order belongs in that model's transformation instead.
-
 #include "intel_gpu/op/megakernel.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/core/node.hpp"
@@ -70,7 +65,6 @@ inline std::shared_ptr<ov::op::v0::Constant> get_f16_constant(std::shared_ptr<ov
 }
 
 // Stack a vector of per-layer Constants along a new leading dimension.
-// Each constant must have the same shape.  Returns new stacked Constant.
 inline std::shared_ptr<ov::op::v0::Constant> stack_constants(
         const std::vector<std::shared_ptr<ov::op::v0::Constant>>& per_layer,
         const std::string& debug_name) {
@@ -133,14 +127,10 @@ inline std::shared_ptr<ov::op::v0::Constant> get_proj_weight(
     OPENVINO_ASSERT(node != nullptr, "[MegaKernel] Cannot find weight node: ", expected);
     auto c = ov::as_type_ptr<ov::op::v0::Constant>(node);
     OPENVINO_ASSERT(c != nullptr);
-    return c;  // already f16 compressed
+    return c;
 }
 
 // Find norm weight constant for a given layer and norm name fragment.
-// Strategy: find the last Multiply_1 in the RMSNorm sequence whose name
-// contains "layers.<l>.<norm_fragment>", then scan both inputs to find the
-// one that traces back to a Constant through Convert wrappers (the weight).
-// The other input is the normalised activation path.
 inline std::shared_ptr<ov::op::v0::Constant> get_norm_weight(
         const ov::NodeVector& ops, int layer, const std::string& norm_fragment) {
     const std::string target_frag = "layers." + std::to_string(layer) + "." + norm_fragment;
@@ -163,8 +153,7 @@ inline std::shared_ptr<ov::op::v0::Constant> get_norm_weight(
     OPENVINO_THROW("[MegaKernel] Cannot find norm weight for layer ", layer, " fragment '", norm_fragment, "'");
 }
 
-// Number of "past_key_values" ReadValue nodes in the graph. Transformations use
-// this as a cheap architecture fingerprint (2 * num_layers for a plain KV cache).
+// Number of "past_key_values" ReadValue nodes in the graph.
 inline int count_kv_read_values(const ov::NodeVector& ops) {
     int n = 0;
     for (auto& op : ops) {
@@ -175,8 +164,6 @@ inline int count_kv_read_values(const ov::NodeVector& ops) {
     return n;
 }
 
-// Parse the layer index out of a "past_key_values.<l>.<suffix>" variable id.
-// Returns false if the id does not have that shape.
 inline bool parse_kv_variable_id(const std::string& vid, int& layer, bool& is_key) {
     if (vid.find("past_key_values") == std::string::npos) return false;
     auto dot1 = vid.find('.');

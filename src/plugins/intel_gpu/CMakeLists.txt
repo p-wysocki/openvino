@@ -134,8 +134,6 @@ add_subdirectory(src/graph)
 
 file(GLOB_RECURSE PLUGIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/*.cpp ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_gpu/plugin/*.hpp)
 
-# Graph transformation of the megakernel selected by MEGAKERNEL_IMPLEMENTATION
-# (set in src/graph/impls/ocl_v2/megakernel/CMakeLists.txt, processed above).
 list(APPEND PLUGIN_SOURCES ${MEGAKERNEL_TRANSFORMATION_SOURCES})
 
 ov_add_plugin(NAME ${TARGET_NAME}
