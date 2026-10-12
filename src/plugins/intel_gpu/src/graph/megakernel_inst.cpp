@@ -14,30 +14,22 @@ namespace cldnn {
 
 GPU_DEFINE_PRIMITIVE_TYPE_ID(megakernel)
 
-// ---------------------------------------------------------------------------
-// Shape inference
-// ---------------------------------------------------------------------------
-// Outputs:
-//   [0]  hidden_states_out  [B, S, hidden_size]
-//   [1]  present_key        [num_layers, B, num_kv_heads, S_past + S, head_dim]
-//   [2]  present_val        [num_layers, B, num_kv_heads, S_past + S, head_dim]
-
 template <typename ShapeType>
 std::vector<layout> megakernel_inst::calc_output_layouts(megakernel_node const& /*node*/,
                                                                  const kernel_impl_params& impl_param) {
     auto desc = impl_param.typed_desc<megakernel>();
-    const auto& in_layout = impl_param.get_input_layout(0);
 
-    auto ps = ov::intel_gpu::op::megakernel_output_shape(
-        in_layout.get<ShapeType>(),
-        impl_param.input_layouts.size() > 1 ? impl_param.get_input_layout(1).get<ShapeType>() : ShapeType{},
-        desc->hidden_size, desc->num_heads, desc->head_dim);
+    std::vector<ov::PartialShape> input_shapes;
+    for (const auto& l : impl_param.input_layouts)
+        input_shapes.push_back(l.get<ov::PartialShape>());
 
-    auto dt = data_types::f32;
-    if (!desc->output_data_types.empty() && desc->output_data_types[0].has_value())
-        dt = desc->output_data_types[0].value();
     std::vector<layout> outs;
-    outs.emplace_back(ps, dt, in_layout.format);
+    for (size_t i = 0; i < desc->attrs.outputs.size(); ++i) {
+        const auto& out = desc->attrs.outputs[i];
+        const auto type = desc->output_data_types[i].value_or(out.type);
+        outs.emplace_back(ov::intel_gpu::op::megakernel_output_shape(out, input_shapes), type,
+                          format::get_default_format(out.shape.size()));
+    }
     return outs;
 }
 
@@ -58,10 +50,8 @@ std::string megakernel_inst::to_string(megakernel_node const& node) {
     auto node_info = node.desc_to_json();
     std::stringstream ss;
     json_composite info;
-    info.add("num_layers",   desc->num_layers);
-    info.add("hidden_size",  desc->hidden_size);
-    info.add("num_kv_heads", desc->num_kv_heads);
-    info.add("head_dim",     desc->head_dim);
+    info.add("num_outputs", desc->attrs.outputs.size());
+    info.add("params_bytes", desc->attrs.params.size());
     node_info->add("megakernel_info", info);
     node_info->dump(ss);
     return ss.str();

@@ -41,42 +41,31 @@ using cldnn::ocl::ocl_stream;
 
 namespace {
 
-// Bridge cldnn's primitive_inst to the model-agnostic mk::MegakernelIo accessor,
-// so that the port -> parameter mapping can live with the megakernel itself.
-void* usm_raw(cldnn::memory& m, int port) {
-    auto at = m.get_allocation_type();
-    bool usm = at == cldnn::allocation_type::usm_device || at == cldnn::allocation_type::usm_host || at == cldnn::allocation_type::usm_shared;
-    OPENVINO_ASSERT(usm, "[MegaKernel] port ", port, " must be a USM allocation for the task-system path");
+void* usm_raw(cldnn::memory& m) {
+    OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
+                    "[MegaKernel] port memory must be a USM allocation for the task-system path");
     return m.buffer_ptr();
 }
 
-// Accessor context: the instance plus USM copies of inputs that arrived in a
-// non-USM allocation (e.g. a cl_mem tensor handed over by GenAI).
-struct IoCtx {
-    cldnn::primitive_inst* inst;
-    const std::vector<cldnn::memory::ptr>* staging;
-};
-
-mk::MegakernelIo make_io(IoCtx& c) {
-    auto& instance = *c.inst;
+// Lets the megakernel library map graph ports onto its own params without depending on cldnn
+mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
+    const auto& params = instance.get_typed_desc<cldnn::megakernel>()->attrs.params;
     mk::MegakernelIo io{};
-    io.ctx = &c;
-    io.input_ptr = [](void* ctx, int port) -> void* {
-        auto& ic = *static_cast<IoCtx*>(ctx);
-        if (ic.staging && static_cast<size_t>(port) < ic.staging->size() && (*ic.staging)[port])
-            return (*ic.staging)[port]->buffer_ptr();
-        return usm_raw(ic.inst->input_memory(port), port);
+    io.ctx = &instance;
+    io.input_ptr = [](void* ctx, int port) {
+        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->input_memory(port));
     };
-    io.output_ptr = [](void* ctx, int port) -> void* {
-        auto& inst = *static_cast<IoCtx*>(ctx)->inst;
-        return inst.output_memory(port).buffer_ptr();
+    io.output_ptr = [](void* ctx, int port) {
+        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->output_memory(port));
     };
     io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
-        auto& inst = *static_cast<IoCtx*>(ctx)->inst;
-        return inst.input_memory(port).get_layout().get<ov::PartialShape>()[axis].get_length();
+        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_input_layout(port).get_shape().at(axis);
     };
-    io.kind = instance.get_impl_params()->typed_desc<cldnn::megakernel>()->kind;
-    io.num_inputs = static_cast<int64_t>(instance.inputs_memory_count());
+    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
+        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_output_layout(port).get_shape().at(axis);
+    };
+    io.params = params.data();
+    io.params_size = params.size();
     return io;
 }
 
@@ -126,21 +115,17 @@ public:
         cl_device_id dl_device = eng.get_cl_device().get();
         cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
 
-        // Resolve the raw USM device pointers for every model input/output. The
-        // task-system tasks dereference these directly out of the context struct,
-        // which requires genuine USM device allocations (asserted below).
-        IoCtx ic{&instance, nullptr};
-        mk::MegakernelIo io = make_io(ic);
-
+        const mk::MegakernelIo io = make_io(instance);
         mk::ConstantParamsImpl weights{};
-        FillMegaKernelConstantParams(&weights, &io);
+        mk::TErrorcode rc = FillMegaKernelConstantParams(&weights, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelConstantParams failed: ", rc);
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
         mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        const mk::TErrorcode rc = megakernelRuntime_->Init(&weights, &platformParams);
+        rc = megakernelRuntime_->Init(&weights, &platformParams);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
@@ -151,40 +136,17 @@ public:
         auto& ocls = downcast<ocl_stream>(strm);
         cl_command_queue q = ocls.get_cl_queue().get();
 
-        // An in-order queue already serialises us behind our producers; waiting
-        // on the host here would drain the queue once per megakernel.
-        if (strm.get_queue_type() != QueueTypes::in_order) {
-            for (auto& e : events)
-                strm.wait_for_events({e});
-        }
+        for (auto& e : events)
+            strm.wait_for_events({e});  // inputs ready before we read them
 
-        // Runtime inputs that are not USM (cl_mem) are copied into USM staging
-        // buffers on the same queue; constants were validated as USM in Init.
-        const size_t n_in = instance.inputs_memory_count();
-        staging_.resize(n_in);
-        for (size_t p = 0; p < n_in; ++p) {
-            auto& m = instance.input_memory(p);
-            if (cldnn::memory_capabilities::is_usm_type(m.get_allocation_type())) {
-                staging_[p] = nullptr;
-                continue;
-            }
-            if (!staging_[p] || staging_[p]->size() < m.size()) {
-                cldnn::layout l({static_cast<int64_t>(m.size())}, ov::element::u8, cldnn::format::bfyx);
-                staging_[p] = instance.get_network().get_engine().allocate_memory(l, cldnn::allocation_type::usm_device, false);
-            }
-            staging_[p]->copy_from(strm, m, 0, 0, m.size(), strm.get_queue_type() != QueueTypes::in_order);
-        }
+        const mk::MegakernelIo io = make_io(instance);
+        mk::RuntimeParamsImpl params{};
+        mk::TErrorcode rc = FillMegaKernelRuntimeParams(&params, &io);
+        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelRuntimeParams failed: ", rc);
 
-        IoCtx ic{&instance, &staging_};
-        mk::MegakernelIo io_acc = make_io(ic);
-        mk::RuntimeParamsImpl io{};
-        FillMegaKernelRuntimeParams(&io, &io_acc);
-
-        const mk::TErrorcode rc = megakernelRuntime_->Execute(&io);
+        rc = megakernelRuntime_->Execute(&params);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
-        if (strm.get_queue_type() == QueueTypes::in_order && !instance.needs_completion_event() && !instance.is_output())
-            return ocls.create_base_event();
         cl_event marker;
         clEnqueueMarkerWithWaitList(q, 0, nullptr, &marker);
         return std::make_shared<ocl_event>(cl::Event(marker, false), 0ULL);
@@ -199,7 +161,6 @@ public:
 private:
     std::mutex mu_;
     mk::IMegakernelRuntime* megakernelRuntime_ = nullptr;
-    std::vector<cldnn::memory::ptr> staging_;
 };
 
 }  // namespace

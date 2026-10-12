@@ -1,34 +1,40 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 #include "iMegakernelRuntime.h"
 
 namespace mk {
 
-// Abstracts the plugin's cldnn::primitive_inst away from megakernel-specific
-// binding code: a megakernel only needs raw USM pointers for its graph ports
-// plus a few shape values. The plugin fills this in and hands it over.
+// Lazy accessors to the MegaKernel op's graph ports
 struct MegakernelIo {
   void* ctx;
   void* (*input_ptr)(void* ctx, int port);
   void* (*output_ptr)(void* ctx, int port);
   int64_t (*input_dim)(void* ctx, int port, int axis);
-  // MegaKernelAttrs::kind of the op being bound.
-  int64_t kind;
-  // Number of graph inputs of the op.
-  int64_t num_inputs;
+  int64_t (*output_dim)(void* ctx, int port, int axis);
+  const void* params;
+  size_t params_size;
 };
+
+template <typename T>
+bool ReadParams(const MegakernelIo& io, T& out) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  if (io.params_size != sizeof(T)) return false;
+  std::memcpy(&out, io.params, sizeof(T));
+  return true;
+}
 
 }  // namespace mk
 
-// Which graph port carries which weight is decided by the megakernel's own
-// transformation, so the mapping back onto ConstantParams/RuntimeParams belongs
-// to the megakernel too - otherwise every new model would need an edit inside
-// the plugin. Both functions are exported by the megakernel shared library and
-// declared alongside Create/DestroyMegaKernelPOCRuntime in megakernelImpl.h.
+// The port order and params are defined by the megakernel's own transformation,
+// so mapping them onto its param structs belongs to the megakernel too. Every
+// megakernel exports these from megakernelImpl.h; non-zero return is an error:
 //
-//   extern "C" EXPORT_API void FillMegaKernelConstantParams(
+//   extern "C" EXPORT_API mk::TErrorcode FillMegaKernelConstantParams(
 //       mk::IConstantParams* params, const mk::MegakernelIo* io);
-//   extern "C" EXPORT_API void FillMegaKernelRuntimeParams(
+//   extern "C" EXPORT_API mk::TErrorcode FillMegaKernelRuntimeParams(
 //       mk::IRuntimeParams* params, const mk::MegakernelIo* io);

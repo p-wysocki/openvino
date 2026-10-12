@@ -1,10 +1,6 @@
 #pragma once
 
-// Helpers shared by the per-model megakernel transformations
-// (see iMegakernelTransformation.h). Everything here is architecture-agnostic:
-// anything that depends on a particular model's layer count, weight names or
-// megakernel input order belongs in that model's transformation instead.
-
+#include "intel_gpu/op/megakernel.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/core/node.hpp"
 #include "openvino/op/assign.hpp"
@@ -18,12 +14,24 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace mk::util {
+
+// Packs a trivially copyable struct into MegaKernelAttrs::params; the megakernel
+// reads it back with mk::ReadParams (iMegakernelBinding.h).
+template <typename T>
+std::vector<uint8_t> make_params(const T& params) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::vector<uint8_t> bytes(sizeof(T));
+    std::memcpy(bytes.data(), &params, sizeof(T));
+    return bytes;
+}
 
 // Return the node with the given friendly name or nullptr.
 inline std::shared_ptr<ov::Node> find_node(const ov::NodeVector& ops, const std::string& name) {
@@ -57,7 +65,6 @@ inline std::shared_ptr<ov::op::v0::Constant> get_f16_constant(std::shared_ptr<ov
 }
 
 // Stack a vector of per-layer Constants along a new leading dimension.
-// Each constant must have the same shape.  Returns new stacked Constant.
 inline std::shared_ptr<ov::op::v0::Constant> stack_constants(
         const std::vector<std::shared_ptr<ov::op::v0::Constant>>& per_layer,
         const std::string& debug_name) {
@@ -112,23 +119,18 @@ inline std::shared_ptr<ov::op::v0::Constant> squeeze_leading_ones(
 
 // Find the weight constant for a per-layer matmul weight.
 // The graph has pattern:  Constant (f16 compressed) -> Convert -> MatMul
-// The constant's friendly name is "<prefix><layer>.<weight_name_suffix>"
+// The constant's friendly name is "self.model.layers.<l>.<weight_name_suffix>"
 inline std::shared_ptr<ov::op::v0::Constant> get_proj_weight(
-        const ov::NodeVector& ops, int layer, const std::string& weight_name_suffix,
-        const std::string& prefix = "self.model.layers.") {
-    const std::string expected = prefix + std::to_string(layer) + "." + weight_name_suffix;
+        const ov::NodeVector& ops, int layer, const std::string& weight_name_suffix) {
+    const std::string expected = "self.model.layers." + std::to_string(layer) + "." + weight_name_suffix;
     auto node = find_node(ops, expected);
     OPENVINO_ASSERT(node != nullptr, "[MegaKernel] Cannot find weight node: ", expected);
     auto c = ov::as_type_ptr<ov::op::v0::Constant>(node);
     OPENVINO_ASSERT(c != nullptr);
-    return c;  // already f16 compressed
+    return c;
 }
 
 // Find norm weight constant for a given layer and norm name fragment.
-// Strategy: find the last Multiply_1 in the RMSNorm sequence whose name
-// contains "layers.<l>.<norm_fragment>", then scan both inputs to find the
-// one that traces back to a Constant through Convert wrappers (the weight).
-// The other input is the normalised activation path.
 inline std::shared_ptr<ov::op::v0::Constant> get_norm_weight(
         const ov::NodeVector& ops, int layer, const std::string& norm_fragment) {
     const std::string target_frag = "layers." + std::to_string(layer) + "." + norm_fragment;
@@ -151,8 +153,7 @@ inline std::shared_ptr<ov::op::v0::Constant> get_norm_weight(
     OPENVINO_THROW("[MegaKernel] Cannot find norm weight for layer ", layer, " fragment '", norm_fragment, "'");
 }
 
-// Number of "past_key_values" ReadValue nodes in the graph. Transformations use
-// this as a cheap architecture fingerprint (2 * num_layers for a plain KV cache).
+// Number of "past_key_values" ReadValue nodes in the graph.
 inline int count_kv_read_values(const ov::NodeVector& ops) {
     int n = 0;
     for (auto& op : ops) {
@@ -163,8 +164,6 @@ inline int count_kv_read_values(const ov::NodeVector& ops) {
     return n;
 }
 
-// Parse the layer index out of a "past_key_values.<l>.<suffix>" variable id.
-// Returns false if the id does not have that shape.
 inline bool parse_kv_variable_id(const std::string& vid, int& layer, bool& is_key) {
     if (vid.find("past_key_values") == std::string::npos) return false;
     auto dot1 = vid.find('.');
@@ -252,37 +251,31 @@ inline ov::Output<ov::Node> find_rope_inv_freq(const ov::NodeVector& ops, size_t
     OPENVINO_THROW("[MegaKernel] rope inv_freq not found");
 }
 
-// Post-insertion sanity checks plus the optional graph dump.
-// Enabled with OV_MEGAKERNEL_DUMP=1, output directory via OV_MEGAKERNEL_DUMP_DIR.
-inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_removed_assigns,
-                            int expected_mk_nodes = 1, const std::string& mk_name_prefix = "MegaKernel") {
-    const bool dump = [] {
-        const char* v = std::getenv("OV_MEGAKERNEL_DUMP");
-        return v && v[0] == '1';
-    }();
-
+// Post-insertion sanity checks: the expected number of MegaKernel ops and of
+// KV-cache Assign sinks left in the graph.
+// OV_MEGAKERNEL_DUMP=1 also dumps the graph to OV_MEGAKERNEL_DUMP_DIR (default ".").
+inline void verify_and_dump(const std::shared_ptr<ov::Model>& m, int expected_megakernels, int expected_kv_assigns) {
     int mk_count = 0;
     int assign_kv_count = 0;
     for (auto& op : m->get_ordered_ops()) {
-        if (op->get_friendly_name().rfind(mk_name_prefix, 0) == 0)
+        if (ov::is_type<ov::intel_gpu::op::MegaKernel>(op))
             ++mk_count;
         auto as = ov::as_type_ptr<ov::op::v6::Assign>(op);
         if (as && as->get_variable_id().find("past_key_values") != std::string::npos)
             ++assign_kv_count;
     }
-    OPENVINO_ASSERT(mk_count == expected_mk_nodes,
-                    "[MegaKernel] post-insertion check FAILED: expected ", expected_mk_nodes,
-                    " MegaKernel node(s), found ", mk_count);
-    OPENVINO_ASSERT(assign_kv_count == expected_removed_assigns,
+    OPENVINO_ASSERT(mk_count == expected_megakernels, "[MegaKernel] post-insertion check FAILED: expected ",
+                    expected_megakernels, " MegaKernel nodes, found ", mk_count);
+    OPENVINO_ASSERT(assign_kv_count == expected_kv_assigns,
                     "[MegaKernel] post-insertion check FAILED: ", assign_kv_count,
-                    " KV Assign sinks present (expected ", expected_removed_assigns, ")");
+                    " KV Assign sinks present (expected ", expected_kv_assigns, ")");
 
-    if (!dump)
+    const char* dump = std::getenv("OV_MEGAKERNEL_DUMP");
+    if (!dump || dump[0] != '1')
         return;
 
-    std::cout << "[MegaKernel] PASS: MegaKernel node successfully inserted (" << mk_count << " node)." << std::endl;
-    std::cout << "[MegaKernel] PASS: all " << expected_removed_assigns
-              << " KV-cache Assign sinks removed." << std::endl;
+    std::cout << "[MegaKernel] PASS: " << mk_count << " MegaKernel nodes inserted, " << assign_kv_count
+              << " KV-cache Assign sinks left." << std::endl;
 
     // VisualizeTree always writes a .dot file; the built-in dot->SVG step is only
     // active when ENABLE_OPENVINO_DEBUG=ON, so invoke graphviz explicitly.

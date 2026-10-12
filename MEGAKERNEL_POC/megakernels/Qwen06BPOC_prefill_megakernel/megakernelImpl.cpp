@@ -14,8 +14,8 @@ extern "C" void DestroyMegaKernelPOCRuntime(mk::IMegakernelRuntime* runtime) {
 
 /////////////////////////////////////////////////////////////////////////
 // Port order must match qwen06BPOCTransformation.cpp.
-extern "C" void FillMegaKernelConstantParams(mk::IConstantParams* params,
-                                             const mk::MegakernelIo* io) {
+extern "C" mk::TErrorcode FillMegaKernelConstantParams(mk::IConstantParams* params,
+                                                     const mk::MegakernelIo* io) {
   auto& w = *static_cast<mk::Qwen06BConstantParams*>(params);
   w.q_proj_w = io->input_ptr(io->ctx, 5);
   w.k_proj_w = io->input_ptr(io->ctx, 6);
@@ -29,14 +29,16 @@ extern "C" void FillMegaKernelConstantParams(mk::IConstantParams* params,
   w.q_norm_w = io->input_ptr(io->ctx, 14);
   w.k_norm_w = io->input_ptr(io->ctx, 15);
   w.rope_inv_freq = io->input_ptr(io->ctx, 16);
+  return 0;
 }
 
 /////////////////////////////////////////////////////////////////////////
-extern "C" void FillMegaKernelRuntimeParams(mk::IRuntimeParams* params,
-                                            const mk::MegakernelIo* io) {
+extern "C" mk::TErrorcode FillMegaKernelRuntimeParams(mk::IRuntimeParams* params,
+                                                    const mk::MegakernelIo* io) {
   auto& p = *static_cast<mk::Qwen06BRuntimeParams*>(params);
   p.hidden_states = io->input_ptr(io->ctx, 0);
   p.position_ids = io->input_ptr(io->ctx, 1);
   p.hidden_states_out = io->output_ptr(io->ctx, 0);
   p.newTokens = static_cast<int>(io->input_dim(io->ctx, 0, 1));
+  return 0;
 }

@@ -4,55 +4,61 @@
 
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
+#include "openvino/core/except.hpp"
+#include "openvino/core/partial_shape.hpp"
 #include "openvino/op/op.hpp"
 
 namespace ov::intel_gpu::op {
 
-struct MegaKernelAttrs {
-    int64_t num_layers           = 28;
-    int64_t hidden_size          = 1024;
-    int64_t num_attention_heads  = 16;
-    int64_t num_kv_heads         = 8;
-    int64_t head_dim             = 128;
-    int64_t intermediate_size    = 3072;
-    float   rms_norm_eps         = 1e-6f;
-    // Selects the sub-kernel inside the megakernel library, for libraries that
-    // replace more than one kind of subgraph.
-    int64_t kind                 = 0;
-    ov::element::Type out_type   = ov::element::f32;
+struct MegaKernelDim {
+    int64_t input = -1;
+    int64_t axis = 0;
+    int64_t value = 0;
+
+    static MegaKernelDim of_input(int64_t input, int64_t axis) { return {input, axis, 0}; }
+    static MegaKernelDim constant(int64_t value) { return {-1, 0, value}; }
+
+    bool operator==(const MegaKernelDim& o) const { return input == o.input && axis == o.axis && value == o.value; }
 };
 
-// hidden_size value selecting an attention-mask output [B, 1, S, L] built from
-// port 0 [B, L] (attention_mask) and port 1 [B, S] (any per-query tensor).
-constexpr int64_t kMegaKernelMaskShape = -1;
-// hidden_size value selecting a head-major output [B, heads, S, head_dim] from
-// port 0 [B, S, ...]; heads and head_dim are passed in the same call.
-constexpr int64_t kMegaKernelHeadsShape = -2;
-// hidden_size value selecting [B, 1, width] from port 0 [B, S, ...] (only the
-// last position is produced); width is passed as head_dim.
-constexpr int64_t kMegaKernelLastTokenShape = -3;
+struct MegaKernelOutput {
+    ov::element::Type type;
+    std::vector<MegaKernelDim> shape;
 
-template <typename PS>
-PS megakernel_output_shape(const PS& in0, const PS& in1, int64_t hidden_size, int64_t heads = 0, int64_t head_dim = 0) {
-    PS ps = in0;
-    if (hidden_size == kMegaKernelLastTokenShape) {
-        if (in0.rank().is_static() && in0.size() >= 1)
-            return PS{in0[0], 1, head_dim};
-        return PS::dynamic(3);
+    bool operator==(const MegaKernelOutput& o) const { return type == o.type && shape == o.shape; }
+};
+
+/// Everything model-specific about a MegaKernel op, set by the megakernel's transformation.
+/// The plugin only interprets `outputs`; `params` is an opaque blob handed to the megakernel library as-is.
+struct MegaKernelAttrs {
+    std::vector<MegaKernelOutput> outputs;
+    std::vector<uint8_t> params;
+
+    bool operator==(const MegaKernelAttrs& o) const { return outputs == o.outputs && params == o.params; }
+};
+
+inline ov::PartialShape megakernel_output_shape(const MegaKernelOutput& output,
+                                                const std::vector<ov::PartialShape>& input_shapes) {
+    ov::PartialShape shape;
+    for (const auto& d : output.shape) {
+        if (d.input < 0) {
+            shape.push_back(ov::Dimension(d.value));
+            continue;
+        }
+        OPENVINO_ASSERT(static_cast<size_t>(d.input) < input_shapes.size(), "[MegaKernel] output dim refers to missing input ", d.input);
+        const auto& in = input_shapes[d.input];
+        if (in.rank().is_dynamic()) {
+            shape.push_back(ov::Dimension::dynamic());
+            continue;
+        }
+        OPENVINO_ASSERT(d.axis >= 0 && d.axis < in.rank().get_length(), "[MegaKernel] output dim refers to axis ", d.axis, " of rank-",
+                        in.rank().get_length(), " input ", d.input);
+        shape.push_back(in[d.axis]);
     }
-    if (hidden_size == kMegaKernelHeadsShape) {
-        if (in0.rank().is_static() && in0.size() >= 2)
-            return PS{in0[0], heads, in0[1], head_dim};
-        return PS::dynamic(4);
-    }
-    if (hidden_size == kMegaKernelMaskShape) {
-        if (in0.rank().is_static() && in0.size() == 2 && in1.rank().is_static() && in1.size() == 2)
-            return PS{in0[0], 1, in1[1], in0[1]};
-        return PS::dynamic(4);
-    }
-    if (ps.rank().is_static() && ps.rank().get_length() > 0 && hidden_size > 0)
-        ps[ps.rank().get_length() - 1] = hidden_size;
-    return ps;
+    return shape;
 }
 
 class MegaKernel : public ov::op::Op {

@@ -36,6 +36,7 @@ namespace mk {
 namespace {
 
 constexpr int NUM_LAYERS = 28;
+constexpr int64_t HIDDEN_SIZE = 1024;
 constexpr size_t ROPE_INV_FREQ_ELEMENTS = 64;
 
 const std::vector<std::pair<std::string, std::string>> PROJ_WEIGHTS = {
@@ -61,6 +62,7 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
     namespace mku = mk::util;
     using ov::intel_gpu::op::MegaKernel;
     using ov::intel_gpu::op::MegaKernelAttrs;
+    using ov::intel_gpu::op::MegaKernelDim;
 
     const ov::NodeVector ops = m->get_ordered_ops();
 
@@ -82,6 +84,9 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
         if (name == "beam_idx")     beam_idx_node = op;
     }
     OPENVINO_ASSERT(pos_ids_node && beam_idx_node, "[MegaKernel] Missing Parameter nodes");
+    // Runs after ConvertPrecision, so this is the dtype the runtime will receive.
+    OPENVINO_ASSERT(pos_ids_node->get_output_element_type(0) == ov::element::i64,
+                    "[MegaKernel] supports only i64 position_ids");
 
     // --- 2. Stacked projection weights ------------------------------------------
     std::map<std::string, std::shared_ptr<ov::op::v0::Constant>> stacked_proj;
@@ -116,7 +121,9 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
     auto past_val = mku::build_stacked_kv(val_rvs);
 
     // --- 6. Build MegaKernel -----------------------------------------------------
-    MegaKernelAttrs attrs;  // defaults already describe Qwen3-0.6B
+    // One output, hidden_states_out [B, S, HIDDEN_SIZE] f32; the runtime has no params.
+    MegaKernelAttrs attrs;
+    attrs.outputs = {{ov::element::f32, {MegaKernelDim::of_input(0, 0), MegaKernelDim::of_input(0, 1), MegaKernelDim::constant(HIDDEN_SIZE)}}};
 
     ov::OutputVector mk_inputs = {
         embed_gather->output(0),                 // 0  hidden_states
@@ -161,7 +168,7 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
 
     m->validate_nodes_and_infer_types();
 
-    mku::verify_and_dump(m, 2 * NUM_LAYERS);
+    mku::verify_and_dump(m, 1, 0);
     return true;
 }
 

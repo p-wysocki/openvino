@@ -39,7 +39,7 @@ We aim for a similar speedup.
 
 **4. How to build**
 
-For local build, use ./MEGAKERNEL_POC/compile_run_megakernel.sh. This will install all needed deps, build and run e2e benchmarks locally.
+For a local build, use `./MEGAKERNEL_POC/compile_run_megakernel.sh`. The first run installs the required dependencies; later runs reuse them and only rebuild, reinstall the generated wheel, and run the benchmarks. Use `./MEGAKERNEL_POC/compile_run_megakernel.sh --clean` to remove generated artifacts and cached setup state before a clean build.
 
 **5. Code structure**
 
@@ -47,11 +47,11 @@ For local build, use ./MEGAKERNEL_POC/compile_run_megakernel.sh. This will insta
 
 * MEGAKERNEL_POC/python - contains python tools to e.g. export the model
 
-* MEGAKERNEL_POC/ci_scripts - contains scripts for CI
+* MEGAKERNEL_POC/ci_scripts - contains scripts for CI; megakernels.sh lists the megakernels (and their models) tested in CI
 
 * MEGAKERNEL_POC/research - contains mini R&D projects to test some of the ideas that megakernel can use, e.g. warp-specialized gemv, preloading, etc
 
-* On the OV side we have added a custom transformation and a separate Megakernel operator that calls shared lib with actual megakernel impl.
+* On the OV side we have added a separate Megakernel operator that calls shared lib with actual megakernel impl. The graph transformation inserting that operator is model-specific and lives with each megakernel (MEGAKERNEL_POC/megakernels/<name>/transformation), see MEGAKERNEL_POC/megakernels/README.txt
 
 **6. References:**
 
