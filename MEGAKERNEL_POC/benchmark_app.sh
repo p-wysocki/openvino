@@ -3,7 +3,7 @@ set -euo pipefail
 
 attention_mask_size=1
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-model_path="${script_dir}/python/qwen3-0.6b-openvino-ir/openvino_model.xml"
+model_path="${1:-${script_dir}/python/qwen3-0.6b-openvino-ir/openvino_model.xml}"
 benchmark_app_path="${script_dir}/../bin/intel64/Release/benchmark_app"
 
 if [[ ! -x "${benchmark_app_path}" ]]; then

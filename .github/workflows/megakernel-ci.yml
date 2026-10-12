@@ -49,7 +49,7 @@ jobs:
               echo "DONE! This job'\''s status is ${{ job.status }}."
             '
 
-      - name: Run tests and benchmarks
+      - name: Build and test each megakernel (MEGAKERNEL_POC/ci_scripts/megakernels.sh)
         env:
           WORKSPACE_REPO: ${{ github.workspace }}
         run: |
