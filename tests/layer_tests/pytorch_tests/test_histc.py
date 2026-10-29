@@ -111,11 +111,7 @@ class TestHistc(PytorchLayerTest):
     @pytest.mark.nightly
     @pytest.mark.precommit
     @pytest.mark.parametrize("min,max", [(0.0, 0.0), (0.0, 1.0)])
-    @pytest.mark.parametrize("dynamic_shapes", [
-        True,
-        pytest.param(False, marks=pytest.mark.xfail(
-            reason="CPU plugin Histc returns uninitialized output for a static zero-size input", strict=False)),
-    ])
+    @pytest.mark.parametrize("dynamic_shapes", [True, False])
     def test_histc_empty_input(self, min, max, dynamic_shapes, ie_device, precision, ir_version):
         self._run(np.zeros((0,)), np.float32, 3, min, max, ie_device, precision, ir_version,
                   dynamic_shapes=dynamic_shapes)
@@ -159,3 +155,7 @@ class TestHistc(PytorchLayerTest):
         data = np.random.RandomState(2).randn(4, 25)
         self._test(HistcInGraph(), "aten::histc", ie_device, precision, ir_version,
                    kwargs_to_prepare_input={"data": data, "dtype": np.float32})
+
+
+# TODO: torch.histc has no integer CPU kernel (CUDA only), so integer inputs are not tested here.
+# Add integer tests compared against torch once GPU support is added.

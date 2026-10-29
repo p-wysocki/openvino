@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include <cmath>
+
 #include "openvino/frontend/pytorch/node_context.hpp"
 #include "openvino/op/histc.hpp"
 #include "utils.hpp"
@@ -25,7 +27,14 @@ OutputVector translate_histc(const NodeContext& context) {
     if (!context.input_is_none(3)) {
         max = context.const_input<double>(3);
     }
-    return {context.mark_node(std::make_shared<v17::Histc>(context.get_input(0), bins, min, max))};
+    const auto data = context.get_input(0);
+    const auto& data_type = data.get_element_type();
+    if (data_type.is_static() && data_type.is_integral_number()) {
+        // torch (CUDA, the only backend with integer histc) casts min/max to the integer type
+        min = std::trunc(min);
+        max = std::trunc(max);
+    }
+    return {context.mark_node(std::make_shared<v17::Histc>(data, bins, min, max))};
 }
 
 }  // namespace ov::frontend::pytorch::op
