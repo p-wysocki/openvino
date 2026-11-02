@@ -51,9 +51,9 @@ static const char* kKernelSrc = R"CL(
 #define EPS   1e-6f
 #define SG    32
 #define RPS   2
+#define RESIDUAL_RPS 1
 #define NUM_L 28
-
-#define THREADS 512
+#define THREADS 1024
 #define TOTAL_WARPS (THREADS/SG)
 
 #include "taskSystem/shared/taskDesc.h"
@@ -64,7 +64,7 @@ static const char* kKernelSrc = R"CL(
 inline void wg_rms2(const __global half* h, const __global half* wn,
                     __global float* out, __local char* slm) {
     uint lid = get_local_id(0), lane = get_sub_group_local_id(), sgl = get_sub_group_id();
-    float2 v = convert_float2(vload2(0, h + lid * 2));
+    float2 v = lid < H/2 ? convert_float2(vload2(0, h + lid * 2)) : (float2)(0.0f);
     float ss = sub_group_reduce_add(dot(v, v));
     __local float* partial = (__local float*)slm;
     if (lane == 0)
@@ -77,8 +77,10 @@ inline void wg_rms2(const __global half* h, const __global half* wn,
             partial[0] = rsqrt(ss / H + EPS);
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    float2 norm = convert_float2(vload2(0, wn + lid * 2));
-    vstore2(v * partial[0] * norm, 0, out + lid * 2);
+    if (lid < H/2) {
+        float2 norm = convert_float2(vload2(0, wn + lid * 2));
+        vstore2(v * partial[0] * norm, 0, out + lid * 2);
+    }
 }
 
 // Load immutable weights before waiting for the shared normalized activation.
@@ -112,24 +114,24 @@ inline void sg_gemv_normalized(const __global float* activation,
 #define NPL (HD/SG)   // head-dim elements handled per subgroup lane (attention)
 
 // Plain subgroup GEMV over an fp16 activation (no fused RMS, no split-K):
-// each subgroup fully reduces RPS output rows. Used for o-proj / down-proj.
+// each subgroup fully reduces RESIDUAL_RPS output rows. Used for o-proj / down-proj.
 inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
                         uint base, uint lane, float* out,
                         volatile __global atomic_int* dependency, int count) {
-    half8 first_low[RPS], first_high[RPS];
-    for (int row=0;row<RPS;row++) {
+    half8 first_low[RESIDUAL_RPS], first_high[RESIDUAL_RPS];
+    for (int row=0;row<RESIDUAL_RPS;row++) {
         const __global ushort* weights=(const __global ushort*)(w+(ulong)(base+row)*IN);
         first_low[row]=as_half8(intel_sub_group_block_read_us8(weights));
         first_high[row]=as_half8(intel_sub_group_block_read_us8(weights+SG*8));
     }
     WaitForSemaphore_block(0,dependency,count);
-    float acc[RPS];
-    for (int r=0; r<RPS; r++) acc[r]=0;
+    float acc[RESIDUAL_RPS];
+    for (int r=0; r<RESIDUAL_RPS; r++) acc[r]=0;
     for (uint blk=0; blk<IN; blk+=SG*16) {
         const __global ushort* ap=(const __global ushort*)(a+blk);
         float8 xlo=convert_float8(as_half8(intel_sub_group_block_read_us8(ap)));
         float8 xhi=convert_float8(as_half8(intel_sub_group_block_read_us8(ap+SG*8)));
-        for (int r=0; r<RPS; r++) {
+        for (int r=0; r<RESIDUAL_RPS; r++) {
             const __global ushort* wp=(const __global ushort*)(w+(ulong)(base+r)*IN+blk);
             float8 ylo=convert_float8(blk==0 ? first_low[r] : as_half8(intel_sub_group_block_read_us8(wp)));
             float8 yhi=convert_float8(blk==0 ? first_high[r] : as_half8(intel_sub_group_block_read_us8(wp+SG*8)));
@@ -137,25 +139,27 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
             acc[r]+=p.s0+p.s1+p.s2+p.s3+p.s4+p.s5+p.s6+p.s7;
         }
     }
-    for (int r=0; r<RPS; r++) out[r]=sub_group_reduce_add(acc[r]);
+    for (int r=0; r<RESIDUAL_RPS; r++) out[r]=sub_group_reduce_add(acc[r]);
 }
 
 // ===========================================================================
-// MEGAKERNEL TASKS: the 28-layer decoder expressed as task-system tasks.
+// MEGAKERNEL TASKS: the 28-layer decoder dispatched from a host-built task queue.
 // Projection tasks preload weights before acquiring their activation dependency.
 // Attention partitions publish FP32 partials; the last partition of each head
 // merges them with acquire-release ordering and signals output readiness.
 // ===========================================================================
-#define SGN 16                                 // sub-groups per work-group (LWS 512 / SG 32)
+#define SGN TOTAL_WARPS
 #define TF  1                                  // GEMV tile coarsening (RPS-groups per lane per task)
-#define NT_AQ (QDIM/(RPS*SGN*TF))              // Stage AQ (Q) tile count       = 64
-#define NT_AK (KVDIM/(RPS*SGN*TF))             // Stage AK (K) tile count       = 32
-#define NT_AV (KVDIM/(RPS*SGN*TF))             // Stage AV (V) tile count       = 32
-#define NT_A (NT_AQ+NT_AK+NT_AV)               // Stage A total tile count      = 128
+#define GEMV_TASK_ROWS 64
+#define GEMV_RESIDUAL_TASK_ROWS 32
+#define NT_AQ (QDIM/GEMV_TASK_ROWS)
+#define NT_AK (KVDIM/GEMV_TASK_ROWS)
+#define NT_AV (KVDIM/GEMV_TASK_ROWS)
+#define NT_A (NT_AQ+NT_AK+NT_AV)
 #define NT_BC (NH+KVH)                          // completed attention heads and cache writes
-#define NT_D  (H/(RPS*SGN*TF))                  // Stage D (o-proj) tile count   = 32
-#define NT_E  (IM/(RPS*SGN*TF))                 // Stage E (gate/up) tile count  = 96
-#define NT_F  (H/(RPS*SGN*TF))                  // Stage F (down) tile count     = 32
+#define NT_D  (H/GEMV_RESIDUAL_TASK_ROWS)
+#define NT_E  (IM/GEMV_TASK_ROWS)
+#define NT_F  (H/GEMV_RESIDUAL_TASK_ROWS)
 #define EMBED_IDX (NUM_L*5)                     // sync slot for the embedding stage
 #define ATTN_SPLITS 2
 #define ATTN_SYNC_IDX (EMBED_IDX+1)
@@ -196,7 +200,8 @@ inline void mk_embed(const MkTask t, __local char* slm) {
     __global const half* hs = c->hs + c->tok_off;
     __global half*       h  = c->h  + c->tok_off;
     uint i = get_local_id(0) * 2;
-    vstore2(vload2(0, hs + i), 0, h + i);
+    if (i < H)
+        vstore2(vload2(0, hs + i), 0, h + i);
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + EMBED_IDX));
 }
 
@@ -211,14 +216,6 @@ inline void mk_normA(const MkTask t, __local char* slm) {
     wg_rms2(c->h+c->tok_off, (post_attention ? c->pn : c->wn)+layer*H, c->nbuf, slm);
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync+(post_attention ? NORM_E_IDX+layer : layer*5)));
 }
-
-// #define GemvBlock_MATRIX_ROWS 2048
-// #define GemvBlock_MATRIX_COLUMNS 1024
-// #define GemvBlock_BLOCK_TILE_ROWS 32
-// #define GemvBlock_PHASE_TILE_ROWS 4
-// #define GemvBlock_COMPUTE_WARPS 4
-// #define GemvBlock_SUFFIX _2048x1024
-// #include "gemvOpt/gemvBlock.hcl"
 
 inline void mk_stageAQ(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
@@ -235,24 +232,8 @@ inline void mk_stageAQ(const MkTask t, __local char* slm) {
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->qb+n);
     }
 
-    // const __global half* vector = c->nbuf;
-    // const __global half* matrix = c->qw + qw_off;
-    // __global half* output = c->qb;
-    // GemvBlock_2048x1024(tile, matrix, vector, output,
-    //                 slm,
-    //                 sem,
-    //                 1);
-
     SignalSemaphore_block(0, sem);
 }
-
-// #define GemvBlock_MATRIX_ROWS 1024
-// #define GemvBlock_MATRIX_COLUMNS 1024
-// #define GemvBlock_BLOCK_TILE_ROWS 32
-// #define GemvBlock_PHASE_TILE_ROWS 8
-// #define GemvBlock_COMPUTE_WARPS 4
-// #define GemvBlock_SUFFIX _1024x1024
-// #include "gemvOpt/gemvBlock.hcl"
 
 inline void mk_stageAK(const MkTask t, __local char* slm) {
     __global const MonoCtx* c = t.ctx;
@@ -268,14 +249,6 @@ inline void mk_stageAK(const MkTask t, __local char* slm) {
         sg_gemv_normalized(c->nbuf, c->kw+kw_off, n, o, sem, 1);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->kb+n);
     }
-
-    // const __global half* vector = c->nbuf;
-    // const __global half* matrix = c->kw + kw_off;
-    // __global half* output = c->kb;
-    // GemvBlock_1024x1024(tile, matrix, vector, output,
-    //                 slm,
-    //                 sem,
-    //                 1);
 
     SignalSemaphore_block(0, sem);
 }
@@ -294,15 +267,6 @@ inline void mk_stageAV(const MkTask t, __local char* slm) {
         sg_gemv_normalized(c->nbuf, c->vw+vw_off, n, o, sem, 1);
         if (l==0) vstore2(convert_half2((float2)(o[0], o[1])), 0, c->vb+n);
     }
-
-    // const __global half* vector = c->nbuf;
-    // const __global half* matrix = c->vw + vw_off;
-    // __global half* output = c->vb;
-
-    // GemvBlock_1024x1024(tile, matrix, vector, output,
-    //                 slm,
-    //                 sem,
-    //                 1);
 
     SignalSemaphore_block(0, sem);
 }
@@ -476,12 +440,12 @@ inline void mk_stageD(const MkTask t, __local char* slm) {
     __global half* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
-        uint n = gi*RPS; float o[RPS];
+        uint n = gi*RESIDUAL_RPS; float o[RESIDUAL_RPS];
         sg_gemv_f16(c->xn, c->ow+ow_off, QDIM, n, l, o,
                 (volatile __global atomic_int*)(c->sync+layer*5+1), NT_BC);
         if (l==0) {
-            float2 v = convert_float2(vload2(0, h+n)) + (float2)(o[0], o[1]);
-            vstore2(convert_half2(v), 0, h+n);
+            for (uint row=0;row<RESIDUAL_RPS;row++)
+                h[n+row]=convert_half(convert_float(h[n+row])+o[row]);
         }
     }
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 2));
@@ -517,13 +481,15 @@ inline void mk_stageF(const MkTask t, __local char* slm) {
     __global half* h = c->h + c->tok_off;
     for (int g = 0; g < TF; g++) {
         uint gi = (uint)tile*(SGN*TF) + (uint)g*SGN + sgl;
-        uint n = gi*RPS; float o[RPS];
+        uint n = gi*RESIDUAL_RPS; float o[RESIDUAL_RPS];
         sg_gemv_f16(c->gbuf, c->dw+dw_off, IM, n, l, o,
                 (volatile __global atomic_int*)(c->sync+layer*5+3), NT_E);
         if (l==0) {
-            float2 v = convert_float2(vload2(0, h+n)) + (float2)(o[0], o[1]);
-            vstore2(convert_half2(v), 0, h+n);
-            if (layer == NUM_L-1) vstore2(v, 0, c->out+c->tok_off+n);
+            for (uint row=0;row<RESIDUAL_RPS;row++) {
+                float value=convert_float(h[n+row])+o[row];
+                h[n+row]=convert_half(value);
+                if (layer==NUM_L-1) c->out[c->tok_off+n+row]=value;
+            }
         }
     }
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 4));
@@ -1102,34 +1068,23 @@ __kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int o
 static constexpr int NUM_L = 28, H_DIM = 1024, KVH = 8, HD = 128;
 static constexpr int NH = 16, IM_DIM = 3072;
 static constexpr int QDIM = NH * HD, KVDIM = KVH * HD;
-static constexpr int RPS = 2;
 static constexpr int MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
 
-// Task-system tiling — mirror of the kernel macros (SGN=16, TF=1).
-static constexpr int SGN = 16, TF = 1;
-static constexpr int NT_AQ = QDIM / (RPS * SGN * TF);   // 64
-static constexpr int NT_AK = KVDIM / (RPS * SGN * TF);  // 32
-static constexpr int NT_AV = KVDIM / (RPS * SGN * TF);  // 32
-static constexpr int NT_A = NT_AQ + NT_AK + NT_AV;      // 128
-static constexpr int NT_BC = NH + KVH;                  // 24
-static constexpr int NT_D = H_DIM / (RPS * SGN * TF);   // 32
-static constexpr int NT_E = IM_DIM / (RPS * SGN * TF);  // 96
-static constexpr int NT_F = H_DIM / (RPS * SGN * TF);   // 32
 static constexpr int ATTN_SPLITS = 2;
 static constexpr int SYNC_N = NUM_L * (6 + NH) + 1;
+static constexpr int GEMV_TASK_ROWS = 64, GEMV_RESIDUAL_TASK_ROWS = 32;
+static constexpr int NT_AQ = QDIM / GEMV_TASK_ROWS;
+static constexpr int NT_AK = KVDIM / GEMV_TASK_ROWS;
+static constexpr int NT_AV = KVDIM / GEMV_TASK_ROWS;
+static constexpr int NT_D = H_DIM / GEMV_RESIDUAL_TASK_ROWS;
+static constexpr int NT_E = IM_DIM / GEMV_TASK_ROWS;
+static constexpr int NT_F = H_DIM / GEMV_RESIDUAL_TASK_ROWS;
 
-// Task-worker launch geometry. Like the old monokernel grid, the worker pool
-// must be co-resident on the device: a consumer task spin-waits on its producer
-// stage's counter, so if a pulled task's producers are not actually scheduled the
-// wait would never complete. The safe worker count depends on this (register- and
-// SLM-heavy) kernel's occupancy, not the device max, so it is tunable via
-// OV_MEGAKERNEL_MONO_WG (default). More workers add parallelism to the GEMV
-// stages up to the co-residency cap; attention has NH*ATTN_SPLITS+KVH tasks.
-// Tuned on the B60 (24 Xe-cores): with the LWS=512 (SGN=16) work-group,
-// worker count controls co-resident GEMV
-// parallelism (more outstanding weight loads => higher HBM utilisation) while
-// staying below the point where shared-cursor atomic_inc contention dominates.
-static constexpr int MONO_WG = 32, MONO_LWS = 512;
+struct MkTaskH {
+    void* ctx;
+    int layer;
+    int tile;
+};
 
 struct PrefillCtxH {
     void* hs = nullptr; void* h = nullptr; void* out = nullptr;
@@ -1183,12 +1138,6 @@ struct PrefillState {
 
 static std::unordered_map<const Qwen06BPOCRuntime*, PrefillState> gPrefillStates;
 
-struct MkTaskH {
-    void* ctx;
-    int layer;
-    int tile;
-};
-
 TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const IPlatformParams* platformParams) {
     const auto* platformParams_ = static_cast<const Qwen06BPlatformParams*>(platformParams);
     ctx_ = platformParams_->context;
@@ -1207,8 +1156,11 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     cl_int err;
     prog_ = clCreateProgramWithSource(ctx_, 1, &kKernelSrc, nullptr, &err);
     assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateProgramWithSource: ", err);
-    const std::string build_options = std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT;  //+
-                                                                                                   //" -igc_opts 'VISAOptions=-hybridRAWithSpill'";
+    char device_name[256]{};
+    const bool is_b60 = clGetDeviceInfo(dev_, CL_DEVICE_NAME, sizeof(device_name), device_name, nullptr) == CL_SUCCESS &&
+                        std::string(device_name).find("B60") != std::string::npos;
+    assert_or_throw(is_b60, "[MegaKernel] decode is validated only on Arc Pro B60");
+    const std::string build_options = std::string("-cl-std=CL3.0 -I ") + TASK_SYSTEM_OPENCL_ROOT;
     err = clBuildProgram(prog_, 1, &dev_, build_options.c_str(), nullptr, nullptr);
     if (err != CL_SUCCESS) {
         size_t n = 0;
@@ -1220,6 +1172,12 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
 
     kTask_ = clCreateKernel(prog_, "mk_task", &err);
     assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateKernel(mk_task): ", err);
+    size_t maximum_work_group = 0;
+    assert_or_throw(clGetKernelWorkGroupInfo(kTask_, dev_, CL_KERNEL_WORK_GROUP_SIZE,
+                                            sizeof(maximum_work_group), &maximum_work_group, nullptr) == CL_SUCCESS,
+                    "[MegaKernel] kernel work-group query failed");
+    assert_or_throw(mDecodeLws_ <= maximum_work_group,
+                    "[MegaKernel] requested decode work-group exceeds compiled kernel limit: ", maximum_work_group);
 
     auto ualloc = [&](size_t bytes) -> void* {
         cl_int st = CL_SUCCESS;
@@ -1238,8 +1196,12 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     // Persistent internal KV cache: [NUM_L, KVH, MAX_SEQ, HD] half, K and V.
     mKC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
     mVC_ = ualloc((size_t)NUM_L * KVH * MAX_SEQ * HD * 2);
-    // Per-(layer,stage) completion counters (+ embedding). Reset each launch.
+    // Stage counters; the task system resets these after each launch.
     mSync_ = ualloc(SYNC_N * sizeof(int));
+    const int zero = 0;
+    assert_or_throw(usmMemFill_(stream_, mSync_, &zero, sizeof(zero), SYNC_N * sizeof(int),
+                               0, nullptr, nullptr) == CL_SUCCESS,
+                    "[MegaKernel] synchronization initialization failed");
     mAttnPartials_ = ualloc(NH * ATTN_SPLITS * (HD + 2) * sizeof(float));
     // Shared per-token context.
     mCtx_ = ualloc(sizeof(MonoCtxH));
@@ -1303,49 +1265,41 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
         clSetKernelExecInfo(kernel, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL, sizeof(enable), &enable);
     }
 
-    // Build the topologically-sorted task queue once. Each task carries the
-    // context pointer plus its (layer, tile); the task `type` selects the stage.
     std::vector<TaskDesc> queue;
     auto push = [&](int type, int layer, int tile) {
-        TaskDesc d{};
-        d.type = type;
-        MkTaskH t{};
-        t.ctx = mCtx_;
-        t.layer = layer;
-        t.tile = tile;
-        static_assert(sizeof(MkTaskH) <= sizeof(d.payload), "MkTask exceeds payload");
-        std::memcpy(d.payload, &t, sizeof(t));
-        queue.push_back(d);
+        TaskDesc descriptor{};
+        descriptor.type = type;
+        const MkTaskH task{mCtx_, layer, tile};
+        static_assert(sizeof(task) <= sizeof(descriptor.payload), "MkTask exceeds payload");
+        std::memcpy(descriptor.payload, &task, sizeof(task));
+        queue.push_back(descriptor);
     };
-    push(0, 0, 0);  // embedding
-    for (int L = 0; L < NUM_L; L++) {
-        push(1, L, 0);
-        for (int tile = 0; tile < NT_AQ; tile++)
-            push(2, L, tile);
-        for (int tile = 0; tile < NT_AK; tile++)
-            push(3, L, tile);
-        for (int tile = 0; tile < NT_AV; tile++)
-            push(4, L, tile);
-        for (int tile = 0; tile < NH * ATTN_SPLITS + KVH; tile++)
-            push(5, L, tile);
-        for (int i = 0; i < NT_D; i++)
-            push(6, L, i);  // Stage D  (o-proj)
-        push(1, L, 1);
-        for (int i = 0; i < NT_E; i++)
-            push(7, L, i);  // Stage E  (gate/up)
-        for (int i = 0; i < NT_F; i++)
-            push(8, L, i);  // Stage F  (down)
+    push(0, 0, 0);
+    for (int layer = 0; layer < NUM_L; ++layer) {
+        push(1, layer, 0);
+        for (int tile = 0; tile < NT_AQ; ++tile)
+            push(2, layer, tile);
+        for (int tile = 0; tile < NT_AK; ++tile)
+            push(3, layer, tile);
+        for (int tile = 0; tile < NT_AV; ++tile)
+            push(4, layer, tile);
+        for (int tile = 0; tile < NH * ATTN_SPLITS + KVH; ++tile)
+            push(5, layer, tile);
+        for (int tile = 0; tile < NT_D; ++tile)
+            push(6, layer, tile);
+        push(1, layer, 1);
+        for (int tile = 0; tile < NT_E; ++tile)
+            push(7, layer, tile);
+        for (int tile = 0; tile < NT_F; ++tile)
+            push(8, layer, tile);
     }
     err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, stream_);
     assert_or_throw(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
-
-    // TaskManager descriptor consumed by the kernel as a __constant buffer.
     mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(taskManager_), &taskManager_, &err);
     assert_or_throw(err == CL_SUCCESS, "[MegaKernel] clCreateBuffer(taskManager): ", err);
-
     assert_or_throw(clSetKernelArg(kTask_, 0, sizeof(cl_mem), &mTaskMgr_) == CL_SUCCESS,
                     "[MegaKernel] set taskManager arg failed");
-    // The tasks reach every data buffer through USM pointers held in the
+    // The workers reach every data buffer through USM pointers held in the
     // context, so allow the kernel to indirectly access any USM allocation
     // (device / host / shared) regardless of how OpenVINO allocated the weights.
     cl_bool enable = CL_TRUE;
@@ -1414,17 +1368,6 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     runtimeContext_.past_pos = io->position_ids;
     runtimeContext_.out = io->hidden_states_out;
     const uint newTokens = io->newTokens;
-
-    // Co-resident worker count (see MONO_WG note). Tunable via env.
-    static const int workers = [] {
-        const char* v = std::getenv("OV_MEGAKERNEL_MONO_WG");
-        int w = v ? atoi(v) : MONO_WG;
-        if (w < 1)
-            w = 1;
-        if (w > 160)
-            w = 160;
-        return w;
-    }();
 
     if (newTokens > 1) {
         assert_or_throw(newTokens <= MAX_SEQ, "[MegaKernel] prefill exceeds KV-cache capacity: ", newTokens);
@@ -1637,18 +1580,16 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         return 0;
     }
 
-    // ===== Task-system path: the whole 28-layer model as one queue of tasks,
-    // launched once per new token. The in-order queue serialises tokens so
+    // ===== Task-system path: the whole 28-layer model launched once per
+    // new token. The in-order queue serialises tokens so
     // token t+1 sees the KV cache written by token t. For each token we refresh
-    // the shared context (pos / token offset) and reset the sync counters, then
-    // launch the worker pool which drains the queue.
+    // the shared context (pos / token offset), then launch the worker pool.
     for (uint t = 0; t < newTokens; t++) {
         runtimeContext_.step = t;
         runtimeContext_.tok_off = t * (unsigned)H_DIM;
         assert_or_throw(usmMemcpy_(stream_, CL_TRUE, mCtx_, &runtimeContext_, sizeof(runtimeContext_), 0, nullptr, nullptr) == CL_SUCCESS,
                 "[MegaKernel] context update failed");
-        // Zero the stage counters and the FIFO cursor before the workers start.
-        size_t g = (size_t)workers * MONO_LWS, l = (size_t)MONO_LWS;
+        size_t g = mDecodeWorkers_ * mDecodeLws_, l = mDecodeLws_;
         cl_int r = clEnqueueNDRangeKernel(stream_, kTask_, 1, nullptr, &g, &l, 0, nullptr, nullptr);
         assert_or_throw(r == CL_SUCCESS, "[MegaKernel] enqueue: ", r);
     }
@@ -1677,22 +1618,22 @@ TErrorcode Qwen06BPOCRuntime::Destroy() {
         gPrefillStates.erase(state_it);
     }
 
-    if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
-        HostReleaseTaskSystem(taskManager_, dev_, ctx_);
-        taskManager_ = {};
-    }
-
     if (kTask_) {
         clReleaseKernel(kTask_);
         kTask_ = nullptr;
     }
+    if (prog_) {
+        clReleaseProgram(prog_);
+        prog_ = nullptr;
+    }
+
     if (mTaskMgr_) {
         clReleaseMemObject(mTaskMgr_);
         mTaskMgr_ = nullptr;
     }
-    if (prog_) {
-        clReleaseProgram(prog_);
-        prog_ = nullptr;
+    if (ctx_ && dev_ && (taskManager_.workQueue || taskManager_.processedTaskCount)) {
+        HostReleaseTaskSystem(taskManager_, dev_, ctx_);
+        taskManager_ = {};
     }
 
     auto free_usm = [&](void*& allocation) {
