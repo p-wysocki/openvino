@@ -55,10 +55,6 @@ private:
     cl_program prog_ = nullptr;
     cl_command_queue stream_ = nullptr;
     cl_kernel kTask_ = nullptr;  // task-system worker kernel (whole model)
-    TaskManager taskManager_{};
-    cl_mem mTaskMgr_ = nullptr;
-    static constexpr size_t mDecodeLws_ = 1024;
-    static constexpr size_t mDecodeWorkers_ = 34;
     // Intel USM extension entry points (resolved in Init).
     clDeviceMemAllocINTEL_fn usmAlloc_ = nullptr;
     clMemFreeINTEL_fn usmFree_ = nullptr;
@@ -77,6 +73,10 @@ private:
     void* mSync_ = nullptr;
     void* mAttnPartials_ = nullptr;
     void* mCtx_ = nullptr;
+    TaskManager taskManager_{};
+    cl_mem mTaskMgr_ = nullptr;
+    static constexpr size_t mDecodeLws_ = 1024;
+    static constexpr size_t mDecodeWorkers_ = 34;
     MonoCtxH runtimeContext_{};
 };
 
