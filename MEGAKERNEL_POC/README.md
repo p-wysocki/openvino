@@ -47,7 +47,7 @@ For a local build, use `./MEGAKERNEL_POC/compile_run_megakernel.sh`. The first r
 
 * MEGAKERNEL_POC/python - contains python tools to e.g. export the model
 
-* MEGAKERNEL_POC/ci_scripts - contains scripts for CI; megakernels.sh lists the megakernels (and their models) tested in CI
+* MEGAKERNEL_POC/ci_scripts - contains scripts for CI;
 
 * MEGAKERNEL_POC/research - contains mini R&D projects to test some of the ideas that megakernel can use, e.g. warp-specialized gemv, preloading, etc
 
