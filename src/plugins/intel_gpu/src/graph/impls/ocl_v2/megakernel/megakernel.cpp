@@ -24,10 +24,10 @@
 #include <vector>
 
 #include "../primitive_ocl_base.hpp"
+#include "iMegakernelTransformation.h"
 #include "intel_gpu/graph/network.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"
-#include "iMegakernelTransformation.h"
 #include "megakernelImpl.h"
 #include "megakernel_inst.h"
 #include "ocl/ocl_engine.hpp"
@@ -88,14 +88,14 @@ public:
         cl_device_id dl_device = eng.get_cl_device().get();
         cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
 
-        const mk::IConstantParams* params = mk::GetMegaKernelConstantParams(&instance);
+        auto params = mk::GetMegaKernelConstantParams(&instance);
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
         mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        mk::TErrorcode rc = megakernelRuntime_->Init(params, &platformParams);
+        mk::TErrorcode rc = megakernelRuntime_->Init(params.get(), &platformParams);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
@@ -108,9 +108,9 @@ public:
 
         for (auto& e : events)
             strm.wait_for_events({e});  // inputs ready before we read them
-            
-        const mk::IRuntimeParams* params = mk::GetMegaKernelRuntimeParams(&instance);
-        mk::TErrorcode rc = megakernelRuntime_->Execute(params);
+
+        auto params = mk::GetMegaKernelRuntimeParams(&instance);
+        mk::TErrorcode rc = megakernelRuntime_->Execute(params.get());
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
         cl_event marker;

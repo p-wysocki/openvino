@@ -181,8 +181,8 @@ static void* usm_raw(cldnn::memory& m) {
 }
 
 
-const mk::IConstantParams* GetMegaKernelConstantParams(cldnn::primitive_inst* prim) {
-    Qwen06BConstantParams* constant_params = new Qwen06BConstantParams();
+std::shared_ptr<const mk::IConstantParams> GetMegaKernelConstantParams(cldnn::primitive_inst* prim) {
+    auto constant_params = std::make_shared<Qwen06BConstantParams>();
     constant_params->q_proj_w =usm_raw(prim->input_memory(5));
     constant_params->k_proj_w = usm_raw(prim->input_memory(6));
     constant_params->v_proj_w = usm_raw(prim->input_memory(7));
@@ -198,8 +198,8 @@ const mk::IConstantParams* GetMegaKernelConstantParams(cldnn::primitive_inst* pr
     return constant_params;
 }
 
-const mk::IRuntimeParams* GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim) {
-    Qwen06BRuntimeParams* runtime_params = new Qwen06BRuntimeParams();
+std::shared_ptr<const mk::IRuntimeParams> GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim) {
+    auto runtime_params = std::make_shared<Qwen06BRuntimeParams>();
     runtime_params->hidden_states = usm_raw(prim->input_memory(0));
     runtime_params->position_ids = usm_raw(prim->input_memory(1));
     runtime_params->hidden_states_out = usm_raw(prim->output_memory(0));

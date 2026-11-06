@@ -15,6 +15,6 @@ class primitive_inst;
 namespace mk {
 bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& model);
 
-const mk::IConstantParams* GetMegaKernelConstantParams(cldnn::primitive_inst* prim);
-const mk::IRuntimeParams* GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim);
+std::shared_ptr<const mk::IConstantParams> GetMegaKernelConstantParams(cldnn::primitive_inst* prim);
+std::shared_ptr<const mk::IRuntimeParams> GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim);
 }  // namespace mk
