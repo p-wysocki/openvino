@@ -27,6 +27,7 @@
 #include "intel_gpu/graph/network.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"
+#include "iMegakernelTransformation.h"
 #include "megakernelImpl.h"
 #include "megakernel_inst.h"
 #include "ocl/ocl_engine.hpp"
@@ -40,34 +41,6 @@ using cldnn::ocl::ocl_event;
 using cldnn::ocl::ocl_stream;
 
 namespace {
-
-void* usm_raw(cldnn::memory& m) {
-    OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
-                    "[MegaKernel] port memory must be a USM allocation for the task-system path");
-    return m.buffer_ptr();
-}
-
-// Lets the megakernel library map graph ports onto its own params without depending on cldnn
-mk::MegakernelIo make_io(cldnn::primitive_inst& instance) {
-    const auto& params = instance.get_typed_desc<cldnn::megakernel>()->attrs.params;
-    mk::MegakernelIo io{};
-    io.ctx = &instance;
-    io.input_ptr = [](void* ctx, int port) {
-        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->input_memory(port));
-    };
-    io.output_ptr = [](void* ctx, int port) {
-        return usm_raw(static_cast<cldnn::primitive_inst*>(ctx)->output_memory(port));
-    };
-    io.input_dim = [](void* ctx, int port, int axis) -> int64_t {
-        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_input_layout(port).get_shape().at(axis);
-    };
-    io.output_dim = [](void* ctx, int port, int axis) -> int64_t {
-        return static_cast<cldnn::primitive_inst*>(ctx)->get_impl_params()->get_output_layout(port).get_shape().at(axis);
-    };
-    io.params = params.data();
-    io.params_size = params.size();
-    return io;
-}
 
 // ---------------------------------------------------------------------------
 // MegaKernelFastImpl
@@ -115,17 +88,14 @@ public:
         cl_device_id dl_device = eng.get_cl_device().get();
         cl_command_queue queue = cldnn::downcast<cldnn::ocl::ocl_stream>(instance.get_network().get_stream()).get_cl_queue().get();
 
-        const mk::MegakernelIo io = make_io(instance);
-        mk::ConstantParamsImpl weights{};
-        mk::TErrorcode rc = FillMegaKernelConstantParams(&weights, &io);
-        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelConstantParams failed: ", rc);
+        const mk::IConstantParams* params = mk::GetMegaKernelConstantParams(&instance);
 
         // Specific to OpenCL platform, but will have to be generalized to any plaform supported by megakernel runtime.
         mk::PlatformParamsImpl platformParams{};
         platformParams.context = ctx;
         platformParams.deviceId = dl_device;
         platformParams.stream = queue;
-        rc = megakernelRuntime_->Init(&weights, &platformParams);
+        mk::TErrorcode rc = megakernelRuntime_->Init(params, &platformParams);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Init failed: ", rc);
     }
 
@@ -138,13 +108,9 @@ public:
 
         for (auto& e : events)
             strm.wait_for_events({e});  // inputs ready before we read them
-
-        const mk::MegakernelIo io = make_io(instance);
-        mk::RuntimeParamsImpl params{};
-        mk::TErrorcode rc = FillMegaKernelRuntimeParams(&params, &io);
-        OPENVINO_ASSERT(rc == 0, "[MegaKernel] FillMegaKernelRuntimeParams failed: ", rc);
-
-        rc = megakernelRuntime_->Execute(&params);
+            
+        const mk::IRuntimeParams* params = mk::GetMegaKernelRuntimeParams(&instance);
+        mk::TErrorcode rc = megakernelRuntime_->Execute(params);
         OPENVINO_ASSERT(rc == 0, "[MegaKernel] runtime Execute failed: ", rc);
 
         cl_event marker;

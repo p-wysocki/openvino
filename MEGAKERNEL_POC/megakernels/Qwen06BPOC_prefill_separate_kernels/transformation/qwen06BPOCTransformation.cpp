@@ -25,12 +25,14 @@
 
 #include "../../iMegakernelTransformation.h"
 #include "../../megakernelTransformationUtils.h"
+#include "qwen06BPOCParams.h"
 
 #include "intel_gpu/op/megakernel.hpp"
 
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/parameter.hpp"
+#include "primitive_inst.h"
 
 namespace mk {
 namespace {
@@ -170,6 +172,39 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
 
     mku::verify_and_dump(m, 1, 0);
     return true;
+}
+
+static void* usm_raw(cldnn::memory& m) {
+    OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
+                    "[MegaKernel] port memory must be a USM allocation for the task-system path");
+    return m.buffer_ptr();
+}
+
+
+const mk::IConstantParams* GetMegaKernelConstantParams(cldnn::primitive_inst* prim) {
+    Qwen06BConstantParams* constant_params = new Qwen06BConstantParams();
+    constant_params->q_proj_w =usm_raw(prim->input_memory(5));
+    constant_params->k_proj_w = usm_raw(prim->input_memory(6));
+    constant_params->v_proj_w = usm_raw(prim->input_memory(7));
+    constant_params->o_proj_w = usm_raw(prim->input_memory(8));
+    constant_params->gate_proj_w = usm_raw(prim->input_memory(9));
+    constant_params->up_proj_w = usm_raw(prim->input_memory(10));
+    constant_params->down_proj_w = usm_raw(prim->input_memory(11));
+    constant_params->input_ln_w = usm_raw(prim->input_memory(12));
+    constant_params->post_attn_ln_w = usm_raw(prim->input_memory(13));
+    constant_params->q_norm_w = usm_raw(prim->input_memory(14));
+    constant_params->k_norm_w = usm_raw(prim->input_memory(15));
+    constant_params->rope_inv_freq = usm_raw(prim->input_memory(16));
+    return constant_params;
+}
+
+const mk::IRuntimeParams* GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim) {
+    Qwen06BRuntimeParams* runtime_params = new Qwen06BRuntimeParams();
+    runtime_params->hidden_states = usm_raw(prim->input_memory(0));
+    runtime_params->position_ids = usm_raw(prim->input_memory(1));
+    runtime_params->hidden_states_out = usm_raw(prim->output_memory(0));
+    runtime_params->newTokens = static_cast<int>(prim->get_impl_params()->get_input_layout(0).get_shape().at(1));
+    return runtime_params;
 }
 
 }  // namespace mk
