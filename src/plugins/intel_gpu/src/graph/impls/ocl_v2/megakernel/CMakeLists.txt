@@ -14,7 +14,7 @@ if(NOT EXISTS "${MEGAKERNEL_IMPLEMENTATION_DIR}/CMakeLists.txt")
 endif()
 
 file(GLOB MEGAKERNEL_TRANSFORMATION_SOURCES
-        "${MEGAKERNEL_IMPLEMENTATION_DIR}/transformation/*.cpp")
+        "${MEGAKERNEL_IMPLEMENTATION_DIR}/ovIntegration/*.cpp")
 if(NOT MEGAKERNEL_TRANSFORMATION_SOURCES)
         message(FATAL_ERROR
                 "Megakernel implementation '${MEGAKERNEL_IMPLEMENTATION}' must provide "

@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "../primitive_ocl_base.hpp"
-#include "iMegakernelTransformation.h"
+#include "iOVIntegration.h"
 #include "intel_gpu/graph/network.hpp"
 #include "intel_gpu/primitives/megakernel.hpp"
 #include "intel_gpu/runtime/memory.hpp"

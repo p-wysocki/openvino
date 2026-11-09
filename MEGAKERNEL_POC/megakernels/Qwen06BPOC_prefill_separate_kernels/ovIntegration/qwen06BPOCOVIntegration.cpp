@@ -23,8 +23,8 @@
 // separate, unmodified OpenVINO model (compile with OV_MEGAKERNEL_DISABLE=1) so
 // the MegaKernel never handles prefill and only decode latency is measured.
 
-#include "../../iMegakernelTransformation.h"
-#include "../../megakernelTransformationUtils.h"
+#include "../../iOVIntegration.h"
+#include "../../ovIntegrationUtils.h"
 #include "qwen06BPOCParams.h"
 
 #include "intel_gpu/op/megakernel.hpp"
