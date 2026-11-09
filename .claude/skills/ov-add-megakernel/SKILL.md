@@ -35,7 +35,7 @@ has an `OPTIMIZATION_LOG.md` with every measured iteration.
 | `megakernels/Qwen06BPOC_prefill_separate_kernels` | Same decode + batched prefill (XMX GEMM, oneDNN matmul interop, batched attention). Read its `OPTIMIZATION_LOG.md` - 50+ measured experiments. |
 | `megakernels/Qwen06BPOC_prefill_megakernel` | Prefill also as a task system; shows why fine-grained tasks lost to separate kernels for prefill. |
 | `megakernels/Gemma4POC` | int4 MoE 26B model. Structural (op-type) matching, exact graph rewrites, per-block MegaKernels (`kind` in params) collapsed into one whole-model persistent kernel, int4 repack at transformation time, cross-barrier weight prefetch, Q32.32 deterministic split-K, DPAS prefill + flash attention, in-kernel barrier profiling. Long header comments explain every decision with measurements. |
-| `megakernels/README.txt`, `iMegakernel*.h`, `megakernelTransformationUtils.h` | The contract every megakernel must satisfy and shared transformation helpers. |
+| `megakernels/README.txt`, `iOVIntegration.h`, `iMegakernelRuntime.h`, `megakernelTransformationUtils.h` | The contract every megakernel must satisfy and shared transformation helpers. |
 | `research/preloading_gemv` | Task system (`taskSystem/`), semaphores, load-warp/compute-warp double-buffered SLM GEMV (`gemvOpt/gemvBlock.hcl`), in-kernel cycle profiling, ISA dump script. |
 | `benchmarks/Qwen3_0_6B` | Standalone C++ harness: runtime without OpenVINO, GPU timestamps, bandwidth vs roofline. |
 
