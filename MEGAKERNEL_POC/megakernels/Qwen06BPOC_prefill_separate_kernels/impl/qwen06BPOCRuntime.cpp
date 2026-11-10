@@ -53,6 +53,7 @@ static const char* kKernelSrc = R"CL(
 #define RPS   2
 #define RESIDUAL_RPS 1
 #define NUM_L 28
+#define VOCAB 151936
 #define THREADS 1024
 #define TOTAL_WARPS (THREADS/SG)
 
@@ -164,6 +165,7 @@ inline void sg_gemv_f16(const __global half* a, const __global half* w, uint IN,
 #define ATTN_SPLITS 2
 #define ATTN_SYNC_IDX (EMBED_IDX+1)
 #define NORM_E_IDX (ATTN_SYNC_IDX+NUM_L*NH)
+#define FINAL_NORM_IDX (NORM_E_IDX+NUM_L)
 #define SLM_BYTES ((2*SGN + SGN*NPL*SG)*4)      // flash-decoding partials (lsm_m/lsm_l/lsm_a)
 
 // Per-token context shared by every task: all base pointers plus the scalars
@@ -185,6 +187,8 @@ typedef struct MonoCtx {
     __global int*         sync;
     __global long*        past_pos;
     __global float*       attn_partials;
+    __global const half*  final_norm;
+    __global const half*  lm_head;
     int  step; uint CS; uint tok_off;
 } MonoCtx;
 
@@ -488,11 +492,27 @@ inline void mk_stageF(const MkTask t, __local char* slm) {
             for (uint row=0;row<RESIDUAL_RPS;row++) {
                 float value=convert_float(h[n+row])+o[row];
                 h[n+row]=convert_half(value);
-                if (layer==NUM_L-1) c->out[c->tok_off+n+row]=value;
             }
         }
     }
     SignalSemaphore_block(0, (volatile __global atomic_int*)(c->sync + layer*5 + 4));
+}
+
+inline void mk_final_norm(const MkTask task, __local char* slm) {
+    __global const MonoCtx* context = task.ctx;
+    WaitForSemaphore_block(0, (volatile __global atomic_int*)(context->sync + (NUM_L-1)*5+4), NT_F);
+    wg_rms2(context->h + context->tok_off, context->final_norm, context->nbuf, slm);
+    SignalSemaphore_block(0, (volatile __global atomic_int*)(context->sync + FINAL_NORM_IDX));
+}
+
+inline void mk_lm_head(const MkTask task, __local char* slm) {
+    __global const MonoCtx* context = task.ctx;
+    uint row = task.tile * GEMV_TASK_ROWS + get_sub_group_id() * RPS;
+    float logits[RPS];
+    sg_gemv_normalized(context->nbuf, context->lm_head, row, logits,
+                       (volatile __global atomic_int*)(context->sync + FINAL_NORM_IDX), 1);
+    if (get_sub_group_local_id() == 0)
+        vstore2((float2)(logits[0], logits[1]), 0, context->out + row);
 }
 
 #include "common/inkernelProfile.hcl"
@@ -510,6 +530,8 @@ inline void ExecuteMkTask(TaskDesc task, __local char* slm) {
         case 6: mk_stageD(t, slm); break;
         case 7: mk_stageE(t, slm); break;
         case 8: mk_stageF(t, slm); break;
+        case 9: mk_final_norm(t, slm); break;
+        case 10: mk_lm_head(t, slm); break;
         default: break;
     }
 }
@@ -540,6 +562,7 @@ typedef struct PrefillCtx {
     __global half* scores;
     __global half* kc; __global half* vc;
     __global const long* positions;
+    __global const half* final_norm;
     uint tokens; uint CS;
 } PrefillCtx;
 
@@ -553,7 +576,7 @@ __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void prefill_rms(__global const PrefillCtx* c, int layer, int post_attn) {
     uint token = get_group_id(0), lid = get_local_id(0);
     __global const half* input = c->h + token * H;
-    __global const half* weight = (post_attn ? c->pn : c->wn) + layer * H;
+    __global const half* weight = layer == NUM_L ? c->final_norm : (post_attn ? c->pn : c->wn) + layer * H;
     __local float sums[256];
     float sum = 0.0f;
     for (uint index = lid; index < H; index += 256) {
@@ -1057,7 +1080,6 @@ __kernel void prefill_elementwise(__global const PrefillCtx* c, int layer, int o
     } else {
         float value = convert_float(c->h[index]) + convert_float(c->proj[index]);
         c->h[index] = convert_half(value);
-        if (layer == NUM_L - 1) c->out[index] = value;
     }
 }
 )CL";
@@ -1071,7 +1093,8 @@ static constexpr int QDIM = NH * HD, KVDIM = KVH * HD;
 static constexpr int MAX_SEQ = 4096;  // capacity of the internal KV cache (per layer/head)
 
 static constexpr int ATTN_SPLITS = 2;
-static constexpr int SYNC_N = NUM_L * (6 + NH) + 1;
+static constexpr int SYNC_N = NUM_L * (6 + NH) + 2;
+static constexpr int VOCAB_SIZE = 151936;
 static constexpr int GEMV_TASK_ROWS = 64, GEMV_RESIDUAL_TASK_ROWS = 32;
 static constexpr int NT_AQ = QDIM / GEMV_TASK_ROWS;
 static constexpr int NT_AK = KVDIM / GEMV_TASK_ROWS;
@@ -1097,10 +1120,11 @@ struct PrefillCtxH {
     void* scores = nullptr;
     void* kc = nullptr; void* vc = nullptr;
     void* positions = nullptr;
+    void* final_norm = nullptr;
     unsigned tokens = 0; unsigned CS = 0;
 };
 
-enum DnnlGemmShape { DNNL_Q, DNNL_KV, DNNL_O, DNNL_MLP, DNNL_DOWN, DNNL_GEMM_SHAPES };
+enum DnnlGemmShape { DNNL_Q, DNNL_KV, DNNL_O, DNNL_MLP, DNNL_DOWN, DNNL_HEAD, DNNL_GEMM_SHAPES };
 
 struct DnnlGemmCall {
     dnnl::memory src;
@@ -1293,6 +1317,10 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
         for (int tile = 0; tile < NT_F; ++tile)
             push(8, layer, tile);
     }
+    push(9, 0, 0);
+    static_assert(VOCAB_SIZE % GEMV_TASK_ROWS == 0);
+    for (int tile = 0; tile < VOCAB_SIZE / GEMV_TASK_ROWS; ++tile)
+        push(10, 0, tile);
     err = HostInitalizeTaskSystem(taskManager_, queue, static_cast<int*>(mSync_), SYNC_N, dev_, ctx_, stream_);
     assert_or_throw(err == CL_SUCCESS, "[MegaKernel] task-system initialization failed: ", err);
     mTaskMgr_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(taskManager_), &taskManager_, &err);
@@ -1333,6 +1361,8 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     runtimeContext_.qn = weights->q_norm_w;
     runtimeContext_.kn = weights->k_norm_w;
     runtimeContext_.rf = weights->rope_inv_freq;
+    runtimeContext_.final_norm = weights->final_norm_w;
+    runtimeContext_.lm_head = weights->lm_head_w;
 
     prefill.host_context.h = mH_;
     prefill.host_context.wn = weights->input_ln_w;
@@ -1358,6 +1388,7 @@ TErrorcode Qwen06BPOCRuntime::Init(const IConstantParams* constantParams, const 
     prefill.host_context.kc = mKC_;
     prefill.host_context.vc = mVC_;
     prefill.host_context.CS = MAX_SEQ;
+    prefill.host_context.final_norm = weights->final_norm_w;
     gPrefillStates.emplace(this, std::move(prefill));
     return 0;
 }
@@ -1366,8 +1397,10 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
     const auto* io = static_cast<const Qwen06BRuntimeParams*>(runtimeParams);
     runtimeContext_.hs = io->hidden_states;
     runtimeContext_.past_pos = io->position_ids;
-    runtimeContext_.out = io->hidden_states_out;
+    runtimeContext_.out = io->logits;
     const uint newTokens = io->newTokens;
+    assert_or_throw(io->logitsTokens == 1 || io->logitsTokens == io->newTokens,
+                    "[MegaKernel] unsupported logits token count");
 
     if (newTokens > 1) {
         assert_or_throw(newTokens <= MAX_SEQ, "[MegaKernel] prefill exceeds KV-cache capacity: ", newTokens);
@@ -1390,7 +1423,7 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
             }
         }
         prefill.host_context.hs = io->hidden_states;
-        prefill.host_context.out = io->hidden_states_out;
+        prefill.host_context.out = io->logits;
         prefill.host_context.positions = io->position_ids;
         prefill.host_context.scores = prefill.scores;
         prefill.host_context.tokens = newTokens;
@@ -1437,20 +1470,21 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
         const bool use_dnnl = std::getenv("OV_MEGAKERNEL_PREFILL_ONEDNN") == nullptr ||
                               std::strcmp(std::getenv("OV_MEGAKERNEL_PREFILL_ONEDNN"), "0") != 0;
         DnnlPrefillPlan* dnnl_plan = nullptr;
-        if (use_dnnl) {
+        {
             auto plan_it = prefill.dnnl_plans.find(newTokens);
             if (plan_it == prefill.dnnl_plans.end()) {
                 auto plan = std::make_unique<DnnlPrefillPlan>();
                 dnnl::primitive_attr attr;
                 auto create_shape = [&](DnnlGemmShape shape, int input_dim, int output_dim) {
+                    const dnnl::memory::dim tokens = shape == DNNL_HEAD ? io->logitsTokens : newTokens;
                     plan->src_descs[shape] = dnnl::memory::desc(
-                        {(dnnl::memory::dim)newTokens, input_dim}, dnnl::memory::data_type::f16,
+                        {tokens, input_dim}, dnnl::memory::data_type::f16,
                         {(dnnl::memory::dim)input_dim, 1});
                     plan->weights_descs[shape] = dnnl::memory::desc(
                         {input_dim, output_dim}, dnnl::memory::data_type::f16,
                         {1, (dnnl::memory::dim)input_dim});
                     plan->dst_descs[shape] = dnnl::memory::desc(
-                        {(dnnl::memory::dim)newTokens, output_dim}, dnnl::memory::data_type::f16,
+                        {tokens, output_dim}, shape == DNNL_HEAD ? dnnl::memory::data_type::f32 : dnnl::memory::data_type::f16,
                         {(dnnl::memory::dim)output_dim, 1});
                     plan->primitives[shape] = dnnl::matmul(dnnl::matmul::primitive_desc(
                         *prefill.dnnl_engine, plan->src_descs[shape], plan->weights_descs[shape],
@@ -1461,8 +1495,9 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
                 create_shape(DNNL_O, QDIM, H_DIM);
                 create_shape(DNNL_MLP, H_DIM, IM_DIM);
                 create_shape(DNNL_DOWN, IM_DIM, H_DIM);
+                create_shape(DNNL_HEAD, H_DIM, VOCAB_SIZE);
 
-                plan->calls.reserve(NUM_L * 7);
+                plan->calls.reserve(NUM_L * 7 + 1);
                 auto offset = [](void* base, size_t elements) {
                     return static_cast<void*>(static_cast<char*>(base) + elements * sizeof(cl_half));
                 };
@@ -1489,6 +1524,8 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
                     add_call(DNNL_MLP, prefill.norm, offset(prefill.host_context.uw, (size_t)layer * IM_DIM * H_DIM), prefill.up);
                     add_call(DNNL_DOWN, prefill.gate, offset(prefill.host_context.dw, (size_t)layer * H_DIM * IM_DIM), prefill.proj);
                 }
+                add_call(DNNL_HEAD, offset(prefill.norm, (size_t)(newTokens - io->logitsTokens) * H_DIM),
+                         runtimeContext_.lm_head, io->logits);
                 if (use_batched_attention) {
                     using dim = dnnl::memory::dim;
                     const dim tokens = newTokens;
@@ -1577,6 +1614,11 @@ TErrorcode Qwen06BPOCRuntime::Execute(const IRuntimeParams* runtimeParams) {
             set_int_arg(prefill.elementwise, 2, 2);
             enqueue_1d(prefill.elementwise, (size_t)newTokens * H_DIM, 256);
         }
+        set_int_arg(prefill.rms, 1, NUM_L);
+        enqueue_1d(prefill.rms, (size_t)newTokens * 256, 256);
+        DnnlGemmCall& head = dnnl_plan->calls.back();
+        head.dst.set_data_handle(io->logits);
+        dnnl_plan->primitives[DNNL_HEAD].execute(*prefill.dnnl_stream, head.arguments);
         return 0;
     }
 

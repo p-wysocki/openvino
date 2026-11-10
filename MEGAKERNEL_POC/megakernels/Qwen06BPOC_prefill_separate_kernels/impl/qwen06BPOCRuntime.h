@@ -35,6 +35,8 @@ struct MonoCtxH {
     void* sync = nullptr;
     void* past_pos = nullptr;
     void* attn_partials = nullptr;
+    void* final_norm = nullptr;
+    void* lm_head = nullptr;
     int step = 0;
     unsigned CS = 0;
     unsigned tok_off = 0;
