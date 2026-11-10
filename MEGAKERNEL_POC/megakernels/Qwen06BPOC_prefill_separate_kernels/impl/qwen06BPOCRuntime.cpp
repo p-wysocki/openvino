@@ -1026,6 +1026,7 @@ __kernel void prefill_attention_softmax(__global const PrefillCtx* c) {
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     maximum = reduction[0];
+    barrier(CLK_LOCAL_MEM_FENCE);
     float denominator = 0.0f;
     for (uint key = lid; key <= token; key += 256)
         denominator += native_exp(convert_float(scores[key]) * rsqrt((float)HD) - maximum);
