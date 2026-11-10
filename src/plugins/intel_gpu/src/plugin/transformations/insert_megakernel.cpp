@@ -7,11 +7,11 @@
 // it belongs to, in MEGAKERNEL_POC/megakernels/<Name>/transformation/. The
 // implementation selected by the MEGAKERNEL_IMPLEMENTATION CMake cache variable
 // is compiled into this plugin and provides the single definition of
-// mk::InsertMegakernelTransformation (see megakernels/iMegakernelTransformation.h).
+// mk::InsertMegakernelTransformation (see megakernels/iOVIntegration.h).
 
 #include "insert_megakernel.hpp"
 
-#include "iMegakernelTransformation.h"
+#include "iOVIntegration.h"
 
 #include <cstdlib>
 

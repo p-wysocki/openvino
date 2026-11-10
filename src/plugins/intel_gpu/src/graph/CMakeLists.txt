@@ -137,6 +137,8 @@ ov_add_target(
         run_codegen_test
 )
 
+target_sources(${TARGET_NAME} PRIVATE ${MEGAKERNEL_TRANSFORMATION_SOURCES})
+
 ov_build_target_faster(${TARGET_NAME} PCH)
 
 target_compile_options(${TARGET_NAME} PRIVATE ${COMMON_COMPILE_OPTIONS})

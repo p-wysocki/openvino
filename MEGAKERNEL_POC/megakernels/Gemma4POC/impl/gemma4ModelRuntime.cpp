@@ -36,6 +36,10 @@ size_t round_up(size_t v, size_t m) {
     return (v + m - 1) / m * m;
 }
 
+cl_int set_embeds_arg(const Gemma4ModelRuntime::Usm& usm, cl_kernel k, cl_uint i, const Gemma4RuntimeParams& p) {
+    return p.in_mem ? clSetKernelArg(k, i, sizeof(cl_mem), &p.in_mem) : usm.set_arg(k, i, p.in);
+}
+
 // Device-side table layouts; must match LayerTab / ModelTab in gemma4ModelKernels.h.
 struct LayerTabH {
     const void *w_in, *qkv, *gq, *gk, *invf, *oproj, *w_pa, *w_pf, *w_r, *w_pf2, *gate, *up, *down, *rw, *egate,
@@ -510,7 +514,7 @@ int Gemma4ModelRuntime::Decode(const Gemma4RuntimeParams& p, int past, int L) {
     const int ns_f = splits(past + 1, 2 * kps_f, max_kv_heads_[1]);
     ++epoch_;
     cl_kernel k = kDecode_;
-    MK_OK(usm_.set_arg(k, 2, p.in), "embeds");
+    MK_OK(set_embeds_arg(usm_, k, 2, p), "embeds");
     MK_OK(usm_.set_arg(k, 3, p.in2), "pos");
     MK_OK(usm_.set_arg(k, 4, p.in3), "am");
     MK_OK(usm_.set_arg(k, 5, p.out), "logits");
@@ -644,7 +648,7 @@ int Gemma4ModelRuntime::Prompt(const Gemma4RuntimeParams& p, int past, int L) {
 
     {
         const int n = T * kHidden;
-        MK_OK(usm_.set_arg(kCvt_, 0, p.in), "cvt in");
+        MK_OK(set_embeds_arg(usm_, kCvt_, 0, p), "cvt in");
         MK_OK(usm_.set_arg(kCvt_, 1, xa), "cvt out");
         MK_OK(clSetKernelArg(kCvt_, 2, sizeof(int), &n), "cvt n");
         const size_t gws = round_up(n, 256), lws = 256;

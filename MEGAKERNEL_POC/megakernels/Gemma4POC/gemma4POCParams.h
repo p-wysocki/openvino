@@ -32,7 +32,7 @@ constexpr int kExperts = 128;
 constexpr int kTopK = 8;
 constexpr int kQuantGroup = 64;
 
-// Graph port order of a kFfn MegaKernel, fixed by gemma4POCTransformation.cpp.
+// Graph port order of a kFfn MegaKernel, fixed by gemma4POCOVIntegration.cpp.
 // Int4 matrices arrive repacked into sub-group records (gemma4Repack.h).
 enum FfnPort : int {
     kFfnO = 0,          // f16 [B,S,KA] attention output (o_proj input)
@@ -136,6 +136,7 @@ public:
 class Gemma4RuntimeParams : public IRuntimeParams {
 public:
     void* in = nullptr;    // kLmHead: f16 [tokens, K]   kFfn: attention output [tokens, ka]   kAttnIn: x
+    cl_mem in_mem = nullptr;  // kModel: inputs_embeds when it is a cl_mem buffer instead of USM (`in` is null)
     void* in2 = nullptr;   // kFfn: residual   kAttnIn: position_ids
     void* in3 = nullptr;   // kModel: attention_mask
     void* in4 = nullptr;   // kModel: token_type_ids

@@ -28,8 +28,8 @@
 // This pass runs after the plugin's RMS and weight-compression fusions, so what
 // is left here is what those passes could not match.
 
-#include "../../iMegakernelTransformation.h"
-#include "../../megakernelTransformationUtils.h"
+#include "../../iOVIntegration.h"
+#include "../../ovIntegrationUtils.h"
 #include "../gemma4POCParams.h"
 #include "../gemma4Repack.h"
 
@@ -37,6 +37,8 @@
 #include "intel_gpu/op/fully_connected_compressed.hpp"
 #include "intel_gpu/op/megakernel.hpp"
 #include "intel_gpu/op/moe_router_fused.hpp"
+#include "intel_gpu/primitives/megakernel.hpp"
+#include "primitive_inst.h"
 
 #include "openvino/core/graph_util.hpp"
 #include "openvino/core/parallel.hpp"
@@ -1395,7 +1397,7 @@ bool collapse_to_model(const std::shared_ptr<ov::Model>& m, bool dbg) {
 }  // namespace
 
 // The rewrites below are mathematically exact and would be valid anywhere, but
-// iMegakernelTransformation.h requires an implementation to leave models it was
+// iOVIntegration.h requires an implementation to leave models it was
 // not written for completely untouched. Gemma-4 is recognised by its 30 layers
 // of paired KV state plus the post-feed-forward norm that Gemma alone has.
 static bool looks_like_gemma4(const ov::NodeVector& ops) {
@@ -1491,6 +1493,111 @@ bool InsertMegakernelTransformation(const std::shared_ptr<ov::Model>& m) {
         }
     }
     return changed;
+}
+
+namespace {
+
+// Repacked qkv records: 36 bytes per row and 64-element group.
+constexpr int64_t kQkvRowBytes = kHidden / kQuantGroup * 36;
+
+Gemma4KindMeta read_kind(cldnn::primitive_inst* prim) {
+    const auto& params = prim->get_typed_desc<cldnn::megakernel>()->attrs.params;
+    OPENVINO_ASSERT(params.size() == sizeof(Gemma4KindMeta), "[Gemma4] unexpected MegaKernel params size");
+    Gemma4KindMeta km;
+    std::memcpy(&km, params.data(), sizeof(km));
+    return km;
+}
+
+void* usm_ptr(cldnn::memory& m) {
+    OPENVINO_ASSERT(cldnn::memory_capabilities::is_usm_type(m.get_allocation_type()),
+                    "[Gemma4] MegaKernel port memory must be a USM allocation");
+    return m.buffer_ptr();
+}
+
+void* in_ptr(cldnn::primitive_inst* prim, int port) {
+    return usm_ptr(prim->input_memory(port));
+}
+
+int in_dim(cldnn::primitive_inst* prim, int port, int axis) {
+    return static_cast<int>(prim->get_impl_params()->get_input_layout(port).get_shape().at(axis));
+}
+
+}  // namespace
+
+std::shared_ptr<const IConstantParams> GetMegaKernelConstantParams(cldnn::primitive_inst* prim) {
+    auto w = std::make_shared<Gemma4ConstantParams>();
+    const Gemma4KindMeta km = read_kind(prim);
+    w->kind = km.kind;
+    switch (km.kind) {
+    case kModel:
+        OPENVINO_ASSERT(km.num_layers <= kModelMaxLayers, "[Gemma4] too many layers: ", km.num_layers);
+        for (int p = kModelMaskMeta; p < kModelLayer0; ++p)
+            w->model[p] = in_ptr(prim, p);
+        w->layers = km.num_layers;
+        for (int l = 0; l < w->layers; ++l) {
+            const int base = kModelLayer0 + l * kModelLayerPorts;
+            for (int p = 0; p < kModelLayerPorts; ++p)
+                w->layer[l][p] = in_ptr(prim, base + p);
+            w->layer_qkv_rows[l] = static_cast<int>(in_dim(prim, base + (kAttnQkv - kAttnWIn), 0) / kQkvRowBytes);
+        }
+        break;
+    case kFfn:
+        for (int p = kFfnWPostAttn; p < kFfnPorts; ++p)
+            w->ffn[p] = in_ptr(prim, p);
+        break;
+    case kAttnIn:
+        for (int p = kAttnWIn; p < kAttnPorts; ++p)
+            w->attn[p] = in_ptr(prim, p);
+        w->attn_rows = static_cast<int>(in_dim(prim, kAttnQkv, 0) / kQkvRowBytes);
+        break;
+    case kMaskFull:
+    case kMaskSliding:
+        w->mask_meta = in_ptr(prim, kMaskMeta);
+        break;
+    default:
+        OPENVINO_THROW("[Gemma4] unknown MegaKernel kind ", km.kind);
+    }
+    return w;
+}
+
+std::shared_ptr<const IRuntimeParams> GetMegaKernelRuntimeParams(cldnn::primitive_inst* prim) {
+    auto p = std::make_shared<Gemma4RuntimeParams>();
+    const int kind = read_kind(prim).kind;
+    p->out = usm_ptr(prim->output_memory(0));
+    if (kind == kModel) {
+        // genai's VLM pipeline hands inputs_embeds in as a plain cl_mem buffer.
+        auto& emb = prim->input_memory(kModelEmbeds);
+        if (cldnn::memory_capabilities::is_usm_type(emb.get_allocation_type()))
+            p->in = emb.buffer_ptr();
+        else
+            p->in_mem = static_cast<cl_mem>(emb.get_internal_params().mem);
+        p->in2 = in_ptr(prim, kModelPos);
+        p->in3 = in_ptr(prim, kModelAm);
+        p->in4 = in_ptr(prim, kModelTti);
+        p->batch = in_dim(prim, kModelEmbeds, 0);
+        p->tokens = in_dim(prim, kModelEmbeds, 1);
+        p->s = p->tokens;
+        p->ka = in_dim(prim, kModelAm, 1);
+        return p;
+    }
+    p->in = in_ptr(prim, 0);
+    // Activation is [B, S, K]; the kernels treat B*S as the token count.
+    p->tokens = in_dim(prim, 0, 0) * in_dim(prim, 0, 1);
+    if (kind == kFfn) {
+        p->in2 = in_ptr(prim, kFfnH);
+        p->ka = in_dim(prim, 0, 2);
+    }
+    if (kind == kAttnIn) {
+        p->in2 = in_ptr(prim, kAttnPos);
+        p->s = in_dim(prim, 0, 1);
+    }
+    if (kind == kMaskFull || kind == kMaskSliding) {
+        p->in2 = in_ptr(prim, kMaskTti);
+        p->tokens = in_dim(prim, kMaskAm, 0);
+        p->ka = in_dim(prim, kMaskAm, 1);
+        p->s = in_dim(prim, kMaskTti, 1);
+    }
+    return p;
 }
 
 }  // namespace mk
