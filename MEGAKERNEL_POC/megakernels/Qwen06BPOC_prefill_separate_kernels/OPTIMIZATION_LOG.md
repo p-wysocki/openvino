@@ -1,6 +1,6 @@
 # Qwen3 0.6B B60 Prefill Optimization Log
 
-## Scope
+## Scope of Original Prefill Work
 
 - Target: Intel Arc Pro B60, Qwen3 0.6B, batch size 1.
 - Changed only the multi-token prefill path in `impl/qwen06BPOCRuntime.cpp`.
@@ -9,6 +9,62 @@
 - Validation command: `bash compile_run_megakernel.sh`.
 
 The B60 reports 160 compute units, a maximum work-group size of 1024, 128 KiB of local memory, and support for `cl_intel_subgroup_matrix_multiply_accumulate`.
+
+## Decode LM Head Integration (2026-11-10)
+
+Extended the decode task queue with final RMS normalization and 2374 vocabulary
+projection tasks (64 rows each). Both execute inside the existing `mk_task`
+launch, after all final-layer residual tiles complete. Accumulation is FP32;
+the original FP16 normalization and tied embedding/head weights are not repacked
+or quantized. No separate decode LM-head kernel is launched.
+
+The transformation now replaces the LM-head output rather than the final
+decoder residual. It validates the head/norm constants and accepts both the
+full-sequence path and last-token StridedSlice paths, including GenAI's
+`[-1:-2:-1]` slice. Prefill retains its separate-kernel design, with final RMS
+normalization and a cached oneDNN head projection. Output buffers are rebound
+on every request, and only the selected tokens are projected.
+
+Verification on GPU.1 (Arc Pro B60), using local-build Python bindings:
+
+```bash
+MEGAKERNEL_QUICK_TIMEOUT=900 ./MEGAKERNEL_POC/scripts/compile_run_megakernel.sh \
+  --quick --frameworks decode_only optimum genai --tokens 100
+```
+
+| Framework | Prompt tokens reported by harness | Baseline decode ms/token | MK decode ms/token | Decode speedup | Baseline/MK TTFT ms |
+|---|---:|---:|---:|---:|---:|
+| Native decode | 19 | 5.235 | 3.629 | 1.44x | Not timed |
+| Optimum | 19 | 7.326 | 4.581 | 1.60x | 15.227 / 7.695 |
+| Optimum | 58 | 7.749 | 4.692 | 1.65x | 18.149 / 12.259 |
+| Optimum | 281 | 7.418 | 4.849 | 1.53x | 39.187 / 43.761 |
+| Optimum | 3290 | 10.827 | 6.150 | 1.76x | 433.177 / 478.083 |
+| GenAI | 19 | 6.046 | 4.414 | 1.37x | 17.113 / 5.782 |
+| GenAI | 58 | 5.901 | 4.055 | 1.46x | 16.270 / 6.678 |
+| GenAI | 281 | 6.051 | 4.124 | 1.47x | 15.933 / 14.695 |
+| GenAI | 3290 | 9.070 | 5.008 | 1.81x | 160.709 / 199.850 |
+
+All three frameworks reported one inserted MegaKernel and zero KV-cache Assign
+sinks with `OV_MEGAKERNEL_DUMP=1`. The transformed graph has no remaining
+LM-head MatMul/FullyConnected or final RMS operation; only precision conversions
+connect MegaKernel logits to the result. Graphviz is not installed, so the raw
+DOT graph was inspected without SVG rendering.
+
+Accuracy: native decode matched argmax with cosine 1.0000; native and all
+Optimum generated texts matched. GenAI short/medium texts matched, but long and
+very-long texts differed. Identical-token diagnostics against GPU baseline and
+CPU FP32 reference showed cosine above 0.99998 over the checked prefixes. For
+the long prompt, the first divergent token was a near tie: baseline logits for
+`F`/`Okay` were 22.85509/22.85187, versus 22.85473/22.86295 for MK; CPU FP32
+favored `F` (22.87062/22.85103). At that step cosine was 0.9999949, and RMSE to
+CPU was 0.00816 for baseline and 0.01065 for MK. Exact long-prompt text parity
+is therefore not claimed. Long-prefill latency also remains below baseline
+performance in several cases, as shown above.
+
+The GenAI harness passes already templated text to a pipeline which templates
+it again by default: its actual long/very-long inputs are 289/3298 tokens, not
+the reported 281/3290. Diagnostics reproduced this input exactly; the benchmark
+was not changed to hide the text differences.
 
 ## Baseline
 
