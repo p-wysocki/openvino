@@ -626,7 +626,6 @@ def genai_worker(args) -> list[dict]:
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     t0 = time.perf_counter()
     # CACHE_DIR="" disables the compiled-model blob cache (see optimum_worker).
-    # Baseline uses GenAI's default PagedAttention backend.
     pipeline_kwargs: dict = {"CACHE_DIR": ""}
     pipeline_kwargs["ATTENTION_BACKEND"] = "SDPA"
     vlm = is_vlm_layout(args.model_dir)
@@ -642,8 +641,7 @@ def genai_worker(args) -> list[dict]:
     cfg.min_new_tokens = args.tokens
     cfg.do_sample = False
     cfg.num_beams = 1
-    if vlm and hasattr(cfg, "apply_chat_template"):
-        cfg.apply_chat_template = False  # prompts below are already templated
+    cfg.apply_chat_template = False
 
     def run(text):
         return pipe.generate(text, generation_config=cfg) if vlm else pipe.generate([text], cfg)
@@ -658,18 +656,27 @@ def genai_worker(args) -> list[dict]:
 
         ttft_ms, tpot_ms, tput = [], [], []
         gen_text = ""
+        generated_texts = set()
         for _ in range(args.gen_iters):
             res = run(text)
             pm = res.perf_metrics
+            actual_prompt_len = pm.get_num_input_tokens()
+            if actual_prompt_len != prompt_len:
+                raise RuntimeError(
+                    f"GenAI input token count differs for {prompt['name']}: "
+                    f"expected {prompt_len}, got {actual_prompt_len}"
+                )
             ttft_ms.append(pm.get_ttft().mean)
             tpot_ms.append(pm.get_tpot().mean)     # decode: mean ms / output token
             tput.append(pm.get_throughput().mean)
             gen_text = res.texts[0] if getattr(res, "texts", None) else str(res)
+            generated_texts.add(gen_text)
 
         tpot_mean = statistics.mean(tpot_ms)
         actual_n_tok = res.perf_metrics.get_num_generated_tokens()
         results.append({
             "prompt": prompt["name"],
+            "unique_outputs": len(generated_texts),
             "prompt_len": prompt_len,
             "prefill_ms": statistics.mean(ttft_ms),
             "n_tok": actual_n_tok,
@@ -738,6 +745,10 @@ def cosine(a: list[float], b: list[float]) -> float:
 def _maybe_print_text(base: list[dict], mega: list[dict]) -> None:
     """Print generated text only when baseline and megakernel outputs differ."""
     for b, m in zip(base, mega):
+        for path, result in (("baseline", b), ("megakernel", m)):
+            if result.get("unique_outputs", 1) > 1:
+                print(f"  *** NON-REPEATABLE OUTPUT [{b['prompt']}/{path}]: "
+                      f"{result['unique_outputs']} distinct measured outputs ***")
         bt = (b.get("text") or "").strip()
         mt = (m.get("text") or "").strip()
         if bt != mt:
