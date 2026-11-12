@@ -14,8 +14,7 @@ endif()
 
 add_library(${TARGET_NAME} SHARED
     megakernelImpl.cpp
-    impl/gemma4POCRuntime.cpp
-    impl/gemma4ModelRuntime.cpp)
+    impl/gemma4POCRuntime.cpp)
 add_library(megakernel::${TARGET_NAME} ALIAS ${TARGET_NAME})
 
 include(GenerateExportHeader)

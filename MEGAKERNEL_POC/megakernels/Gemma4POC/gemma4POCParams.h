@@ -33,7 +33,7 @@ constexpr int kTopK = 8;
 constexpr int kQuantGroup = 64;
 
 // Graph port order of a kFfn MegaKernel, fixed by gemma4POCOVIntegration.cpp.
-// Int4 matrices arrive repacked into sub-group records (gemma4Repack.h).
+// Int4 matrices arrive repacked into sub-group records (repack_row_blocks).
 enum FfnPort : int {
     kFfnO = 0,          // f16 [B,S,KA] attention output (o_proj input)
     kFfnH,              // f16 [B,S,H]  residual entering the layer
@@ -65,7 +65,7 @@ enum AttnPort : int {
     kAttnQkv,           // u8 records    q|k|v projection rows [R,H]
     kAttnWQ,            // f16 [D]       q_norm
     kAttnWK,            // f16 [D]       k_norm
-    kAttnMeta,          // i32 [16]      see attn_post in gemma4FfnKernels.h
+    kAttnMeta,          // i32 [16]      see attn_post in kFfnSource
     kAttnInvFreq,       // f32 [C/2]     rotary_emb inv_freq
     kAttnPorts
 };
@@ -76,7 +76,7 @@ constexpr int kAttnMaxRows = 16384;
 enum MaskPort : int {
     kMaskAm = 0,        // i32/i64 [B,L] attention_mask
     kMaskTti,           // i32/i64 [B,S] token_type_ids
-    kMaskMeta,          // f32 [16]      see mask_fill in gemma4FfnKernels.h
+    kMaskMeta,          // f32 [16]      see mask_fill in kFfnSource
     kMaskPorts
 };
 
