@@ -15,8 +15,6 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      # One entry per megakernel: its folder in MEGAKERNEL_POC/megakernels, the model it is
-      # written for, and extra args for convert_to_openvino_ir.py / e2e_performance_measurement.py.
       matrix:
         include:
           - megakernel: Qwen06BPOC_prefill_separate_kernels

@@ -1,32 +1,8 @@
+
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// MegaKernel graph transformation for Gemma-4-26B-A4B-it.
-//
-// WHY THESE TARGETS
-// -----------------
-// A decode step on B60 costs 11.8 ms wall for only 8.5 ms of summed device time
-// spread over 1002 kernels. The missing 3.3 ms is submission, not compute: a
-// perf profile of the decode loop alone puts 63% of host CPU in the NEO driver
-// (half of that spinning in clFinish) and only 18% in the GPU plugin. The host
-// cannot feed ~1000 enqueues faster than the GPU drains the small ones, so wall
-// time tracks the PRIMITIVE COUNT, not FLOPs or bytes. Removing 109 primitives
-// was measured to be worth 0.5 ms, i.e. ~4.6 us of wall time each.
-//
-// Consequences, all measured rather than assumed:
-//   * lm_head (1.9 ms, one kernel) runs at ~85% of the memory roofline; a
-//     hand-written replacement was tried and measured SLOWER, so it is not
-//     part of this pass.
-//   * MOECompressed is 0.3 ms over 30 kernels; already fused upstream.
-//   * The int4 projections are 2-3x off roofline but are only 156 kernels.
-//   * ~530 of the 1002 kernels are norms and element-wise glue moving a few KB
-//     each. That is what this pass attacks.
-// Things that sound promising and are not: an in-order command queue
-// (OV_GPU_QUEUE_TYPE=in-order) is a no-op, and reshaping the model to a static
-// one-token shape buys only 3%.
-//
-// This pass runs after the plugin's RMS and weight-compression fusions, so what
-// is left here is what those passes could not match.
+
 
 #include "../../iOVIntegration.h"
 #include "../../ovIntegrationUtils.h"

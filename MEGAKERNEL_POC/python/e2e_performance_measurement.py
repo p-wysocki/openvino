@@ -1,4 +1,4 @@
-"""End-to-end MegaKernel decode performance measurement.
+honest"""End-to-end MegaKernel decode performance measurement.
 
 Usage
 -----
@@ -463,10 +463,6 @@ def decode_only_worker(args) -> list[dict]:
         req.infer(decode_input)
     lat = []
     if args.decode_mode == "greedy":
-        # Real autoregressive decode from a fresh request: every step feeds the
-        # previous argmax. Only infer() is timed. For MoE models this is the
-        # honest number - repeating one token routes every step to the same
-        # experts, which the GPU caches serve far faster than real decoding.
         greq = compiled.create_infer_request()
         r = greq.infer(prefill_inputs(feeder, ids))
         cur = int(np.array(r[0])[0, -1, :].argmax())
