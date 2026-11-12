@@ -7,7 +7,7 @@ build_dir="${repo_root}/build"
 venv_dir="${build_dir}/venv"
 model_id="${MODEL_ID:-Qwen/Qwen3-0.6B}"
 model_name="${model_id##*/}"
-model_dir="${repo_root}/MEGAKERNEL_POC/python/${model_name,,}-openvino-ir"
+model_dir="${MODELS_DIR:-${repo_root}/MEGAKERNEL_POC/python}/${model_name,,}-openvino-ir"
 
 main() {
     python3 -m venv --system-site-packages "${venv_dir}"

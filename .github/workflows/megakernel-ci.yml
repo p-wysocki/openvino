@@ -28,6 +28,9 @@ jobs:
       MODEL_ID: ${{ matrix.model_id }}
       EXPORT_ARGS: ${{ matrix.export_args }}
       E2E_ARGS: ${{ matrix.e2e_args }}
+      # Exported IRs persist across runs.
+      MODELS_HOST_DIR: /opt/home/sys_ovwindev/megakernel_models
+      MODELS_DIR: /models
     steps:
       - name: Cleanup workspace
         if: always()
@@ -48,8 +51,9 @@ jobs:
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
+            -v "$MODELS_HOST_DIR:$MODELS_DIR" \
             -w /workspace/repo \
-            -e GITHUB_TOKEN -e MEGAKERNEL -e MODEL_ID -e EXPORT_ARGS \
+            -e GITHUB_TOKEN -e MEGAKERNEL -e MODEL_ID -e EXPORT_ARGS -e MODELS_DIR \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
@@ -71,8 +75,9 @@ jobs:
         run: |
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
+            -v "$MODELS_HOST_DIR:$MODELS_DIR:ro" \
             -w /workspace/repo \
-            -e MODEL_ID -e E2E_ARGS \
+            -e MODEL_ID -e E2E_ARGS -e MODELS_DIR \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
