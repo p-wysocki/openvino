@@ -9,9 +9,27 @@ on:
 
 jobs:
   Megakernel-CI:
+    name: Megakernel-CI (${{ matrix.megakernel }})
     runs-on: self-hosted
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      # One entry per megakernel: its folder in MEGAKERNEL_POC/megakernels, the model it is
+      # written for, and extra args for convert_to_openvino_ir.py / e2e_performance_measurement.py.
+      matrix:
+        include:
+          - megakernel: Qwen06BPOC_prefill_separate_kernels
+            model_id: Qwen/Qwen3-0.6B
+          - megakernel: Gemma4POC
+            model_id: google/gemma-4-26B-A4B-it
+            export_args: --task image-text-to-text --weight-format int4
+            e2e_args: --decode-mode greedy
+    env:
+      MEGAKERNEL: ${{ matrix.megakernel }}
+      MODEL_ID: ${{ matrix.model_id }}
+      EXPORT_ARGS: ${{ matrix.export_args }}
+      E2E_ARGS: ${{ matrix.e2e_args }}
     steps:
       - name: Cleanup workspace
         if: always()
@@ -33,7 +51,7 @@ jobs:
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
             -w /workspace/repo \
-            -e GITHUB_TOKEN \
+            -e GITHUB_TOKEN -e MEGAKERNEL -e MODEL_ID -e EXPORT_ARGS \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
@@ -56,6 +74,7 @@ jobs:
           docker run --rm \
             -v "$WORKSPACE_REPO:/workspace/repo" \
             -w /workspace/repo \
+            -e MODEL_ID -e E2E_ARGS \
             --device /dev/dri --group-add=$(stat -c "%g" /dev/dri/render* | sort -u) \
             ci_megakernel_image \
             bash -lc '
