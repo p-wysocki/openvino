@@ -1,4 +1,4 @@
-honest"""End-to-end MegaKernel decode performance measurement.
+"""End-to-end MegaKernel decode performance measurement.
 
 Usage
 -----
