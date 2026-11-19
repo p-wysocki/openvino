@@ -4007,12 +4007,6 @@ int Gemma4ModelRuntime::Init(const Gemma4ConstantParams& w, cl_context ctx, cl_d
                          (unsigned long long)spill, (unsigned long long)slm, (unsigned long long)priv);
         }
     }
-    // mk_decode reaches every weight through the tables.
-    cl_bool on = CL_TRUE;
-    clSetKernelExecInfo(kDecode_, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL, sizeof(on), &on);
-    clSetKernelExecInfo(kDecode_, CL_KERNEL_EXEC_INFO_INDIRECT_HOST_ACCESS_INTEL, sizeof(on), &on);
-    clSetKernelExecInfo(kDecode_, CL_KERNEL_EXEC_INFO_INDIRECT_SHARED_ACCESS_INTEL, sizeof(on), &on);
-    clSetKernelExecInfo(kLmRows_, CL_KERNEL_EXEC_INFO_INDIRECT_DEVICE_ACCESS_INTEL, sizeof(on), &on);
 
     // Decode scratch.
     const int p_max = nwg_ * 16 * 2 / std::max(1, hq_min);
@@ -4171,6 +4165,25 @@ int Gemma4ModelRuntime::UploadTables() {
     mt->kmask = kmask_;
     MK_OK(usm_.memcpy(q_, CL_TRUE, ltab_, hltab_.data(), hltab_.size(), 0, nullptr, nullptr), "upload layer table");
     MK_OK(usm_.memcpy(q_, CL_TRUE, tab_, htab_.data(), htab_.size(), 0, nullptr, nullptr), "upload model table");
+
+    // mk_decode and mk_lm_head_rows reach these allocations through the tables.
+    // Naming them, instead of INDIRECT_DEVICE_ACCESS, keeps the driver from
+    // making every allocation of the context resident: with multi-GB prompt
+    // logits buffers next to the weights that failed with CL_OUT_OF_RESOURCES.
+    std::vector<void*> lm = {w_.model[kModelFinalNorm], w_.model[kModelLmW], w_.model[kModelLmScale],
+                             w_.model[kModelLmZp]};
+    std::vector<void*> all = lm;
+    all.insert(all.end(), {scratch_, kmask_});
+    if (prof_)
+        all.push_back(prof_);
+    for (int l = 0; l < nl_; ++l) {
+        const auto* p = reinterpret_cast<void* const*>(&lt[l]);
+        all.insert(all.end(), p, p + offsetof(LayerTabH, R) / sizeof(void*));
+    }
+    MK_OK(clSetKernelExecInfo(kDecode_, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL, all.size() * sizeof(void*), all.data()),
+          "mk_decode USM pointers");
+    MK_OK(clSetKernelExecInfo(kLmRows_, CL_KERNEL_EXEC_INFO_USM_PTRS_INTEL, lm.size() * sizeof(void*), lm.data()),
+          "mk_lm_head_rows USM pointers");
     return CL_SUCCESS;
 }
 
